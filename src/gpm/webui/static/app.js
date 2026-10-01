@@ -43,7 +43,22 @@ async function api(path, opts) {
   return r.json();
 }
 let toastTimer;
-function toast(msg) { const el = $('#toast'); el.textContent = msg; el.classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.add('hidden'), 2500); }
+// kind: 'ok' | 'err' | 'info'（不传时按文案自动判断：失败/错误 → 红）
+function toast(msg, kind) {
+  const el = $('#toast');
+  let k = kind;
+  if (!k) {
+    const s = String(msg);
+    if (s.startsWith('失败') || s.includes('错误') || s.includes('❌')) k = 'err';
+    else if (s.includes('✅') || s.includes('成功')) k = 'ok';
+    else k = 'info';
+  }
+  el.className = k === 'err' ? 'toast-err' : (k === 'ok' ? 'toast-ok' : '');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add('hidden'), 2800);
+}
 function chart(id, option, onClick) {
   const el = document.getElementById(id);
   if (!el) return;
@@ -860,7 +875,7 @@ function renderSlaIncidents(d) {
       + '<td class="num">' + (i.duration_ms ? fmtDur(Math.round(i.duration_ms / 1000)) : '(进行中)') + '</td>'
       + '<td style="color:var(--muted)">' + reason(i) + '</td>'
       + '<td>' + (i.reopen_count ? '<span class="badge b-off">抖动合并 ' + i.reopen_count + '</span>' : '') + '</td></tr>').join('');
-    return '<tr style="cursor:pointer" title="点击展开/收起该目标的每次事件" onclick="toggleEvGroup(' + gi + ')">'
+    return '<tr class="ev-group" style="cursor:pointer" title="点击展开/收起该目标的每次事件" onclick="toggleEvGroup(' + gi + ')">'
       + '<td>' + kindBadge(g.kind) + '</td>'
       + '<td style="color:var(--fg-strong2)">' + esc(g.title)
       + (g.count > 1 ? ' <span class="badge b-warn">' + g.count + ' 次</span>' : '')

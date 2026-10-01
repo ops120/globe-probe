@@ -17,6 +17,9 @@
   --ok:#30a46c; --ok-fg:#4cc38a; --fail:#e5484d; --fail-fg:#f2666b;
   --warn:#f5a524; --warn-fg:#f5b74e; --mono:#9ecb8f; --b-mtr-fg:#b9a3fb; --nodata:#555a64;
   --row-hover:#1a1d22; --toast-bg:#23272c; --note-fg:#8fb4e8;
+  /* 提示条：两个主题都用深底，所以前景/边框必须独立于主题的 fg 变量，否则白天主题会「深底深字」 */
+  --toast-fg:#f2f5f9; --toast-bd:rgba(255,255,255,.16);
+  --toast-ok-bg:#1f5c3d; --toast-err-bg:#7d2b2e; --toast-info-bg:#23272c;
   --mask:rgba(6,8,10,.62); --shadow:rgba(0,0,0,.5);
   --chart-label:#9aa2ad; --axis:#3a3f46; --split:#202329; --chart-bg:#14161a;
   --heat-0:#1d3a2a; --heat-1:#2ea36b; --heat-2:#e8c547; --heat-3:#e5484d;
@@ -32,6 +35,8 @@ body.light{
   --ok:#1f8a53; --ok-fg:#1f8a53; --fail:#d13b40; --fail-fg:#c9302f;
   --warn:#b26a00; --warn-fg:#a86a00; --mono:#1f7a45; --b-mtr-fg:#6f4fd0; --nodata:#9aa3ae;
   --row-hover:#f6f8fb; --toast-bg:#2c323b; --note-fg:#245a9e;
+  --toast-fg:#ffffff; --toast-bd:rgba(255,255,255,.2);
+  --toast-ok-bg:#1f6b48; --toast-err-bg:#8c3134; --toast-info-bg:#2c323b;
   --mask:rgba(20,26,34,.38); --shadow:rgba(15,23,42,.18);
   --chart-label:#6b7480; --axis:#cfd6e0; --split:#eceff3; --chart-bg:#f7f9fb;
   --heat-0:#d8f3e3; --heat-1:#5cc98c; --heat-2:#e0b23c; --heat-3:#e0555a;
@@ -162,7 +167,9 @@ body.light .code-inline{color:var(--fg)}
 .fcheck span{line-height:1.35}
 .form-row input[type=text],.form-row select,.form-row textarea{flex:1}
 textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(--fg);border-radius:6px;padding:6px 10px;font-size:12px;font-family:inherit;outline:none;width:100%}
-#toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:var(--toast-bg);border:1px solid var(--bd-2);color:var(--fg-2);padding:8px 20px;border-radius:8px;font-size:12px;z-index:99;box-shadow:0 6px 20px var(--shadow)}
+#toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:var(--toast-info-bg);border:1px solid var(--toast-bd);color:var(--toast-fg);padding:9px 20px;border-radius:8px;font-size:13px;font-weight:500;letter-spacing:.2px;z-index:99;box-shadow:0 8px 24px var(--shadow);max-width:70vw;text-align:center}
+#toast.toast-ok{background:var(--toast-ok-bg)}
+#toast.toast-err{background:var(--toast-err-bg)}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:var(--bd);border-radius:5px}
 </style>
@@ -474,7 +481,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=26"></script>
-<script src="/static/app.js?v=26"></script>
+<script src="/static/echarts.min.js?v=28"></script>
+<script src="/static/app.js?v=28"></script>
 </body>
 </html>

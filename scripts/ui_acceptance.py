@@ -53,6 +53,34 @@ def wait_rows(page, selector, timeout=8000):
         return False
 
 
+def wait_count(page, selector, minimum=1, timeout=20000, step=300):
+    """轮询等待选择器下的元素数量达到 minimum。
+
+    数据量大时（几十条告警、几百条事件）渲染明显变慢，固定 sleep 会偶发假失败；
+    也不能用 wait_for_selector 的默认可见性判定（滚动容器里的表格常被判不可见）。
+    """
+    waited = 0
+    n = page.locator(selector).count()
+    while n < minimum and waited < timeout:
+        page.wait_for_timeout(step)
+        waited += step
+        n = page.locator(selector).count()
+    return n
+
+
+def wait_text(page, selector, contains=(), absent=(), timeout=12000, step=300):
+    """轮询等待元素文本满足条件（渲染/重画是异步的，固定 sleep 会偶发假失败）。"""
+    t = page.text_content(selector) or ""
+    waited = 0
+    while waited < timeout:
+        if all(c in t for c in contains) and not any(a in t for a in absent):
+            return t
+        page.wait_for_timeout(step)
+        waited += step
+        t = page.text_content(selector) or ""
+    return t
+
+
 def wait_modal(page):
     page.wait_for_selector("#modal-mask:not(.hidden)", timeout=8000)
     page.wait_for_timeout(250)
@@ -123,9 +151,9 @@ def main() -> int:
                       "24h 平均可用率已加载")
                 ck.ok(wait_rows(page, "#ov-task-body tr"), "任务状态表有数据")
             if name == "task":
-                ck.ok(page.locator("#page-task canvas").count() >= 1, "任务页图表已渲染(canvas)")
+                ck.ok(wait_count(page, "#page-task canvas") >= 1, "任务页图表已渲染(canvas)")
                 ck.ok((page.input_value("#task-select") or "") != "", "任务页已选中任务")
-                ck.ok(page.locator("#chart-uptime canvas").count() >= 1, "通断条带已渲染")
+                ck.ok(wait_count(page, "#chart-uptime canvas") >= 1, "通断条带已渲染")
             if name == "geo":
                 # 地图要等 world.json + flows 两次异步加载，先等 canvas 出现再断言
                 try:
@@ -153,8 +181,7 @@ def main() -> int:
                 ck.ok("可用率 ≥ 99%" in lg and "无数据 / 离线" in lg, "图例含节点可用率四档")
                 ck.ok("探测正常" in lg and "探测失败" in lg and "箭头方向" in lg, "图例含链路三色与箭头方向")
                 page.click('#geo-metric button[data-k="status"]')
-                page.wait_for_timeout(1200)
-                lg2 = page.text_content("#geo-legend") or ""
+                lg2 = wait_text(page, "#geo-legend", contains=("在线",), absent=("可用率 ≥ 99%",))
                 ck.ok("在线" in lg2 and "可用率 ≥ 99%" not in lg2, "图例随「按在线状态」切换")
                 page.click('#geo-metric button[data-k="avail"]')
                 page.wait_for_timeout(1000)
@@ -178,9 +205,8 @@ def main() -> int:
                 # 表里可能已有真实 Token（用户建的）也可能是空态提示行，统一按「有行」判定已加载
                 ck.ok(page.locator("#tok-tbl tbody tr").count() >= 1, "Token 表已加载")
             if name == "tasks":
-                loaded = wait_rows(page, "#task-mgr-tbl tbody tr")
-                rows = page.locator("#task-mgr-tbl tbody tr").count()
-                ck.ok(loaded and rows >= 1, f"任务表格有数据（{rows} 行）")
+                rows = wait_count(page, "#task-mgr-tbl tbody tr")   # 渲染异步，轮询等待
+                ck.ok(rows >= 1, f"任务表格有数据（{rows} 行）")
             shot(name)
 
         # ---- 历史对比：指标切换 + 无对比数据时说明原因 ----
@@ -219,30 +245,31 @@ def main() -> int:
         page.click('nav a[data-page="alerts"]')
         wait_page(page, "alerts")
         page.wait_for_timeout(1500)
-        ck.ok(page.locator("#sla-cards .card").count() == 4, "SLA 报表四张指标卡已渲染")
+        ck.ok(wait_count(page, "#sla-cards .card", 4) == 4, "SLA 报表四张指标卡已渲染")
         sla_txt = page.text_content("#sla-cards") or ""
         ck.ok(("可用率" in sla_txt) and ("事件" in sla_txt), "SLA 卡片含可用率与事件")
-        ck.ok(page.locator("#sla-tasks tbody tr").count() >= 1, "SLA 按任务表有数据行")
-        ck.ok(page.locator("#sla-nodes tbody tr").count() >= 1, "SLA 按节点表有数据行")
+        ck.ok(wait_count(page, "#sla-tasks tbody tr") >= 1, "SLA 按任务表有数据行")
+        ck.ok(wait_count(page, "#sla-nodes tbody tr") >= 1, "SLA 按节点表有数据行")
         ck.ok(page.locator("#ch-new").count() == 1 and page.locator("#rule-new").count() == 1,
               "渠道/规则有新建入口")
         ck.ok(page.locator("#mw-new").count() == 1, "维护窗口有新建入口")
+        wait_count(page, "#ch-tbl tbody tr")
         ck.ok("本地演练" in (page.text_content("#ch-tbl") or ""), "渠道表显示已配置的通知渠道")
         rule_txt = page.text_content("#rule-tbl") or ""
         ck.ok("可用率" in rule_txt and "静默" in rule_txt, "规则表显示条件与表头")
         mw_txt = page.text_content("#mw-tbl") or ""
         ck.ok(("维护窗口" in mw_txt) or ("没有维护窗口" in mw_txt), "维护窗口表已渲染")
-        ck.ok(page.locator("#al-tbl tbody tr").count() >= 1, "告警历史有记录")
+        ck.ok(wait_count(page, "#al-tbl tbody tr") >= 1, "告警历史有记录")
         ck.ok("告警" in (page.text_content("#al-tbl") or ""), "告警历史显示标题")
         shot("alerts")
 
         # P0/P1 收口：巡检推送 / 重投队列 / 操作审计 / 事件详情弹窗
         ck.ok(page.locator("#dg-enable").count() == 1 and page.locator("#dg-push").count() == 1,
               "巡检报告推送有开关与「立即推送」")
-        ck.ok(page.locator("#ob-tbl tbody tr").count() >= 1, "通知重投队列表已渲染")
+        ck.ok(wait_count(page, "#ob-tbl tbody tr") >= 1, "通知重投队列表已渲染")
         ob_sub = page.text_content("#ob-sub") or ""
         ck.ok(("待重投" in ob_sub) and ("已送达" in ob_sub), "重投队列显示计数")
-        ck.ok(page.locator("#au-tbl tbody tr").count() >= 1, "操作审计表有记录")
+        ck.ok(wait_count(page, "#au-tbl tbody tr") >= 1, "操作审计表有记录")
         au_txt = page.text_content("#au-tbl") or ""
         ck.ok(("任务" in au_txt) or ("告警" in au_txt) or ("节点" in au_txt), "审计表显示中文动作")
         shot("alerts-ops")
@@ -263,12 +290,14 @@ def main() -> int:
         page.wait_for_timeout(900)
         inc_sub = page.text_content("#inc-sub") or ""
         ck.ok("折叠为" in inc_sub and "组" in inc_sub, f"事件头显示折叠统计（{inc_sub[:48]}）")
-        folded_rows = page.locator("#sla-incs tbody tr:visible").count()
+        folded_rows = wait_count(page, "#sla-incs tr.ev-group")
         ck.ok(page.locator("#inc-fold button").count() == 2, "事件表有「折叠/平铺」切换")
         page.click('#inc-fold button[data-f="0"]')
         page.wait_for_timeout(900)
-        flat_rows = page.locator("#sla-incs tbody tr").count()
-        ck.ok(flat_rows >= folded_rows, f"平铺行数不少于折叠行数（{folded_rows} → {flat_rows}）")
+        flat_rows = wait_count(page, "#sla-incs tbody tr", 2)
+        # 折叠视图的 DOM 里还含隐藏的展开行，所以要按「分组行」统计（tr.ev-group）
+        ck.ok(folded_rows >= 1 and flat_rows >= folded_rows,
+              f"折叠为 {folded_rows} 组，平铺 {flat_rows} 行（平铺 ≥ 折叠）")
         page.click('#inc-fold button[data-f="1"]')
         page.wait_for_timeout(900)
         ck.ok(page.locator('#inc-fold button[data-f="1"]').get_attribute("class").find("active") >= 0,
@@ -284,6 +313,26 @@ def main() -> int:
             shot("incidents-expanded")
         else:
             ck.ok(True, "（本窗口没有多次事件的分组，跳过展开断言）")
+
+        # 提示条可读性（曾出现白天主题「深底深字」）
+        for th in ("dark", "light"):
+            # 注意：applyTheme(theme) 收的是 'light'/'dark' 字符串（早期传布尔会静默失败）
+            page.evaluate("applyTheme('%s')" % th)
+            page.wait_for_timeout(700)
+            page.evaluate("toast('验收：提示条对比度检查')")
+            page.wait_for_timeout(250)
+            ratio = page.evaluate("""() => {
+                const rgb = s => (s.match(/[0-9.]+/g) || []).slice(0, 3).map(Number);
+                const lum = c => { const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+                  return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
+                const el = document.getElementById("toast"); const cs = getComputedStyle(el);
+                const a = lum(rgb(cs.color)), b2 = lum(rgb(cs.backgroundColor));
+                const hi = Math.max(a, b2), lo = Math.min(a, b2);
+                return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
+            }""")
+            ck.ok(ratio >= 4.5, f"{th} 主题提示条对比度 {ratio}:1（≥4.5）")
+        page.evaluate("applyTheme('dark')")
+        page.wait_for_timeout(600)
 
         # ---- 主题：夜间 / 白天 ----
         print("→ 主题与筛选控件")
