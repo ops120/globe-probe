@@ -23,6 +23,13 @@
 - 🌍 **全球地图**：节点标桩按**可用率/在线状态**着色 + **探测链路动画**（节点 → 目标最近一次解析 IP，箭头沿弧流动）+ **自定义「IP 段 → 位置」**（IDC 内网段如 `10.10.10.0/24` 直接定到上海）+ 完整图例
 - 📈 **历史对比**：延迟 / 可用率 / 丢包率三指标可选；昨日 / 上周同日 / 30 天前 + **前一时段**（窗口按已有历史自适应，刚上线也能比）；无对比数据时说明原因
 - 🖥 **中文 WebUI**：总览 / 任务详情（通断条带 + 10s 曲线 + 单次详情弹窗 + mtr 多节点并排）/ 历史对比 / 全球地图 / 节点管理（接入示例、分组、Token、IP 段映射）/ 任务管理；**白天·夜间主题一键切换**
+- 🔔 **告警闭环**：通知渠道（通用 Webhook / 企业微信 / 钉钉（含加签）/ 飞书 / SMTP 邮件，支持「测试发送」）；
+  规则支持**可用率 / 延迟均值 / 延迟 P95 / 丢包率 / 节点离线**，可按任务或节点生效；
+  含**静默期去重**、**恢复通知**、**维护窗口豁免**，告警历史记录每次送达结果与失败原因
+- 📊 **SLA 报表**：按任务/节点的可用率、探测数、失败数、RTT 均值/P95、丢包率，事件时长合计与 **MTTR/MTBF**，
+  支持 24 小时 / 7 天 / 30 天窗口与 **CSV 导出**；另可生成「巡检报告」Markdown 摘要（可直接推给通知渠道）
+- 📈 **Prometheus 指标**：`/metrics` 暴露 `gpm_*`（节点在线/心跳年龄/CPU/内存、任务可用率/流数、事件数、接入计数），
+  便于接入既有监控栈
 - 📤 **导出**：JSON / CSV
 
 ## 环境要求
@@ -129,6 +136,10 @@ docker run -d --name gpm-agent-node --add-host=host.docker.internal:host-gateway
 │   ├── server/          # FastAPI：装配/存储/接入/事件/Web API/Agent API/GeoIP
 │   ├── agent/           # 节点：拉配置、jitter 调度、上报、离线缓冲
 │   ├── probers/         # 探测器：ping / curl / mtr（含 Windows tracert 降级）
+│   │   ├── alerting.py  # 告警规则评估与派发（静默期/恢复/维护窗口）
+│   │   ├── notify.py    # 通知渠道发送器（Webhook/企业微信/钉钉/飞书/SMTP）
+│   │   ├── metrics.py   # Prometheus 指标渲染
+│   │   └── report.py    # SLA 报表与巡检摘要
 │   ├── common/          # 协议模型、DNS 解析器（UDP/TCP/DoH/DoT）、工具
 │   └── webui/static/    # 中文 WebUI（原生 JS + 本地 ECharts + 精简世界地图）
 ├── tests/unit/          # 解析器/DNS 线路/Agent 解析路径
@@ -228,6 +239,19 @@ docker run -d --name gpm-agent-node --add-host=host.docker.internal:host-gateway
 | `/api/compare` | GET | 历史对比（mode=yesterday·lastweek·lastmonth·prev，metric=rtt·avail·loss） |
 | `/api/detail` | GET | 单次探测详情（条带色块点击） |
 | `/api/export` | GET | 导出 JSON / CSV |
+| `/api/alerts/channels` | GET / POST | 通知渠道列表 / 新建（webhook·企业微信·钉钉·飞书·SMTP） |
+| `/api/alerts/channels/{id}` | PUT / DELETE | 编辑·启停 / 删除 |
+| `/api/alerts/channels/{id}/test` | POST | 测试发送（返回成功与否与原因） |
+| `/api/alerts/rules` | GET / POST | 告警规则列表 / 新建 |
+| `/api/alerts/rules/{id}` | PUT / DELETE | 编辑·启停 / 删除 |
+| `/api/alerts/windows` | GET / POST | 维护窗口列表 / 新建 |
+| `/api/alerts/windows/{id}` | DELETE | 删除维护窗口 |
+| `/api/alerts` | GET | 告警历史（含送达结果与失败原因） |
+| `/api/alerts/evaluate` | POST | 立即评估一轮规则 |
+| `/api/report/sla` | GET | SLA 报表（窗口/任务/节点/事件/MTTR/MTBF） |
+| `/api/report/daily` | GET | 逐日可用率序列 |
+| `/api/report/digest` | GET | 巡检报告（Markdown 标题+正文，可推送给通知渠道） |
+| `/metrics` | GET | Prometheus 文本格式指标（`gpm_*`） |
 | `/api/agent/register` | POST | 节点注册（幂等；多 Token 校验） |
 | `/api/agent/sync` | POST | 心跳 + 配置下发（含组级任务过滤；Token 吊销即拒） |
 | `/api/agent/results` | POST | 批量结果上报（去重 / 迟到 / 时钟偏差） |

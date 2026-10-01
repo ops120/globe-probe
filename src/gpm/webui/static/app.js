@@ -788,6 +788,379 @@ $$('#geo-metric button').forEach(b => b.onclick = () => {
   renderGeo();
 });
 
+/* ---------- 告警与报表 ---------- */
+function pctText(v) { return v == null ? '—' : (v * 100).toFixed(2) + '%'; }
+function numText(v, unit) { return v == null ? '—' : (typeof v === 'number' ? v.toFixed(1) : v) + (unit || ''); }
+
+async function renderSla() {
+  const hours = state.slaHours || 24;
+  const to = Math.floor(Date.now() / 1000), from = to - hours * 3600;
+  const d = await api('/api/report/sla?t_from=' + from + '&t_to=' + to);
+  state.slaData = d;
+  $('#sla-sub').textContent = '窗口 ' + hours + ' 小时 · 聚合表口径（不扫原始表）';
+  const o = d.overall, inc = d.incidents;
+  const card = (k, v, s) => '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + '</div><div class="s">' + s + '</div></div>';
+  $('#sla-cards').innerHTML =
+    card('整体可用率', pctText(o.avail), '探测 ' + o.count + ' 条（失败 ' + o.fail + '）') +
+    card('RTT 均值 / P95', numText(o.rtt_avg, ' ms') + ' / ' + numText(o.rtt_p95, ' ms'), '窗口内加权') +
+    card('丢包率', o.loss_rate == null ? '—' : (o.loss_rate * 100).toFixed(2) + '%', '按样本数加权') +
+    card('事件', inc.total + ' 起（未恢复 ' + inc.open + '）', 'MTTR ' + (inc.mttr_seconds == null ? '—' : fmtDur(Math.round(inc.mttr_seconds))) + ' · MTBF ' + (inc.mtbf_seconds == null ? '—' : fmtDur(Math.round(inc.mtbf_seconds))));
+  $('#sla-tasks').innerHTML = '<thead><tr><th>任务</th><th>类型</th><th>探测</th><th>失败</th><th>可用率</th><th>RTT均值</th><th>P95</th></tr></thead><tbody>' +
+    ((d.tasks || []).map(t => '<tr><td style="color:var(--fg-strong2)">' + esc(t.name) + '</td>'
+      + '<td><span class="badge ' + (TYPE_BADGE[t.type] || 'b-off') + '">' + esc((t.type || '').toUpperCase()) + '</span></td>'
+      + '<td class="num">' + t.count + '</td><td class="num">' + t.fail + '</td>'
+      + '<td class="num" style="color:' + (t.avail == null ? 'var(--muted)' : t.avail >= 0.99 ? 'var(--ok-fg)' : t.avail >= 0.9 ? 'var(--warn-fg)' : 'var(--fail-fg)') + '">' + pctText(t.avail) + '</td>'
+      + '<td class="num">' + numText(t.rtt_avg, '') + '</td><td class="num">' + numText(t.rtt_p95, '') + '</td></tr>').join('')
+      || '<tr><td colspan="7" style="color:var(--faint)">窗口内无数据</td></tr>') + '</tbody>';
+  $('#sla-nodes').innerHTML = '<thead><tr><th>节点</th><th>状态</th><th>探测</th><th>失败</th><th>可用率</th><th>在线时长</th></tr></thead><tbody>' +
+    ((d.nodes || []).map(n => '<tr><td style="color:var(--fg-strong2)">' + esc(n.name) + '</td>'
+      + '<td>' + (n.status === 'online' ? '<span class="badge b-ok">在线</span>' : '<span class="badge b-off">离线</span>') + '</td>'
+      + '<td class="num">' + n.count + '</td><td class="num">' + n.fail + '</td>'
+      + '<td class="num">' + pctText(n.avail) + '</td>'
+      + '<td class="num">' + (n.uptime_seconds == null ? '—' : fmtDur(n.uptime_seconds)) + '</td></tr>').join('')
+      || '<tr><td colspan="6" style="color:var(--faint)">无节点</td></tr>') + '</tbody>';
+  const items = (d.incidents && d.incidents.items) || [];
+  $('#sla-incs').innerHTML = '<thead><tr><th>类型</th><th>目标</th><th>开始</th><th>持续</th><th>原因</th></tr></thead><tbody>' +
+    (items.map(i => '<tr><td>' + (i.kind === 'node' ? '<span class="badge b-off">节点侧</span>' : '<span class="badge b-fail">探测</span>') + '</td>'
+      + '<td>' + esc(i.title || (i.task_name || i.node_name || '')) + '</td>'
+      + '<td style="color:var(--muted)">' + fmtTS(i.started_at) + '</td>'
+      + '<td class="num">' + (i.duration_ms ? fmtDur(Math.round(i.duration_ms / 1000)) : '(进行中)') + '</td>'
+      + '<td style="color:var(--muted)">' + esc((i.reason && (i.reason.error_class || i.reason.event)) || '') + '</td></tr>').join('')
+      || '<tr><td colspan="5" style="color:var(--faint)">窗口内无事件</td></tr>') + '</tbody>';
+}
+
+function slaCsv() {
+  const d = state.slaData; if (!d) return '';
+  const lines = ['# gpm SLA 报表', 'window_from,' + fmtTS(d.window.from), 'window_to,' + fmtTS(d.window.to),
+    'overall_avail,' + (d.overall.avail == null ? '' : d.overall.avail),
+    'overall_count,' + d.overall.count, 'overall_fail,' + d.overall.fail,
+    'incidents,' + d.incidents.total, 'mttr_seconds,' + (d.incidents.mttr_seconds == null ? '' : Math.round(d.incidents.mttr_seconds)), ''];
+  lines.push('task_id,task,type,count,ok,fail,avail,rtt_avg,rtt_p95');
+  (d.tasks || []).forEach(t => lines.push([t.task_id, t.name, t.type, t.count, t.ok, t.fail,
+    t.avail == null ? '' : t.avail, t.rtt_avg == null ? '' : t.rtt_avg, t.rtt_p95 == null ? '' : t.rtt_p95].join(',')));
+  lines.push('', 'node_id,node,status,count,ok,fail,avail,uptime_seconds');
+  (d.nodes || []).forEach(n => lines.push([n.node_id, n.name, n.status, n.count, n.ok, n.fail,
+    n.avail == null ? '' : n.avail, n.uptime_seconds == null ? '' : n.uptime_seconds].join(',')));
+  lines.push('', 'incident_id,kind,task,node,started_at,ended_at,duration_ms');
+  ((d.incidents && d.incidents.items) || []).forEach(i => lines.push([i.id, i.kind, i.task_name || '', i.node_name || '',
+    i.started_at, i.ended_at || '', i.duration_ms || ''].join(',')));
+  return lines.join('\n');
+}
+
+async function renderChannels() {
+  const chans = await api('/api/alerts/channels');
+  state.channels = chans;
+  const typeName = { webhook: 'Webhook', wecom: '企业微信', dingtalk: '钉钉', feishu: '飞书', smtp: 'SMTP' };
+  $('#ch-tbl').innerHTML = '<thead><tr><th>名称</th><th>类型</th><th>状态</th><th>最近成功</th><th>最近错误</th><th>操作</th></tr></thead><tbody>' +
+    (chans.length ? chans.map(c => '<tr>'
+      + '<td style="color:var(--fg-strong2)">' + esc(c.name) + '</td>'
+      + '<td>' + esc(typeName[c.type] || c.type) + '</td>'
+      + '<td>' + (c.enabled ? (c.valid === false ? '<span class="badge b-warn">配置有误</span>' : '<span class="badge b-ok">启用</span>') : '<span class="badge b-off">停用</span>') + '</td>'
+      + '<td style="color:var(--muted)">' + (c.last_ok_at ? fmtTS(c.last_ok_at) : '—') + '</td>'
+      + '<td style="color:var(--fail-fg);max-width:220px;overflow:hidden;text-overflow:ellipsis" title="' + esc(c.last_error || '') + '">' + esc(c.last_error || '—') + '</td>'
+      + '<td><button class="btn sm ghost" onclick="testChannel(&quot;' + c.id + '&quot;)">测试</button>'
+      + '<button class="btn sm ghost" onclick="chModal(&quot;' + c.id + '&quot;)">编辑</button>'
+      + '<button class="btn sm ' + (c.enabled ? 'ghost' : '') + '" onclick="toggleChannel(&quot;' + c.id + '&quot;,' + (c.enabled ? 0 : 1) + ')">' + (c.enabled ? '停用' : '启用') + '</button>'
+      + '<button class="btn sm danger" onclick="delChannel(&quot;' + c.id + '&quot;)">删除</button></td></tr>').join('')
+      : '<tr><td colspan="6" style="color:var(--faint)">还没有通知渠道 —— 点右上「+ 新增渠道」（Webhook 最通用，也可用企业微信/钉钉/飞书机器人与 SMTP 邮件）</td></tr>') + '</tbody>';
+}
+
+async function renderRules() {
+  const r = await api('/api/alerts/rules');
+  state.rules = r.items || [];
+  const mname = {};
+  Object.keys(r.metrics || {}).forEach(k => { mname[k] = r.metrics[k][0]; });
+  state.metricNames = mname;
+  state.metricMeta = r.metrics || {};
+  const opName = { lt: '<', gt: '>', eq: '=', ne: '!=' };
+  const tmap = {}; (state.tasks || []).forEach(t => { tmap[t.id] = t.name; });
+  const nmap = {}; (state.nodeMap || []).forEach(n => { nmap[n.id] = n.name; });
+  const cname = {}; (state.channels || []).forEach(c => { cname[c.id] = c.name; });
+  $('#rule-tbl').innerHTML = '<thead><tr><th>规则</th><th>条件</th><th>范围</th><th>静默</th><th>级别</th><th>渠道</th><th>启用</th><th>操作</th></tr></thead><tbody>' +
+    (state.rules.length ? state.rules.map(x => '<tr>'
+      + '<td style="color:var(--fg-strong2)">' + esc(x.name) + '</td>'
+      + '<td>' + esc(mname[x.metric] || x.metric) + ' ' + esc(opName[x.op] || x.op) + ' ' + x.threshold + (x.metric === 'node_offline' ? '' : '（窗口 ' + x.window_seconds + 's）') + '</td>'
+      + '<td style="color:var(--muted)">' + (x.task_id ? '任务 ' + esc(tmap[x.task_id] || x.task_id) : x.node_id ? '节点 ' + esc(nmap[x.node_id] || x.node_id) : '全部') + '</td>'
+      + '<td class="num">' + fmtDur(x.silence_seconds || 0) + '</td>'
+      + '<td>' + (x.severity === 'critical' ? '<span class="badge b-fail">严重</span>' : '<span class="badge b-warn">警告</span>') + '</td>'
+      + '<td style="color:var(--muted)">' + ((x.channel_ids || []).map(c => esc(cname[c] || c)).join(', ') || '—') + '</td>'
+      + '<td>' + (x.enabled ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-off">停用</span>') + '</td>'
+      + '<td><button class="btn sm ghost" onclick="ruleModal(&quot;' + x.id + '&quot;)">编辑</button>'
+      + '<button class="btn sm ' + (x.enabled ? 'ghost' : '') + '" onclick="toggleRule(&quot;' + x.id + '&quot;,' + (x.enabled ? 0 : 1) + ')">' + (x.enabled ? '停用' : '启用') + '</button>'
+      + '<button class="btn sm danger" onclick="delRule(&quot;' + x.id + '&quot;)">删除</button></td></tr>').join('')
+      : '<tr><td colspan="8" style="color:var(--faint)">还没有规则 —— 例如「任务可用率 < 95%（窗口 5 分钟，静默 30 分钟）→ Webhook」</td></tr>') + '</tbody>';
+}
+
+async function renderWindows() {
+  const ws = await api('/api/alerts/windows');
+  const tmap = {}; (state.tasks || []).forEach(t => { tmap[t.id] = t.name; });
+  const nmap = {}; (state.nodeMap || []).forEach(n => { nmap[n.id] = n.name; });
+  const nowS = Math.floor(Date.now() / 1000);
+  $('#mw-tbl').innerHTML = '<thead><tr><th>名称</th><th>开始</th><th>结束</th><th>范围</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>' +
+    (ws.length ? ws.map(w => '<tr>'
+      + '<td style="color:var(--fg-strong2)">' + esc(w.name) + '</td>'
+      + '<td style="color:var(--muted)">' + fmtTS(w.starts_at) + '</td>'
+      + '<td style="color:var(--muted)">' + fmtTS(w.ends_at) + '</td>'
+      + '<td>' + (w.task_id ? '任务 ' + esc(tmap[w.task_id] || w.task_id) : w.node_id ? '节点 ' + esc(nmap[w.node_id] || w.node_id) : '全部') + '</td>'
+      + '<td style="color:var(--muted)">' + esc(w.note || '—') + '</td>'
+      + '<td>' + (nowS >= w.starts_at && nowS <= w.ends_at ? '<span class="badge b-warn">生效中</span>' : '<span class="badge b-off">未生效</span>') + '</td>'
+      + '<td><button class="btn sm danger" onclick="delWindow(&quot;' + w.id + '&quot;)">删除</button></td></tr>').join('')
+      : '<tr><td colspan="7" style="color:var(--faint)">没有维护窗口</td></tr>') + '</tbody>';
+}
+
+async function renderAlertHistory() {
+  const st = state.alFilter || '';
+  const d = await api('/api/alerts?limit=50' + (st ? '&status=' + st : ''));
+  $('#al-sub').textContent = '未恢复 ' + d.counts.firing + ' · 累计 ' + d.counts.total;
+  $('#al-tbl').innerHTML = '<thead><tr><th>时间</th><th>状态</th><th>标题</th><th>规则</th><th>送达</th><th>失败原因</th></tr></thead><tbody>' +
+    ((d.items || []).length ? d.items.map(a => '<tr>'
+      + '<td style="color:var(--muted)">' + fmtTS(a.ts) + '</td>'
+      + '<td>' + (a.status === 'firing' ? '<span class="badge b-fail">告警</span>' : '<span class="badge b-ok">恢复</span>') + '</td>'
+      + '<td>' + esc(a.title) + '</td>'
+      + '<td style="color:var(--muted)">' + esc(a.rule_name) + '</td>'
+      + '<td>' + (a.delivered ? '<span class="badge b-ok">' + a.n_ok + '/' + a.n_channels + '</span>' : '<span class="badge b-warn">0/' + a.n_channels + '</span>') + '</td>'
+      + '<td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis" title="' + esc(a.detail || '') + '">' + esc(a.detail || '—') + '</td></tr>').join('')
+      : '<tr><td colspan="6" style="color:var(--faint)">暂无告警记录</td></tr>') + '</tbody>';
+}
+
+async function renderAlerts() {
+  const nodes = await api('/api/nodes');
+  state.nodeMap = nodes;
+  if (!state.tasks || !state.tasks.length) state.tasks = await api('/api/tasks');
+  await Promise.all([renderSla(), renderChannels(), renderRules(), renderWindows()]);
+  await renderAlertHistory();
+}
+
+$$('#sla-range button').forEach(b => b.onclick = () => {
+  $$('#sla-range button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  state.slaHours = +b.dataset.h;
+  renderSla();
+});
+$$('#al-filter button').forEach(b => b.onclick = () => {
+  $$('#al-filter button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  state.alFilter = b.dataset.s;
+  renderAlertHistory();
+});
+$('#sla-export').addEventListener('click', () => {
+  const csv = slaCsv();
+  if (!csv) { toast('暂无数据'); return; }
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'gpm-sla-' + (state.slaHours || 24) + 'h.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('已导出 CSV');
+});
+$('#rule-eval').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/alerts/evaluate', { method: 'POST' });
+    toast('本轮产生 ' + r.events.length + ' 条事件');
+    renderAlerts();
+  } catch (e) { toast('失败: ' + e.message); }
+});
+
+/* ---------- 告警：渠道 / 规则 / 维护窗口 弹窗 ---------- */
+const CH_FIELDS = {
+  webhook: [['url', 'URL', 'https://example.com/hook'], ['method', '方法', 'POST'],
+    ['format', '格式（json|text）', 'json'], ['headers', '额外 Header（JSON，可选）', '{"Authorization":"Bearer x"}']],
+  wecom: [['webhook', '机器人 Webhook', 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…']],
+  dingtalk: [['webhook', '机器人 Webhook', 'https://oapi.dingtalk.com/robot/send?access_token=…'],
+    ['secret', '加签 Secret（可选）', 'SEC…']],
+  feishu: [['webhook', '机器人 Webhook', 'https://open.feishu.cn/open-apis/bot/v2/hook/…']],
+  smtp: [['host', 'SMTP 主机', 'smtp.example.com'], ['port', '端口', '587'],
+    ['user', '用户名', 'ops@example.com'], ['password', '密码 / 授权码', ''],
+    ['mail_from', '发件人', 'gpm@example.com'], ['mail_to', '收件人（逗号分隔）', 'ops@example.com'],
+    ['starttls', 'starttls（true|false）', 'true'], ['ssl', 'ssl（true|false）', 'false']],
+};
+
+function chFieldRows(type, conf) {
+  return (CH_FIELDS[type] || []).map(f => {
+    const v = conf && conf[f[0]] != null ? String(conf[f[0]]) : '';
+    return '<div class="form-row"><label>' + f[1] + '</label>'
+      + '<input type="text" data-cf="' + f[0] + '" value="' + esc(v) + '" placeholder="' + esc(f[2]) + '"></div>';
+  }).join('');
+}
+
+window.chModal = async (cid) => {
+  const chans = state.channels || await api('/api/alerts/channels');
+  const c = cid ? chans.find(x => x.id === cid) : null;
+  const type = c ? c.type : 'webhook';
+  const opts = ['webhook', 'wecom', 'dingtalk', 'feishu', 'smtp']
+    .map(t => '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
+  $('#modal-body').innerHTML = '<span class="m-close" onclick="closeModal()">✕</span>'
+    + '<div class="m-title">' + (c ? '编辑通知渠道' : '新增通知渠道') + '</div>'
+    + '<div class="m-sub">告警命中规则后会向这些渠道推送 Markdown 文本；可先「测试」再启用</div>'
+    + '<div class="form-row"><label>名称</label><input type="text" id="ch-name" value="' + esc(c ? c.name : '') + '" placeholder="如 运维群-钉钉"></div>'
+    + '<div class="form-row"><label>类型</label><select id="ch-type">' + opts + '</select></div>'
+    + '<div id="ch-fields">' + chFieldRows(type, c ? c.config : null) + '</div>'
+    + '<div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>'
+    + '<button class="btn" id="ch-save">保存</button></div>';
+  $('#modal-mask').classList.remove('hidden');
+  $('#ch-type').onchange = e => {
+    $('#ch-fields').innerHTML = chFieldRows(e.target.value, null);
+  };
+  $('#ch-save').onclick = async () => {
+    const t = $('#ch-type').value;
+    const conf = {};
+    $$('#ch-fields [data-cf]').forEach(el => {
+      const k = el.dataset.cf, v = el.value.trim();
+      if (v === '') return;
+      if (k === 'port') conf[k] = parseInt(v) || 587;
+      else if (k === 'starttls' || k === 'ssl') conf[k] = (v === 'true' || v === '1');
+      else if (k === 'headers') { try { conf[k] = JSON.parse(v); } catch (e) { toast('Header 不是合法 JSON'); throw e; } }
+      else conf[k] = v;
+    });
+    const body = { name: $('#ch-name').value.trim(), type: t, config: conf };
+    try {
+      await api(c ? '/api/alerts/channels/' + cid : '/api/alerts/channels', {
+        method: c ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      closeModal(); toast('已保存'); renderChannels();
+    } catch (e) { toast('失败: ' + e.message); }
+  };
+};
+
+window.testChannel = async (cid) => {
+  try {
+    const r = await api('/api/alerts/channels/' + cid + '/test', { method: 'POST' });
+    toast(r.ok ? '测试已发送 ✅ ' + (r.detail || '') : '测试失败 ❌ ' + (r.detail || ''));
+    renderChannels();
+  } catch (e) { toast('失败: ' + e.message); }
+};
+window.toggleChannel = async (cid, en) => {
+  try {
+    await api('/api/alerts/channels/' + cid, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!en }) });
+    toast(en ? '已启用' : '已停用'); renderChannels();
+  } catch (e) { toast('失败: ' + e.message); }
+};
+window.delChannel = async (cid) => {
+  if (!confirm('确认删除该通知渠道？引用它的规则将失去该渠道。')) return;
+  try { await api('/api/alerts/channels/' + cid, { method: 'DELETE' }); toast('已删除'); renderAlerts(); }
+  catch (e) { toast('失败: ' + e.message); }
+};
+
+window.ruleModal = async (rid) => {
+  if (!state.metricMeta) await renderRules();
+  const rules = state.rules || [];
+  const x = rid ? rules.find(r => r.id === rid) : null;
+  const mnames = state.metricNames || {};
+  const mopts = Object.keys(state.metricMeta || {}).map(k => '<option value="' + k + '"' + (x && x.metric === k ? ' selected' : '') + '>' + esc(mnames[k] || k) + '</option>').join('');
+  const oopts = ['lt', 'gt', 'eq', 'ne'].map(o => '<option value="' + o + '"' + (x && x.op === o ? ' selected' : '') + '>' + o + '</option>').join('');
+  const topts = '<option value="">全部任务</option>' + (state.tasks || []).map(t => '<option value="' + t.id + '"' + (x && x.task_id === t.id ? ' selected' : '') + '>' + esc(t.name) + '</option>').join('');
+  const nopts = '<option value="">全部节点</option>' + (state.nodeMap || []).map(n => '<option value="' + n.id + '"' + (x && x.node_id === n.id ? ' selected' : '') + '>' + esc(n.name) + '</option>').join('');
+  const chks = (state.channels || []).map(c => '<label class="fcheck" style="margin:3px 0"><input type="checkbox" class="r-ch" value="' + c.id + '"'
+    + ((x && (x.channel_ids || []).includes(c.id)) ? ' checked' : '') + '> <span>' + esc(c.name) + '</span></label>').join('')
+    || '<div style="color:var(--faint);font-size:12px">还没有渠道 —— 先在上方新建</div>';
+  $('#modal-body').innerHTML = '<span class="m-close" onclick="closeModal()">✕</span>'
+    + '<div class="m-title">' + (x ? '编辑告警规则' : '新增告警规则') + '</div>'
+    + '<div class="m-sub">默认每 30s 评估一轮；命中后按静默期去重，恢复时再发一条「已恢复」</div>'
+    + '<div class="form-row"><label>规则名</label><input type="text" id="r-name" value="' + esc(x ? x.name : '') + '" placeholder="如 可用率跌破 95%"></div>'
+    + '<div class="form-row"><label>指标</label><select id="r-metric">' + mopts + '</select></div>'
+    + '<div class="form-row"><label>比较</label><select id="r-op" style="max-width:90px">' + oopts + '</select>'
+    + '<input type="text" id="r-thr" value="' + (x ? x.threshold : '0.95') + '" placeholder="阈值（可用率/丢包率用 0~1）"></div>'
+    + '<div class="form-row"><label>窗口(秒)</label><input type="text" id="r-win" value="' + (x ? x.window_seconds : 300) + '"></div>'
+    + '<div class="form-row"><label>静默(秒)</label><input type="text" id="r-sil" value="' + (x ? x.silence_seconds : 1800) + '"></div>'
+    + '<div class="form-row"><label>级别</label><select id="r-sev">'
+    + '<option value="warning"' + (x && x.severity === 'warning' ? ' selected' : '') + '>warning</option>'
+    + '<option value="critical"' + (x && x.severity === 'critical' ? ' selected' : '') + '>critical</option></select></div>'
+    + '<div class="form-row"><label>适用范围</label><select id="r-scope">'
+    + '<option value="all"' + (!x || (!x.task_id && !x.node_id) ? ' selected' : '') + '>全部</option>'
+    + '<option value="task"' + (x && x.task_id ? ' selected' : '') + '>指定任务</option>'
+    + '<option value="node"' + (x && x.node_id ? ' selected' : '') + '>指定节点</option></select></div>'
+    + '<div class="form-row" id="r-task-row"><label>任务</label><select id="r-task">' + topts + '</select></div>'
+    + '<div class="form-row" id="r-node-row"><label>节点</label><select id="r-node">' + nopts + '</select></div>'
+    + '<div class="form-row" style="align-items:flex-start"><label>通知渠道</label><div class="grp-box" style="flex:1">' + chks + '</div></div>'
+    + '<div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>'
+    + '<button class="btn" id="r-save">保存</button></div>';
+  $('#modal-mask').classList.remove('hidden');
+  const syncScope = () => {
+    const s = $('#r-scope').value;
+    $('#r-task-row').style.display = s === 'task' ? 'flex' : 'none';
+    $('#r-node-row').style.display = s === 'node' ? 'flex' : 'none';
+  };
+  $('#r-scope').onchange = syncScope; syncScope();
+  $('#r-save').onclick = async () => {
+    const scope = $('#r-scope').value;
+    const body = {
+      name: $('#r-name').value.trim(), metric: $('#r-metric').value, op: $('#r-op').value,
+      threshold: Number($('#r-thr').value), window_seconds: parseInt($('#r-win').value) || 300,
+      silence_seconds: parseInt($('#r-sil').value) || 0, severity: $('#r-sev').value,
+      task_id: scope === 'task' ? $('#r-task').value : '',
+      node_id: scope === 'node' ? $('#r-node').value : '',
+      channel_ids: [...document.querySelectorAll('.r-ch:checked')].map(c => c.value),
+    };
+    try {
+      await api(x ? '/api/alerts/rules/' + x.id : '/api/alerts/rules', {
+        method: x ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      closeModal(); toast('已保存'); renderAlerts();
+    } catch (e) { toast('失败: ' + e.message); }
+  };
+};
+window.toggleRule = async (rid, en) => {
+  try {
+    await api('/api/alerts/rules/' + rid, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!en }) });
+    toast(en ? '已启用' : '已停用'); renderRules();
+  } catch (e) { toast('失败: ' + e.message); }
+};
+window.delRule = async (rid) => {
+  if (!confirm('确认删除该告警规则？')) return;
+  try { await api('/api/alerts/rules/' + rid, { method: 'DELETE' }); toast('已删除'); renderAlerts(); }
+  catch (e) { toast('失败: ' + e.message); }
+};
+
+window.mwModal = async () => {
+  const topts = '<option value="">全部任务</option>' + (state.tasks || []).map(t => '<option value="' + t.id + '">' + esc(t.name) + '</option>').join('');
+  const nopts = '<option value="">全部节点</option>' + (state.nodeMap || []).map(n => '<option value="' + n.id + '">' + esc(n.name) + '</option>').join('');
+  const nowS = new Date(Date.now() + 3600 * 1000);
+  const iso = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  $('#modal-body').innerHTML = '<span class="m-close" onclick="closeModal()">✕</span>'
+    + '<div class="m-title">新增维护窗口</div>'
+    + '<div class="m-sub">窗口内不评估告警规则（例如机房割接、计划重启）</div>'
+    + '<div class="form-row"><label>名称</label><input type="text" id="m-name" placeholder="如 华东机房割接"></div>'
+    + '<div class="form-row"><label>开始</label><input type="text" id="m-start" value="' + iso(nowS) + '" placeholder="YYYY-MM-DDTHH:MM"></div>'
+    + '<div class="form-row"><label>结束</label><input type="text" id="m-end" value="' + iso(new Date(nowS.getTime() + 3600 * 1000)) + '"></div>'
+    + '<div class="form-row"><label>范围</label><select id="m-scope"><option value="all">全部</option><option value="task">指定任务</option><option value="node">指定节点</option></select></div>'
+    + '<div class="form-row" id="m-task-row"><label>任务</label><select id="m-task">' + topts + '</select></div>'
+    + '<div class="form-row" id="m-node-row"><label>节点</label><select id="m-node">' + nopts + '</select></div>'
+    + '<div class="form-row"><label>备注</label><input type="text" id="m-note" placeholder="可选"></div>'
+    + '<div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>'
+    + '<button class="btn" id="m-save">保存</button></div>';
+  $('#modal-mask').classList.remove('hidden');
+  const sync = () => {
+    const s = $('#m-scope').value;
+    $('#m-task-row').style.display = s === 'task' ? 'flex' : 'none';
+    $('#m-node-row').style.display = s === 'node' ? 'flex' : 'none';
+  };
+  $('#m-scope').onchange = sync; sync();
+  $('#m-save').onclick = async () => {
+    const s = $('#m-scope').value;
+    const body = {
+      name: $('#m-name').value.trim() || '维护窗口',
+      starts_at: Math.floor(new Date($('#m-start').value).getTime() / 1000),
+      ends_at: Math.floor(new Date($('#m-end').value).getTime() / 1000),
+      task_id: s === 'task' ? $('#m-task').value : '', node_id: s === 'node' ? $('#m-node').value : '',
+      note: $('#m-note').value.trim(),
+    };
+    if (!body.starts_at || body.ends_at <= body.starts_at) { toast('结束时间必须晚于开始时间'); return; }
+    try {
+      await api('/api/alerts/windows', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      closeModal(); toast('已新增维护窗口'); renderWindows();
+    } catch (e) { toast('失败: ' + e.message); }
+  };
+};
+window.delWindow = async (wid) => {
+  if (!confirm('确认删除该维护窗口？')) return;
+  try { await api('/api/alerts/windows/' + wid, { method: 'DELETE' }); toast('已删除'); renderWindows(); }
+  catch (e) { toast('失败: ' + e.message); }
+};
+$('#ch-new').addEventListener('click', () => chModal(''));
+$('#rule-new').addEventListener('click', () => ruleModal(''));
+$('#mw-new').addEventListener('click', () => mwModal());
+
 /* ---------- 节点 / 任务管理 ---------- */
 /* 节点接入示例：地址用当前页面地址，Token 用开发默认值（生产请在服务端改 GPM_REGISTER_TOKEN） */
 function renderNodeHints() {
@@ -1201,8 +1574,8 @@ function taskModal(t) {
 window.newTaskModal = () => taskModal(null);
 
 /* ---------- 导航 ---------- */
-const PAGENAMES = { overview: '总览', task: '任务详情', compare: '历史对比', geo: '全球地图', nodes: '节点管理', tasks: '任务管理' };
-const RENDER = { overview: renderOverview, task: renderTask, compare: renderCompare, geo: renderGeo, nodes: renderNodes, tasks: renderTasks };
+const PAGENAMES = { overview: '总览', task: '任务详情', compare: '历史对比', geo: '全球地图', alerts: '告警与报表', nodes: '节点管理', tasks: '任务管理' };
+const RENDER = { overview: renderOverview, task: renderTask, compare: renderCompare, geo: renderGeo, alerts: renderAlerts, nodes: renderNodes, tasks: renderTasks };
 async function show(page) {
   state.page = page;
   $$('.sidebar nav a').forEach(a => a.classList.toggle('active', a.dataset.page === page));

@@ -69,6 +69,34 @@ CREATE TABLE IF NOT EXISTS tokens(
 CREATE TABLE IF NOT EXISTS geo_cache(
   ip TEXT PRIMARY KEY, data_json TEXT DEFAULT '{}', ts INTEGER);
 
+-- 告警通知渠道（webhook / 企业微信 / 钉钉 / 飞书 / SMTP）
+CREATE TABLE IF NOT EXISTS notify_channels(
+  id TEXT PRIMARY KEY, name TEXT UNIQUE, type TEXT, config_json TEXT DEFAULT '{}',
+  enabled INTEGER DEFAULT 1, created_at INTEGER,
+  last_ok_at INTEGER DEFAULT 0, last_error TEXT DEFAULT '');
+
+-- 告警规则（可用率/延迟/丢包/节点离线；支持静默期与维护窗口豁免）
+CREATE TABLE IF NOT EXISTS alert_rules(
+  id TEXT PRIMARY KEY, name TEXT UNIQUE, metric TEXT, op TEXT, threshold REAL,
+  window_seconds INTEGER DEFAULT 300, task_id TEXT DEFAULT '', node_id TEXT DEFAULT '',
+  group_id TEXT DEFAULT '', severity TEXT DEFAULT 'warning',
+  channel_ids_json TEXT DEFAULT '[]', silence_seconds INTEGER DEFAULT 1800,
+  enabled INTEGER DEFAULT 1, created_at INTEGER);
+
+-- 维护窗口：窗口内不评估规则，也不计入可用率（SLA 侧按事件剔除）
+CREATE TABLE IF NOT EXISTS maintenance_windows(
+  id TEXT PRIMARY KEY, name TEXT, starts_at INTEGER, ends_at INTEGER,
+  task_id TEXT DEFAULT '', node_id TEXT DEFAULT '', note TEXT DEFAULT '', created_at INTEGER);
+
+-- 告警历史（firing / resolved）
+CREATE TABLE IF NOT EXISTS alerts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, rule_id TEXT, rule_name TEXT,
+  metric TEXT, key TEXT, status TEXT, severity TEXT, title TEXT, text TEXT,
+  target_json TEXT DEFAULT '{}', delivered INTEGER DEFAULT 0,
+  n_channels INTEGER DEFAULT 0, n_ok INTEGER DEFAULT 0, detail TEXT DEFAULT '');
+CREATE INDEX IF NOT EXISTS ix_alerts_ts ON alerts(ts);
+CREATE INDEX IF NOT EXISTS ix_alerts_open ON alerts(rule_id, key, status, ts);
+
 -- 自定义「IP 段 → 位置」：IDC 内网段/固定出口段直接指定地理位置（优先于在线查询）
 CREATE TABLE IF NOT EXISTS geo_networks(
   id TEXT PRIMARY KEY, cidr TEXT UNIQUE, place TEXT, lat REAL, lng REAL,
@@ -852,6 +880,224 @@ class Storage:
             if addr in net and net.prefixlen > best_len:
                 best, best_len = g, net.prefixlen
         return best
+
+    # ---------- 告警渠道 ----------
+    def list_channels(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM notify_channels ORDER BY created_at").fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["config"] = json.loads(d.pop("config_json") or "{}")
+                out.append(d)
+            return out
+
+    def create_channel(self, cid: str, name: str, ctype: str, config: dict, ts: int) -> dict:
+        with self.lock:
+            try:
+                self.db.execute(
+                    "INSERT INTO notify_channels(id,name,type,config_json,created_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (cid, name, ctype, json.dumps(config, ensure_ascii=False), ts))
+            except sqlite3.IntegrityError:
+                raise ValueError(f"渠道名已存在: {name}")
+            self.db.commit()
+            return next(c for c in self.list_channels() if c["id"] == cid)
+
+    def update_channel(self, cid: str, fields: dict, ts: int) -> dict:
+        with self.lock:
+            if not self.db.execute("SELECT id FROM notify_channels WHERE id=?", (cid,)).fetchone():
+                raise KeyError(cid)
+            sets, vals = [], []
+            for k, col in (("name", "name"), ("type", "type")):
+                if k in fields:
+                    sets.append(f"{col}=?"); vals.append(fields[k])
+            if "config" in fields:
+                sets.append("config_json=?")
+                vals.append(json.dumps(fields["config"], ensure_ascii=False))
+            if "enabled" in fields:
+                sets.append("enabled=?"); vals.append(1 if fields["enabled"] else 0)
+            if sets:
+                self.db.execute(f"UPDATE notify_channels SET {', '.join(sets)} WHERE id=?",
+                                vals + [cid])
+                self.db.commit()
+            return next(c for c in self.list_channels() if c["id"] == cid)
+
+    def delete_channel(self, cid: str) -> bool:
+        with self.lock:
+            cur = self.db.execute("DELETE FROM notify_channels WHERE id=?", (cid,))
+            self.db.commit()
+            return cur.rowcount > 0
+
+    def channel_touch(self, cid: str, ok: bool, err: str, ts: int):
+        with self.lock:
+            if ok:
+                self.db.execute("UPDATE notify_channels SET last_ok_at=?, last_error='' WHERE id=?",
+                                (ts, cid))
+            else:
+                self.db.execute("UPDATE notify_channels SET last_error=? WHERE id=?", (err[:200], cid))
+            self.db.commit()
+
+    # ---------- 告警规则 ----------
+    def list_rules(self) -> list[dict]:
+        with self.lock:
+            rows = self.db.execute("SELECT * FROM alert_rules ORDER BY created_at").fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["channel_ids"] = json.loads(d.pop("channel_ids_json") or "[]")
+                out.append(d)
+            return out
+
+    def create_rule(self, rid: str, fields: dict, ts: int) -> dict:
+        with self.lock:
+            try:
+                self.db.execute(
+                    "INSERT INTO alert_rules(id,name,metric,op,threshold,window_seconds,task_id,"
+                    "node_id,group_id,severity,channel_ids_json,silence_seconds,enabled,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (rid, fields["name"], fields["metric"], fields["op"], float(fields["threshold"]),
+                     int(fields.get("window_seconds") or 300), fields.get("task_id") or "",
+                     fields.get("node_id") or "", fields.get("group_id") or "",
+                     fields.get("severity") or "warning",
+                     json.dumps(fields.get("channel_ids") or []),
+                     int(fields.get("silence_seconds") or 1800),
+                     1 if fields.get("enabled", True) else 0, ts))
+            except sqlite3.IntegrityError:
+                raise ValueError(f"规则名已存在: {fields.get('name')}")
+            self.db.commit()
+            return next(r for r in self.list_rules() if r["id"] == rid)
+
+    def update_rule(self, rid: str, fields: dict, ts: int) -> dict:
+        with self.lock:
+            if not self.db.execute("SELECT id FROM alert_rules WHERE id=?", (rid,)).fetchone():
+                raise KeyError(rid)
+            cols = {"name": "name", "metric": "metric", "op": "op", "threshold": "threshold",
+                    "window_seconds": "window_seconds", "task_id": "task_id", "node_id": "node_id",
+                    "group_id": "group_id", "severity": "severity",
+                    "silence_seconds": "silence_seconds"}
+            sets, vals = [], []
+            for k, col in cols.items():
+                if k in fields and fields[k] is not None:
+                    sets.append(f"{col}=?"); vals.append(fields[k])
+            if "channel_ids" in fields:
+                sets.append("channel_ids_json=?")
+                vals.append(json.dumps(fields["channel_ids"] or []))
+            if "enabled" in fields:
+                sets.append("enabled=?"); vals.append(1 if fields["enabled"] else 0)
+            if sets:
+                self.db.execute(f"UPDATE alert_rules SET {', '.join(sets)} WHERE id=?", vals + [rid])
+                self.db.commit()
+            return next(r for r in self.list_rules() if r["id"] == rid)
+
+    def delete_rule(self, rid: str) -> bool:
+        with self.lock:
+            cur = self.db.execute("DELETE FROM alert_rules WHERE id=?", (rid,))
+            self.db.commit()
+            return cur.rowcount > 0
+
+    # ---------- 维护窗口 ----------
+    def list_windows(self) -> list[dict]:
+        with self.lock:
+            return [dict(r) for r in self.db.execute(
+                "SELECT * FROM maintenance_windows ORDER BY starts_at DESC").fetchall()]
+
+    def create_window(self, wid: str, fields: dict, ts: int) -> dict:
+        with self.lock:
+            self.db.execute(
+                "INSERT INTO maintenance_windows(id,name,starts_at,ends_at,task_id,node_id,note,"
+                "created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (wid, fields.get("name") or "维护窗口", int(fields["starts_at"]),
+                 int(fields["ends_at"]), fields.get("task_id") or "", fields.get("node_id") or "",
+                 fields.get("note") or "", ts))
+            self.db.commit()
+            return next(w for w in self.list_windows() if w["id"] == wid)
+
+    def delete_window(self, wid: str) -> bool:
+        with self.lock:
+            cur = self.db.execute("DELETE FROM maintenance_windows WHERE id=?", (wid,))
+            self.db.commit()
+            return cur.rowcount > 0
+
+    def in_maintenance(self, ts: int, task_id: str = "", node_id: str = "") -> dict | None:
+        """命中维护窗口则返回该窗口（未指定 task/node 的窗口对全部生效）。"""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT * FROM maintenance_windows WHERE starts_at<=? AND ends_at>=?",
+                (ts, ts)).fetchall()
+            for w in rows:
+                if w["task_id"] and task_id and w["task_id"] != task_id:
+                    continue
+                if w["node_id"] and node_id and w["node_id"] != node_id:
+                    continue
+                if w["task_id"] and not task_id:
+                    continue
+                if w["node_id"] and not node_id:
+                    continue
+                return dict(w)
+            return None
+
+    # ---------- 告警历史 ----------
+    def alert_add(self, ts: int, rule: dict, key: str, status: str, title: str, text: str,
+                  target: dict, delivered: bool, n_channels: int, n_ok: int,
+                  detail: str = "") -> int:
+        with self.lock:
+            cur = self.db.execute(
+                "INSERT INTO alerts(ts,rule_id,rule_name,metric,key,status,severity,title,text,"
+                "target_json,delivered,n_channels,n_ok,detail) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ts, rule["id"], rule["name"], rule["metric"], key, status,
+                 rule.get("severity") or "warning", title, text,
+                 json.dumps(target, ensure_ascii=False), 1 if delivered else 0,
+                 n_channels, n_ok, detail[:300]))
+            self.db.commit()
+            return cur.lastrowid
+
+    def alert_last(self, rule_id: str, key: str) -> dict | None:
+        with self.lock:
+            r = self.db.execute(
+                "SELECT * FROM alerts WHERE rule_id=? AND key=? ORDER BY ts DESC LIMIT 1",
+                (rule_id, key)).fetchone()
+            return dict(r) if r else None
+
+    def alert_open(self, rule_id: str, key: str) -> dict | None:
+        """该规则+目标当前是否处于未恢复状态。
+
+        注意：不能直接查 status='firing' —— 恢复是**追加**一条 resolved 记录，
+        旧的 firing 行仍在表里；必须看「最新一条」的状态，否则恢复后会一直认为未恢复，
+        导致每个评估周期重复推送「已恢复」。
+        """
+        with self.lock:
+            r = self.db.execute(
+                "SELECT * FROM alerts WHERE rule_id=? AND key=?"
+                " ORDER BY ts DESC, id DESC LIMIT 1", (rule_id, key)).fetchone()
+            return dict(r) if r and r["status"] == "firing" else None
+
+    def alert_recent(self, limit: int = 50, status: str = "") -> list[dict]:
+        with self.lock:
+            sql = "SELECT * FROM alerts"
+            args: list = []
+            if status:
+                sql += " WHERE status=?"
+                args.append(status)
+            sql += " ORDER BY ts DESC LIMIT ?"
+            args.append(limit)
+            out = []
+            for r in self.db.execute(sql, args).fetchall():
+                d = dict(r)
+                d["target"] = json.loads(d.pop("target_json") or "{}")
+                out.append(d)
+            return out
+
+    def alert_counts(self) -> dict:
+        """firing = 当前仍未恢复的（规则+目标）组合数；total = 历史记录条数。"""
+        with self.lock:
+            firing = self.db.execute(
+                "SELECT COUNT(*) c FROM alerts a WHERE a.id = ("
+                "  SELECT a2.id FROM alerts a2 WHERE a2.rule_id=a.rule_id AND a2.key=a.key"
+                "  ORDER BY a2.ts DESC, a2.id DESC LIMIT 1) AND a.status='firing'"
+            ).fetchone()["c"]
+            total = self.db.execute("SELECT COUNT(*) c FROM alerts").fetchone()["c"]
+            return {"firing": firing, "total": total}
 
     # ---------- 保留策略 ----------
     def retention(self, raw_days: int, a1m: int, a5m: int, a1h: int, hb_days: int, ts: int):

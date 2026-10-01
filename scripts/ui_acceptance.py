@@ -214,6 +214,28 @@ def main() -> int:
         page.click('#cmp-metric button[data-k="rtt"]')
         page.wait_for_timeout(1200)
 
+        # ---- 告警与报表（P0 告警闭环 + SLA 报表）----
+        print("→ 告警与报表")
+        page.click('nav a[data-page="alerts"]')
+        wait_page(page, "alerts")
+        page.wait_for_timeout(1500)
+        ck.ok(page.locator("#sla-cards .card").count() == 4, "SLA 报表四张指标卡已渲染")
+        sla_txt = page.text_content("#sla-cards") or ""
+        ck.ok(("可用率" in sla_txt) and ("事件" in sla_txt), "SLA 卡片含可用率与事件")
+        ck.ok(page.locator("#sla-tasks tbody tr").count() >= 1, "SLA 按任务表有数据行")
+        ck.ok(page.locator("#sla-nodes tbody tr").count() >= 1, "SLA 按节点表有数据行")
+        ck.ok(page.locator("#ch-new").count() == 1 and page.locator("#rule-new").count() == 1,
+              "渠道/规则有新建入口")
+        ck.ok(page.locator("#mw-new").count() == 1, "维护窗口有新建入口")
+        ck.ok("本地演练" in (page.text_content("#ch-tbl") or ""), "渠道表显示已配置的通知渠道")
+        rule_txt = page.text_content("#rule-tbl") or ""
+        ck.ok("可用率" in rule_txt and "静默" in rule_txt, "规则表显示条件与表头")
+        mw_txt = page.text_content("#mw-tbl") or ""
+        ck.ok(("维护窗口" in mw_txt) or ("没有维护窗口" in mw_txt), "维护窗口表已渲染")
+        ck.ok(page.locator("#al-tbl tbody tr").count() >= 1, "告警历史有记录")
+        ck.ok("告警" in (page.text_content("#al-tbl") or ""), "告警历史显示标题")
+        shot("alerts")
+
         # ---- 主题：夜间 / 白天 ----
         print("→ 主题与筛选控件")
         page.click('nav a[data-page="task"]')

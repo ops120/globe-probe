@@ -176,6 +176,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
       <a data-page="task">📈 任务详情</a>
       <a data-page="compare">⇄ 历史对比</a>
       <a data-page="geo">🌍 全球地图</a>
+      <a data-page="alerts">🔔 告警与报表</a>
       <a data-page="nodes">◈ 节点管理</a>
       <a data-page="tasks">≡ 任务管理</a>
     </nav>
@@ -327,6 +328,55 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
         </div>
       </section>
 
+      <section class="page hidden" id="page-alerts">
+        <div class="panel">
+          <div class="panel-head">SLA 报表 <span class="sub" id="sla-sub"></span>
+            <span style="flex:1"></span>
+            <div class="seg" id="sla-range">
+              <button data-h="24" class="active">最近24小时</button>
+              <button data-h="168">最近7天</button>
+              <button data-h="720">最近30天</button>
+            </div>
+            <button class="btn sm ghost" id="sla-export">导出 CSV</button>
+          </div>
+          <div class="cards" id="sla-cards"></div>
+          <div class="grid-2">
+            <div><div class="sub" style="margin:6px 0">按任务</div><table class="tbl" id="sla-tasks"></table></div>
+            <div><div class="sub" style="margin:6px 0">按节点</div><table class="tbl" id="sla-nodes"></table></div>
+          </div>
+          <div style="margin-top:14px"><div class="sub" style="margin:6px 0">事件（窗口内）</div>
+            <table class="tbl" id="sla-incs"></table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">通知渠道 <span class="sub">Webhook / 企业微信 / 钉钉 / 飞书 / SMTP；可测试发送</span>
+            <span style="flex:1"></span><button class="btn sm" id="ch-new">+ 新增渠道</button></div>
+          <table class="tbl" id="ch-tbl"></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head">告警规则 <span class="sub">可用率 / 延迟均值·P95 / 丢包率 / 节点离线；含静默期，维护窗口内不评估</span>
+            <span style="flex:1"></span>
+            <button class="btn sm ghost" id="rule-eval">立即评估一轮</button>
+            <button class="btn sm" id="rule-new">+ 新增规则</button></div>
+          <table class="tbl" id="rule-tbl"></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head">维护窗口 <span class="sub">窗口内不评估规则（不告警）</span>
+            <span style="flex:1"></span><button class="btn sm" id="mw-new">+ 新增窗口</button></div>
+          <table class="tbl" id="mw-tbl"></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head">最近告警 <span class="sub" id="al-sub"></span>
+            <span style="flex:1"></span>
+            <div class="seg" id="al-filter">
+              <button data-s="" class="active">全部</button>
+              <button data-s="firing">未恢复</button>
+              <button data-s="resolved">已恢复</button>
+            </div>
+          </div>
+          <table class="tbl" id="al-tbl"></table>
+        </div>
+      </section>
+
       <section class="page hidden" id="page-nodes">
         <div class="panel">
           <div class="panel-head">节点列表 <span class="sub" id="nodes-sub"></span></div>
@@ -382,7 +432,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=23"></script>
-<script src="/static/app.js?v=23"></script>
+<script src="/static/echarts.min.js?v=24"></script>
+<script src="/static/app.js?v=24"></script>
 </body>
 </html>

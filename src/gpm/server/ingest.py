@@ -14,6 +14,12 @@ class Ingest:
         self.clock_skew = cfg_server.get("clock_skew_seconds", 120)
         self.batch_max = cfg_server.get("ingest_batch_max", 500)
         self.dirty_since = 0  # 聚合 sweep 参考：最新结果 ts
+        # 累计计数器（供 /metrics 导出；进程内累加，重启归零）
+        self.accepted_total = 0
+        self.duplicates_total = 0
+        self.rejected_total = 0
+        self.truncated_total = 0
+        self.batches_total = 0
 
     def accept(self, data: ResultsIn) -> dict:
         truncated = 0
@@ -47,5 +53,10 @@ class Ingest:
                              r.status, r.ts, r.error_class)
         if rows:
             self.dirty_since = max(self.dirty_since, max(r["ts"] for r in rows))
+        self.accepted_total += inserted
+        self.duplicates_total += dups
+        self.rejected_total += len(rejected)
+        self.truncated_total += truncated
+        self.batches_total += 1
         return {"accepted": inserted, "duplicates": dups,
                 "truncated": truncated, "rejected": rejected, "server_time": ts_now}

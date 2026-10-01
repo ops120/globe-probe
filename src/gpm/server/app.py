@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from .. import __version__
 from ..common.util import now
@@ -39,6 +39,7 @@ def create_app(cfg, storage: Storage | None = None):
             asyncio.create_task(_sweep_loop(state, stop)),
             asyncio.create_task(_agg_loop(state, stop)),
             asyncio.create_task(_retention_loop(state, stop)),
+            asyncio.create_task(_alert_loop(state, stop)),
         ]
         log.info("服务端启动: %s (db=%s)", cfg.server["listen"], cfg.server["database"])
         yield
@@ -55,6 +56,16 @@ def create_app(cfg, storage: Storage | None = None):
     def health():
         return {"ok": True, "time": now(), "config_version": storage.config_version(),
                 "version": __version__, "author": AUTHOR, "repo": REPO}
+
+    @app.get("/metrics")
+    def prometheus_metrics():
+        """Prometheus 文本格式指标（便于接入既有监控栈；失败时也返回可解析的注释行）。"""
+        try:
+            from . import metrics
+            body = metrics.render(storage, ingest)
+        except Exception as e:  # noqa: BLE001 - 指标不可用不应影响服务
+            body = "# gpm metrics unavailable: " + type(e).__name__ + ": " + str(e)[:200] + "\n"
+        return PlainTextResponse(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
     @app.exception_handler(Exception)
     async def unhandled(request, exc):
@@ -88,6 +99,24 @@ async def _sweep_loop(state: dict, stop: asyncio.Event):
             log.error("离线 sweep 失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _alert_loop(state: dict, stop: asyncio.Event):
+    """告警规则评估循环：默认每 30s 一轮（可在 server.alert_eval_interval 调整）。"""
+    s: Storage = state["storage"]
+    interval = int(state["cfg"].server.get("alert_eval_interval", 30) or 30)
+    while not stop.is_set():
+        try:
+            from . import alerting
+            events = alerting.evaluate(s, now())
+            if events:
+                log.warning("告警评估产生 %d 条事件（firing/remind/resolved）", len(events))
+        except Exception as e:  # noqa
+            log.error("告警评估失败: %s", e)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
         except asyncio.TimeoutError:
             pass
 

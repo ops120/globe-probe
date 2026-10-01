@@ -10,7 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from ..common.models import NodeUpdate, TaskCreate, TaskUpdate
 from ..common.util import new_id, now, sha256, validate_target
-from . import geo
+from . import alerting, geo
 from .storage import BUCKET_SECONDS
 
 
@@ -691,5 +691,212 @@ def setup_router(app_state) -> APIRouter:
             if len(out) >= limit:
                 break
         return out
+
+    def _rule_fields(body: dict, partial: bool = False) -> dict:
+        """告警规则字段校验（metric/op/阈值/窗口/静默期/渠道）。"""
+        out: dict = {}
+        metric = body.get("metric")
+        if metric is not None:
+            if metric not in alerting.METRICS:
+                raise HTTPException(422, f"不支持的指标: {metric}")
+            out["metric"] = metric
+        op = body.get("op")
+        if op is not None:
+            if op not in alerting.OPS:
+                raise HTTPException(422, f"不支持的比较方式: {op}")
+            out["op"] = op
+        if body.get("threshold") is not None:
+            try:
+                out["threshold"] = float(body["threshold"])
+            except (TypeError, ValueError):
+                raise HTTPException(422, "阈值必须是数字")
+        for key, lo, hi in (("window_seconds", 60, 30 * 86400),
+                            ("silence_seconds", 0, 7 * 86400)):
+            if body.get(key) is not None:
+                try:
+                    v = int(body[key])
+                except (TypeError, ValueError):
+                    raise HTTPException(422, f"{key} 必须是整数")
+                out[key] = max(lo, min(v, hi))
+        if body.get("channel_ids") is not None:
+            if not isinstance(body["channel_ids"], list):
+                raise HTTPException(422, "channel_ids 必须是数组")
+            known = {c["id"] for c in s.list_channels()}
+            bad = [c for c in body["channel_ids"] if c not in known]
+            if bad:
+                raise HTTPException(422, f"渠道不存在: {bad}")
+            out["channel_ids"] = [str(c) for c in body["channel_ids"]]
+        if body.get("name") is not None:
+            nm = str(body["name"]).strip()
+            if not nm:
+                raise HTTPException(422, "规则名不能为空")
+            out["name"] = nm
+        for key in ("task_id", "node_id", "group_id"):
+            if key in body:
+                out[key] = str(body.get(key) or "")
+        if body.get("severity") is not None:
+            sev = str(body["severity"])
+            if sev not in ("warning", "critical"):
+                raise HTTPException(422, "severity 只能是 warning / critical")
+            out["severity"] = sev
+        if body.get("enabled") is not None:
+            out["enabled"] = bool(body["enabled"])
+        if not partial:
+            for req in ("name", "metric", "op", "threshold"):
+                if req not in out:
+                    raise HTTPException(422, f"缺少必填字段: {req}")
+        return out
+
+    # ---------- 告警：通知渠道 ----------
+    @router.get("/alerts/channels")
+    def list_channels():
+        out = s.list_channels()
+        try:
+            from . import notify
+            for c in out:
+                c["valid"] = notify.validate({"type": c["type"], **(c.get("config") or {})}) is None
+        except Exception:  # noqa: BLE001
+            pass
+        return out
+
+    @router.post("/alerts/channels")
+    def create_channel(body: dict, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        import importlib
+        name = str(body.get("name") or "").strip()
+        ctype = str(body.get("type") or "").strip()
+        conf = body.get("config") or {}
+        if not name:
+            raise HTTPException(422, "渠道名不能为空")
+        if ctype not in ("webhook", "wecom", "dingtalk", "feishu", "smtp"):
+            raise HTTPException(422, "不支持的渠道类型（webhook/wecom/dingtalk/feishu/smtp）")
+        try:
+            notify = importlib.import_module("gpm.server.notify")
+            err = notify.validate({"type": ctype, **(conf or {})})
+        except Exception as e:  # noqa: BLE001
+            err = f"通知模块不可用: {e}"
+        if err:
+            raise HTTPException(422, err)
+        try:
+            return s.create_channel(new_id("ch"), name, ctype, conf, now())
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+
+    @router.put("/alerts/channels/{cid}")
+    def update_channel(cid: str, body: dict, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        fields = {}
+        for k in ("name", "type", "config", "enabled"):
+            if k in body:
+                fields[k] = body[k]
+        if fields.get("name") is not None and not str(fields["name"]).strip():
+            raise HTTPException(422, "渠道名不能为空")
+        try:
+            return s.update_channel(cid, fields, now())
+        except KeyError:
+            raise HTTPException(404, "渠道不存在")
+
+    @router.delete("/alerts/channels/{cid}")
+    def delete_channel(cid: str, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        if not s.delete_channel(cid):
+            raise HTTPException(404, "渠道不存在")
+        return {"deleted": cid}
+
+    @router.post("/alerts/channels/{cid}/test")
+    def test_channel(cid: str, x_admin_token: str | None = Header(default=None)):
+        """测试发送：UI「测试」按钮用，返回 (成功?, 说明)。"""
+        check_write(x_admin_token)
+        ch = next((c for c in s.list_channels() if c["id"] == cid), None)
+        if not ch:
+            raise HTTPException(404, "渠道不存在")
+        ok, msg = alerting.test_channel(s, ch)
+        return {"ok": ok, "detail": msg}
+
+    # ---------- 告警：规则 ----------
+    @router.get("/alerts/rules")
+    def list_rules():
+        return {"items": s.list_rules(), "metrics": alerting.METRICS, "ops": alerting.OPS}
+
+    @router.post("/alerts/rules")
+    def create_rule(body: dict, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        fields = _rule_fields(body)
+        try:
+            return s.create_rule(new_id("ar"), fields, now())
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+
+    @router.put("/alerts/rules/{rid}")
+    def update_rule(rid: str, body: dict, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        fields = _rule_fields(body, partial=True)
+        try:
+            return s.update_rule(rid, fields, now())
+        except KeyError:
+            raise HTTPException(404, "规则不存在")
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+
+    @router.delete("/alerts/rules/{rid}")
+    def delete_rule(rid: str, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        if not s.delete_rule(rid):
+            raise HTTPException(404, "规则不存在")
+        return {"deleted": rid}
+
+    # ---------- 告警：维护窗口 ----------
+    @router.get("/alerts/windows")
+    def list_windows():
+        return s.list_windows()
+
+    @router.post("/alerts/windows")
+    def create_window(body: dict, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        try:
+            starts, ends = int(body.get("starts_at") or 0), int(body.get("ends_at") or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(422, "starts_at / ends_at 必须是时间戳")
+        if not starts or ends <= starts:
+            raise HTTPException(422, "结束时间必须晚于开始时间")
+        return s.create_window(new_id("mw"), {**body, "starts_at": starts, "ends_at": ends}, now())
+
+    @router.delete("/alerts/windows/{wid}")
+    def delete_window(wid: str, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        if not s.delete_window(wid):
+            raise HTTPException(404, "维护窗口不存在")
+        return {"deleted": wid}
+
+    # ---------- 告警：历史与手动评估 ----------
+    @router.get("/alerts")
+    def alert_history(limit: int = 50, status: str = ""):
+        return {"items": s.alert_recent(limit=max(1, min(limit, 500)), status=status),
+                "counts": s.alert_counts()}
+
+    @router.post("/alerts/evaluate")
+    def evaluate_now(x_admin_token: str | None = Header(default=None)):
+        """立即评估一轮规则（不等后台周期），返回本轮事件。"""
+        check_write(x_admin_token)
+        return {"events": alerting.evaluate(s)}
+
+    # ---------- SLA / 报表 ----------
+    @router.get("/report/sla")
+    def report_sla(t_from: int = 0, t_to: int = 0, task_id: str = "", node_id: str = ""):
+        from . import report
+        t_to = t_to or now()
+        t_from = t_from or (t_to - 86400)
+        return report.sla(s, t_from, t_to, task_id=task_id, node_id=node_id)
+
+    @router.get("/report/daily")
+    def report_daily(task_id: str, days: int = 30):
+        from . import report
+        return {"items": report.daily_series(s, task_id, max(1, min(days, 365)), now())}
+
+    @router.get("/report/digest")
+    def report_digest(hours: int = 24):
+        from . import report
+        title, text = report.digest_text(s, max(1, min(hours, 24 * 30)), now())
+        return {"title": title, "text": text}
 
     return router

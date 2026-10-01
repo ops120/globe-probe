@@ -20,6 +20,7 @@ DEFAULTS = {
         "retention_5m_days": 180,
         "retention_1h_days": 730,
         "retention_hb_days": 7,
+        "alert_eval_interval": 30,    # 告警规则评估周期（秒）
     },
     "agent": {
         "server_url": "http://127.0.0.1:8620",
