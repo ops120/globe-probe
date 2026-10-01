@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPM · 全球拨测监控平台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%230f1114' stroke='%234e8ce6' stroke-width='2.5'/%3E%3Cpath d='M3 16h26M16 3c4.2 4.6 4.2 21.4 0 26M16 3c-4.2 4.6-4.2 21.4 0 26' fill='none' stroke='%234e8ce6' stroke-width='2'/%3E%3C/svg%3E">
+<style>
+:root{
+  color-scheme:dark;
+  --bg:#0f1114; --bg-2:#15171b; --bg-3:#1b1e23; --bg-4:#22262c; --panel:#171a1e;
+  --bd:#26292e; --bd-2:#33373d; --bd-soft:#1f2226; --input-bg:#101215; --input-bd:#2a2e34;
+  --fg:#c9cdd4; --fg-2:#d5d9de; --fg-strong:#e8eaed; --fg-strong2:#dfe3e8;
+  --muted:#8a919c; --faint:#5b6470; --nav:#aab1bb;
+  --accent:#4e8ce6; --accent-2:#7cabf0; --accent-3:#39c0ed; --accent-4:#a78bfa; --nav-active:#5b9cf0;
+  --accent-bg:#1c2430; --accent-bd:#2c3a52; --btn:#243042; --btn-hover:#2b3a52;
+  --ok:#30a46c; --ok-fg:#4cc38a; --fail:#e5484d; --fail-fg:#f2666b;
+  --warn:#f5a524; --warn-fg:#f5b74e; --mono:#9ecb8f; --b-mtr-fg:#b9a3fb; --nodata:#555a64;
+  --row-hover:#1a1d22; --toast-bg:#23272c; --note-fg:#8fb4e8;
+  --mask:rgba(6,8,10,.62); --shadow:rgba(0,0,0,.5);
+  --chart-label:#9aa2ad; --axis:#3a3f46; --split:#202329; --chart-bg:#14161a;
+  --heat-0:#1d3a2a; --heat-1:#2ea36b; --heat-2:#e8c547; --heat-3:#e5484d;
+}
+body.light{
+  color-scheme:light;
+  --bg:#f2f4f7; --bg-2:#ffffff; --bg-3:#eef1f6; --bg-4:#e4e8ee; --panel:#ffffff;
+  --bd:#dde2ea; --bd-2:#c6cdd8; --bd-soft:#eef1f5; --input-bg:#ffffff; --input-bd:#cfd6e0;
+  --fg:#2c323b; --fg-2:#3a424d; --fg-strong:#12161c; --fg-strong2:#1d232b;
+  --muted:#5f6874; --faint:#8b939f; --nav:#3f4753;
+  --accent:#2f6fd0; --accent-2:#2f6fd0; --accent-3:#0b83b0; --accent-4:#7c5cd6; --nav-active:#2f6fd0;
+  --accent-bg:#e4edfb; --accent-bd:#bcd2f2; --btn:#e4edfb; --btn-hover:#d3e2fa;
+  --ok:#1f8a53; --ok-fg:#1f8a53; --fail:#d13b40; --fail-fg:#c9302f;
+  --warn:#b26a00; --warn-fg:#a86a00; --mono:#1f7a45; --b-mtr-fg:#6f4fd0; --nodata:#9aa3ae;
+  --row-hover:#f6f8fb; --toast-bg:#2c323b; --note-fg:#245a9e;
+  --mask:rgba(20,26,34,.38); --shadow:rgba(15,23,42,.18);
+  --chart-label:#6b7480; --axis:#cfd6e0; --split:#eceff3; --chart-bg:#f7f9fb;
+  --heat-0:#d8f3e3; --heat-1:#5cc98c; --heat-2:#e0b23c; --heat-3:#e0555a;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;background:var(--bg);color:var(--fg);font-size:13px;overflow:hidden}
+.hidden{display:none!important}
+.layout{display:flex;height:100vh}
+.sidebar{width:200px;flex-shrink:0;background:var(--bg-2);border-right:1px solid var(--bd);display:flex;flex-direction:column}
+.logo{padding:16px;font-size:16px;font-weight:600;color:var(--fg-strong);border-bottom:1px solid var(--bd)}
+.logo span{display:block;font-size:11px;color:var(--muted);font-weight:400;margin-top:3px;letter-spacing:.5px}
+.sidebar nav{padding:8px 0}
+.sidebar nav a{display:block;padding:10px 16px;color:var(--nav);cursor:pointer;text-decoration:none;border-left:2px solid transparent;font-size:13px}
+.sidebar nav a:hover{background:var(--bg-3);color:var(--fg-strong)}
+.sidebar nav a.active{background:var(--accent-bg);color:var(--nav-active);border-left-color:var(--accent)}
+.sidebar-footer{margin-top:auto;padding:12px 16px;color:var(--faint);font-size:11px;border-top:1px solid var(--bd);line-height:1.7}
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{height:48px;flex-shrink:0;background:var(--bg-2);border-bottom:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between;padding:0 20px}
+.crumb{font-size:14px;font-weight:600;color:var(--fg-strong)}
+.top-actions{display:flex;align-items:center;gap:14px;font-size:12px;color:var(--muted)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
+.dot.g{background:var(--ok);box-shadow:0 0 6px rgba(48,163,107,.8)}
+.dot.r{background:var(--fail)}
+main.content{flex:1;overflow-y:auto;padding:16px 20px}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+.card{background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:13px 16px}
+.card .k{color:var(--muted);font-size:12px}
+.card .v{font-size:24px;font-weight:600;color:var(--fg-strong);margin:4px 0 2px;font-variant-numeric:tabular-nums}
+.card .v small{font-size:13px;color:var(--muted);font-weight:400}
+.card .s{font-size:11px;color:var(--faint)}
+.card.bad .v{color:var(--fail)}
+.card.up .v{color:var(--ok)}
+.panel{background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:14px 16px;margin-bottom:14px}
+.panel-head{font-size:14px;font-weight:600;color:var(--fg-strong);margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.panel-head .sub{font-size:11px;color:var(--faint);font-weight:400}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:1100px){.grid-2{grid-template-columns:1fr}.cards{grid-template-columns:repeat(2,1fr)}}
+.chart{width:100%}
+.h160{height:160px}.h220{height:220px}.h260{height:260px}.h300{height:300px}.h340{height:340px}
+.hint{color:var(--faint);font-size:11px;text-align:center;padding:2px 0 14px}
+table.tbl{width:100%;border-collapse:collapse}
+.tbl th{text-align:left;color:var(--muted);font-size:11px;padding:8px 10px;border-bottom:1px solid var(--bd);font-weight:500;white-space:nowrap}
+.tbl td{padding:9px 10px;border-bottom:1px solid var(--bd-soft);white-space:nowrap;font-variant-numeric:tabular-nums}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tr:hover td{background:var(--row-hover)}
+.badge{display:inline-block;padding:1px 9px;border-radius:10px;font-size:11px;line-height:18px}
+.b-ping{background:rgba(48,163,107,.14);color:var(--ok-fg)}
+.b-curl{background:rgba(78,140,230,.14);color:var(--accent-2)}
+.b-mtr{background:rgba(167,139,250,.14);color:var(--b-mtr-fg)}
+.b-ok{background:rgba(48,163,107,.14);color:var(--ok-fg)}
+.b-fail{background:rgba(229,72,77,.16);color:var(--fail-fg)}
+.b-off{background:rgba(138,145,156,.15);color:var(--muted)}
+.b-warn{background:rgba(245,165,36,.14);color:var(--warn-fg)}
+.seg{display:inline-flex;background:var(--input-bg);border:1px solid var(--input-bd);border-radius:6px;overflow:hidden}
+.seg button{background:none;border:none;color:var(--muted);font-size:12px;padding:5px 12px;cursor:pointer;font-family:inherit}
+.seg button.active{background:var(--btn);color:var(--accent-2)}
+.btn{background:var(--btn);color:var(--accent-2);border:none;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit}
+.btn:hover{background:var(--btn-hover)}
+.btn.ghost{background:var(--bg-4);color:var(--nav)}
+.btn.danger{background:rgba(229,72,77,.12);color:var(--fail-fg)}
+.btn.sm{padding:3px 10px;font-size:11px;border-radius:5px}
+select,input[type=text]{background:var(--input-bg);border:1px solid var(--input-bd);color:var(--fg);border-radius:6px;padding:6px 10px;font-size:12px;font-family:inherit;outline:none}
+.chip{display:inline-block;padding:3px 10px;border-radius:12px;background:var(--bg-3);color:var(--muted);font-size:11px;cursor:pointer;border:1px solid transparent;user-select:none;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip.active{background:var(--accent-bg);color:var(--accent-2);border-color:var(--accent-bd)}
+.chip:hover{color:var(--fg)}
+.fsel{position:relative;display:inline-block;vertical-align:middle}
+.fsel>input{width:176px;cursor:pointer;padding-right:26px}
+.fsel>input:hover{border-color:var(--accent)}
+.fsel::after{content:'▾';position:absolute;right:9px;top:6px;color:var(--muted);pointer-events:none;font-size:11px}
+.filter-inline{display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding-top:10px;border-top:1px dashed var(--bd)}
+.code-block{background:var(--input-bg);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;margin-bottom:10px}
+.code-head{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;color:var(--muted);margin-bottom:6px}
+.code-block pre{font-family:Consolas,monospace;font-size:12px;color:var(--mono);white-space:pre-wrap;word-break:break-all;line-height:1.7}
+body.light .code-block pre{color:var(--fg)}
+.tgl{background:var(--btn);color:var(--accent-2);border:1px solid var(--accent-bd);border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit}
+.tgl:hover{background:var(--btn-hover)}
+.mtr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px}
+.mtr-card{border:1px solid var(--bd);border-radius:8px;padding:8px 10px;background:var(--panel)}
+.mtr-card h4{font-size:12px;color:var(--fg-strong2);margin-bottom:6px;font-weight:500;display:flex;justify-content:space-between;gap:8px}
+.mtr-card h4 span{color:var(--faint);font-weight:400}
+.grp-chip{display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;background:var(--accent-bg);color:var(--accent-2);border:1px solid var(--accent-bd);margin:2px 4px 2px 0}
+.grp-box{border:1px solid var(--bd);border-radius:6px;padding:8px 10px;max-height:120px;overflow:auto}
+.code-inline{font-family:Consolas,monospace;font-size:11px;color:var(--mono);background:var(--input-bg);border:1px solid var(--bd);border-radius:4px;padding:1px 5px}
+body.light .code-inline{color:var(--fg)}
+.fdrop{position:absolute;top:34px;left:0;z-index:40;background:var(--bg-3);border:1px solid var(--bd-2);border-radius:8px;min-width:260px;box-shadow:0 8px 24px var(--shadow);padding:8px}
+.fdrop input{width:100%;margin-bottom:6px}
+.fopts{max-height:220px;overflow:auto}
+.fopt{padding:6px 10px;border-radius:5px;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fopt:hover{background:var(--btn);color:var(--accent-2)}
+.fopt.active{color:var(--accent-2)}
+.fcheck{display:flex;align-items:center;gap:8px}
+.fcheck input[type=checkbox]{accent-color:var(--accent)}
+.legend-chips{display:inline-flex;gap:10px;align-items:center}
+.legend-chips i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.evt{display:flex;gap:10px;padding:10px 2px;border-bottom:1px solid var(--bd-soft);align-items:flex-start}
+.evt:last-child{border-bottom:none}
+.evt .bar{width:3px;border-radius:2px;align-self:stretch;flex-shrink:0}
+.evt .bar.fail{background:var(--fail)}.evt .bar.warn{background:var(--warn)}.evt .bar.nodata{background:var(--muted)}
+.evt .t1{font-size:12px;color:var(--fg-2)}
+.evt .t2{font-size:11px;color:var(--faint);margin-top:3px}
+.evt .when{font-size:11px;color:var(--muted);width:96px;flex-shrink:0;padding-top:1px}
+.node-chip{display:inline-flex;align-items:center;gap:7px;background:var(--bg-3);border:1px solid var(--bd);border-radius:8px;padding:7px 11px;font-size:12px;margin:0 8px 8px 0}
+.node-chip b{color:var(--fg-strong2);font-weight:500}
+.node-chip span{color:var(--faint);font-size:11px}
+.prog{width:70px;height:5px;background:var(--bg-4);border-radius:3px;display:inline-block;vertical-align:middle;margin-right:6px;overflow:hidden}
+.prog i{display:block;height:100%;border-radius:3px}
+.modal-mask{position:fixed;inset:0;background:var(--mask);display:flex;align-items:center;justify-content:center;z-index:50}
+.modal{background:var(--panel);border:1px solid var(--bd-2);border-radius:10px;width:640px;max-width:94vw;max-height:86vh;overflow:auto;padding:18px 22px;box-shadow:0 12px 40px var(--shadow)}
+.m-title{font-size:15px;font-weight:600;color:var(--fg-strong);margin-bottom:4px}
+.m-sub{font-size:12px;color:var(--muted);margin-bottom:14px;word-break:break-all}
+.m-close{float:right;color:var(--faint);cursor:pointer;font-size:16px;line-height:1;padding:2px 6px}
+.m-close:hover{color:var(--fg)}
+.pk-row{display:flex;justify-content:space-between;gap:14px;padding:7px 10px;border-bottom:1px solid var(--bd-soft);font-size:12px}
+.pk-row:last-child{border-bottom:none}
+.pk-row .mono{font-family:Consolas,monospace;color:var(--mono);text-align:right;word-break:break-all}
+.wf-row{display:flex;align-items:center;gap:10px;margin:7px 0}
+.wf-label{width:78px;color:var(--muted);font-size:12px;flex-shrink:0}
+.wf-track{flex:1;height:14px;background:var(--input-bg);border-radius:3px;overflow:hidden}
+.wf-bar{height:100%;border-radius:3px}
+.wf-val{width:64px;text-align:right;font-size:11px;color:var(--muted);flex-shrink:0;font-variant-numeric:tabular-nums}
+.m-note{background:var(--accent-bg);border:1px solid var(--accent-bd);color:var(--note-fg);border-radius:6px;padding:9px 12px;font-size:12px;margin-top:12px;line-height:1.7}
+.m-note.gray{background:var(--bg-3);border-color:var(--input-bd);color:var(--muted)}
+.form-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+/* 仅作用于直接子级 label：分配节点选择器里的 .fcheck 标签不能被压成窄列 */
+.form-row>label{width:90px;color:var(--muted);font-size:12px;flex-shrink:0;text-align:right}
+.fcheck span{line-height:1.35}
+.form-row input[type=text],.form-row select,.form-row textarea{flex:1}
+textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(--fg);border-radius:6px;padding:6px 10px;font-size:12px;font-family:inherit;outline:none;width:100%}
+#toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:var(--toast-bg);border:1px solid var(--bd-2);color:var(--fg-2);padding:8px 20px;border-radius:8px;font-size:12px;z-index:99;box-shadow:0 6px 20px var(--shadow)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:var(--bd);border-radius:5px}
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="logo">🌐 GPM<span>全球拨测监控平台</span></div>
+    <nav>
+      <a data-page="overview" class="active">▦ 总览</a>
+      <a data-page="task">📈 任务详情</a>
+      <a data-page="compare">⇄ 历史对比</a>
+      <a data-page="geo">🌍 全球地图</a>
+      <a data-page="nodes">◈ 节点管理</a>
+      <a data-page="tasks">≡ 任务管理</a>
+    </nav>
+    <div class="sidebar-footer" id="sb-foot">gpm v0.1.0<br>
+      <span style="color:var(--faint)">作者 <b style="color:var(--muted);font-weight:500">ops120</b></span><br>
+      <a href="https://github.com/ops120/globe-probe" target="_blank" rel="noopener"
+         style="color:var(--accent-2);text-decoration:none" title="GitHub · globe-probe">GitHub ↗</a></div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div class="crumb" id="crumb">总览</div>
+      <div class="top-actions"><span id="srv-status"><i class="dot r"></i>连接中…</span><span id="srv-time"></span>
+        <button class="tgl" id="theme-toggle" title="切换白天/夜间主题">☀ 白天</button></div>
+    </header>
+    <main class="content">
+
+      <section class="page" id="page-overview">
+        <div class="cards">
+          <div class="card"><div class="k">监控任务</div><div class="v" id="ov-tasks">–</div><div class="s" id="ov-tasks-s"></div></div>
+          <div class="card"><div class="k">在线节点</div><div class="v" id="ov-nodes-v">–</div><div class="s" id="ov-nodes-s"></div></div>
+          <div class="card bad"><div class="k">进行中事件</div><div class="v" id="ov-inc">–</div><div class="s">连续失败阈值触发</div></div>
+          <div class="card up"><div class="k">24h 平均可用率</div><div class="v" id="ov-avail">–</div><div class="s" id="ov-results"></div></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">任务状态 <span class="sub">按任务聚合 · 最近 24 小时（1h 聚合表）</span></div>
+          <table class="tbl">
+            <thead><tr><th>任务</th><th>类型</th><th>目标</th><th>间隔</th><th>结果流</th><th>当前状态</th><th>24h 可用率</th></tr></thead>
+            <tbody id="ov-task-body"></tbody>
+          </table>
+        </div>
+        <div class="grid-2">
+          <div class="panel">
+            <div class="panel-head">事件 <span class="sub">灰色条目为节点侧，不计入目标故障</span></div>
+            <div id="evt-list"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">节点状态 <span class="sub">心跳超时 60s 判定离线</span></div>
+            <div id="ov-nodes" style="padding-top:4px"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="page hidden" id="page-task">
+        <div class="panel">
+          <div class="panel-head" style="margin-bottom:0">
+            <select id="task-select"></select>
+            <span class="sub" id="task-meta"></span>
+            <span style="flex:1"></span>
+            <div class="seg" id="task-range">
+              <button data-r="3600" class="active">最近1小时</button>
+              <button data-r="86400">最近24小时</button>
+              <button data-r="604800">最近7天</button>
+            </div>
+            <button class="btn ghost sm" id="btn-export">导出 CSV</button>
+          </div>
+          <div class="filter-inline">
+            <div id="dns-row" class="hidden" style="display:inline-flex;align-items:center;gap:8px"></div>
+            <div id="url-row" class="hidden" style="display:inline-flex;align-items:center;gap:8px"></div>
+            <div id="node-row" class="hidden" style="display:inline-flex;align-items:center;gap:8px"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">通断条带
+            <span class="legend-chips sub">
+              <span><i style="background:#30a46c"></i>成功</span>
+              <span><i style="background:#e5484d"></i>失败</span>
+              <span><i style="background:#555a64"></i>无数据/节点离线</span>
+            </span>
+            <span class="sub">点击色块查看单次详情</span>
+          </div>
+          <div id="chart-uptime" class="chart h160"></div>
+        </div>
+        <div id="panels-ping">
+          <div class="panel">
+            <div class="panel-head">RTT 延迟 <span class="sub" id="gran-note"></span></div>
+            <div id="chart-rtt" class="chart h300"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">丢包率 <span class="sub">按节点 · 点击数据点查看详情</span></div>
+            <div id="chart-loss" class="chart h220"></div>
+          </div>
+        </div>
+        <div id="panels-curl" class="hidden">
+          <div class="grid-2">
+            <div class="panel"><div class="panel-head">HTTP 状态码分布 <span class="sub">全部节点汇总</span></div><div id="chart-code" class="chart h300"></div></div>
+            <div class="panel"><div class="panel-head">总耗时 P95/均值 <span class="sub">按节点</span></div><div id="chart-stage" class="chart h300"></div></div>
+          </div>
+        </div>
+        <div id="panels-mtr" class="hidden">
+          <div class="panel"><div class="panel-head">逐跳丢包热力图 <span class="sub" id="mtr-hm-sub">最新一轮</span></div><div id="chart-mtrhm" class="chart h260"></div></div>
+          <div class="panel"><div class="panel-head">路径明细 <span class="sub" id="mtr-sub"></span>
+              <span style="flex:1"></span>
+              <a id="mtr-reset" class="hidden" href="javascript:void(0)" style="font-size:12px;color:#4e8ce6" title="清除点选/流选择，跟随上方筛选显示最新一轮">↺ 回到最新</a></div>
+            <div id="mtr-streams" style="padding:0 0 8px 0"></div>
+            <div id="mtr-tables"></div>
+          </div>
+        </div>
+        <div class="hint">点击图表数据点或通断条带色块 → 该时刻单次探测详情；原始明细仅短窗提供（性能红线），长窗走聚合表</div>
+      </section>
+
+      <section class="page hidden" id="page-compare">
+        <div class="panel">
+          <div class="panel-head">
+            <select id="cmp-task"></select>
+            <span style="flex:1"></span>
+            <div class="seg" id="cmp-metric">
+              <button data-k="rtt" class="active">延迟</button>
+              <button data-k="avail">可用率</button>
+              <button data-k="loss">丢包率</button>
+            </div>
+            <div class="seg" id="cmp-mode">
+              <button data-m="prev">环比 · 前一时段</button>
+              <button data-m="yesterday" class="active">环比 · 昨日</button>
+              <button data-m="lastweek">同比 · 上周同日</button>
+              <button data-m="lastmonth">同比 · 30天前</button>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head" id="cmp-title">按小时对比（最近24小时 vs 昨日同期）</div>
+          <div id="chart-cmp" class="chart h340"></div>
+          <div class="hint">对比查询一律走 1h 聚合表，不允许对原始 10s 表做跨周期扫描（性能红线）</div>
+        </div>
+      </section>
+
+      <section class="page hidden" id="page-geo">
+        <div class="panel">
+          <div class="panel-head">全球节点分布 <span class="sub" id="geo-sub"></span>
+            <span style="flex:1"></span>
+            <button class="tgl" id="geo-lines" title="节点→目标解析 IP 的探测链路，箭头沿弧线动态流动">☄ 链路动态：开</button>
+            <div class="seg" id="geo-metric">
+              <button data-k="avail" class="active">按可用率着色</button>
+              <button data-k="status">按在线状态着色</button>
+            </div>
+          </div>
+          <div class="legend-chips" id="geo-legend" style="margin:2px 0 8px;flex-wrap:wrap"></div>
+          <div id="chart-geo" class="chart" style="height:520px"></div>
+          <div class="hint">坐标来源见节点 tooltip：标签坐标 / 标签(内置区表) / 在线查询(出口 IP) / 在线查询(服务端出口近似)。
+            想精确定位就给节点加标签 <code>lat=39.9,lng=116.4</code>，或用 <code>region=cn-north</code> 走内置区表（离线可用）</div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">IP 段 → 位置 <span class="sub">IDC 内网段/固定出口段直接指定地理位置，优先于在线查询；支持写地名（上海/cn-east）或经纬度</span>
+            <span style="flex:1"></span><button class="btn sm" id="gn-new">+ 新增映射</button></div>
+          <table class="tbl" id="gn-tbl"></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head">未定位节点 <span class="sub">补个标签或加一条 IP 段映射即可上图</span></div>
+          <div id="geo-unknown"></div>
+        </div>
+      </section>
+
+      <section class="page hidden" id="page-nodes">
+        <div class="panel">
+          <div class="panel-head">节点列表 <span class="sub" id="nodes-sub"></span></div>
+          <table class="tbl" id="node-tbl"></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head">节点分组 <span class="sub">任务可按「组」分配，成员在「编辑节点」里勾选</span>
+            <span style="flex:1"></span><button class="btn sm" id="grp-new">+ 新建分组</button></div>
+          <table class="tbl" id="grp-tbl"></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head">注册 Token <span class="sub">明文只在新建时显示一次；吊销/停用后，用该 Token 注册的节点同步会被拒</span>
+            <span style="flex:1"></span><button class="btn sm" id="tok-new">+ 新建 Token</button></div>
+          <table class="tbl" id="tok-tbl"></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head">节点接入 <span class="sub">示例里的服务端地址已按当前页面地址（<span id="hint-origin"></span>）自动填好，注册 Token 见上方「注册 Token」（未建 Token 时用服务端配置的引导 Token）</span></div>
+          <div class="code-block">
+            <div class="code-head"><span>① Linux 节点（推荐：systemd 常驻，一键脚本；<b>--tags</b> 传 JSON 标签）</span>
+              <button class="btn sm ghost" data-copy="cmd-linux">复制</button></div>
+            <pre id="cmd-linux"></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head"><span>② Docker 节点（容器内已含 ping/curl/mtr；挂载 data 目录可复用 node_id）</span>
+              <button class="btn sm ghost" data-copy="cmd-docker">复制</button></div>
+            <pre id="cmd-docker"></pre>
+          </div>
+          <div class="code-block">
+            <div class="code-head"><span>③ Windows 节点（无 systemd，直接用 Python 跑；mtr 会自动降级为 tracert）</span>
+              <button class="btn sm ghost" data-copy="cmd-windows">复制</button></div>
+            <pre id="cmd-windows"></pre>
+          </div>
+          <div class="m-note gray">标签（tags）是自由键值对，用于给节点打上地域/运营商/环境等维度：<br>
+            · 注册时带：<code>--tags '{"region":"cn-north","isp":"telecom","env":"prod"}'</code>（install-agent.sh）<br>
+            · 事后改：本页「编辑」→ 标签，填 <code>region=cn-north,isp=telecom,env=prod</code>（英文逗号分隔 <b>键=值</b>）<br>
+            · 常用键建议：<b>region</b>（地域，如 cn-north/us-west）<b>isp</b>（运营商，如 telecom/unicom/mobile）<b>env</b>（prod/staging）<b>provider</b>（aliyun/aws/idc）<b>line</b>（bgp/cn2）</div>
+        </div>
+      </section>
+
+      <section class="page hidden" id="page-tasks">
+        <div class="panel">
+          <div class="panel-head">拨测任务 <span class="sub">配置变更 → config_version 递增 → 节点 15s 内拉取生效</span>
+            <span style="flex:1"></span>
+            <button class="btn" id="btn-newtask">＋ 新建任务</button>
+          </div>
+          <table class="tbl" id="task-mgr-tbl"></table>
+        </div>
+        <div class="hint">间隔下限：ping / curl 为 10 秒，mtr 为 60 秒；curl 目标支持多个 URL（逗号分隔）；可指定多个 DNS 服务器（多线路独立统计）</div>
+      </section>
+
+    </main>
+  </div>
+</div>
+<div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
+<div id="toast" class="hidden"></div>
+<script src="/static/echarts.min.js?v=23"></script>
+<script src="/static/app.js?v=23"></script>
+</body>
+</html>

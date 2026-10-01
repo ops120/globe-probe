@@ -1,0 +1,15 @@
+services:
+  gpm-server:
+    build: .
+    container_name: gpm-server
+    ports:
+      - "8620:8620"
+    environment:
+      - GPM_ADMIN_TOKEN=${GPM_ADMIN_TOKEN:-}
+      - GPM_REGISTER_TOKEN=${GPM_REGISTER_TOKEN:-gpm-change-me}
+    volumes:
+      - ./data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
+# 节点侧不建议容器化（需要宿主网络栈做真实拨测）：
+# 使用 deploy/install-agent.sh 安装到宿主机 systemd。

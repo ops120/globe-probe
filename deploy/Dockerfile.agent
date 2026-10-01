@@ -1,0 +1,21 @@
+# gpm 拨测节点镜像：含 ping/curl 系统工具（mtr 需另行安装，缺失时如实 skipped）
+FROM python:3.11-slim
+
+# mtr-tiny 提供 /usr/bin/mtr + /usr/sbin/mtr-packet；mtr 需要 CAP_NET_RAW（Docker 默认已含）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iputils-ping curl mtr-tiny \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN pip install --no-cache-dir ".[stats]"
+
+# 凭据/离线缓冲落盘目录：挂载后重建容器可复用同一 node_id（否则每次重建都会重新注册成新节点）
+VOLUME ["/app/data"]
+
+ENV GPM_SERVER_URL=http://host.docker.internal:8620 \
+    GPM_REGISTER_TOKEN=gpm-dev-register \
+    GPM_NODE_NAME=docker-node
+
+CMD ["sh", "-c", "gpm agent --server $GPM_SERVER_URL --token $GPM_REGISTER_TOKEN --name $GPM_NODE_NAME"]

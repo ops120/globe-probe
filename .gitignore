@@ -1,0 +1,29 @@
+__pycache__/
+*.pyc
+*.egg-info/
+data/
+logs/
+*.log
+artifacts/
+e2e-data/
+
+# 本地文档目录（架构/数据模型/算法/部署/进展记录等仅本地保留，不入库）
+.docs/
+
+# 文档类文件不入库（Word/PDF/PPT 等），需要分享时走 release 附件
+*.doc
+*.docx
+*.docm
+*.dot
+*.dotx
+*.pdf
+*.ppt
+*.pptx
+~$*
+*.tmp
+*.db
+*.db-wal
+*.db-shm
+.pytest_cache/
+.env
+config.yaml

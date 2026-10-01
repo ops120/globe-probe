@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpm"
+version = "0.1.0"
+description = "globe-probe - 全球拨测监控平台 (distributed synthetic monitoring: ping/curl/mtr)"
+authors = [{ name = "ops120", email = "ops120@users.noreply.github.com" }]
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "pydantic>=2.6",
+]
+
+# 项目主页 / 源码（作者：ops120）
+[project.urls]
+Homepage = "https://github.com/ops120/globe-probe"
+Repository = "https://github.com/ops120/globe-probe"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+# 节点资源采集（CPU/内存心跳）。缺失时如实上报 null，不影响拨测。
+stats = ["psutil>=5.9"]
+
+[project.scripts]
+gpm = "gpm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"gpm.webui" = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
