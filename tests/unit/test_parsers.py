@@ -322,3 +322,25 @@ def test_judge_path_all_dead_is_unreachable():
                 "avg": 1.0, "best": 1.0, "wrst": 1.0, "stdev": 0.0}
     assert judge_path(mixed) == ("ok", "")
     assert judge_path([]) == ("fail", "mtr_parse_error")
+
+
+# ---------------- curl 阶段耗时解析 ----------------
+
+def test_curl_metrics_download_is_rounded():
+    """回归：下载耗时是「总计 − 首字节」的差值，必须在原始秒值上相减后取整，
+    否则 UI 会显示 0.09000000000000341 这类浮点噪声（用户反馈）。"""
+    from gpm.probers.curl import parse_curl_metrics
+
+    out = "200 0.000062 0.004091 0.154390 0.169640 0.169730 2443 153.3.238.28"
+    m = parse_curl_metrics(out)
+    assert m["download_time"] == 0.09, m          # 不是 0.09000000000000341
+    assert m["total_time"] == 169.73 and m["ttfb"] == 169.64
+    assert (m["dns_time"], m["connect_time"], m["tls_time"]) == (0.06, 4.09, 154.39)
+    assert m["size"] == 2443 and m["remote_ip"] == "153.3.238.28" and m["http_code"] == 200
+    for k in ("dns_time", "connect_time", "tls_time", "ttfb", "total_time", "download_time"):
+        assert round(m[k], 2) == m[k], (k, m[k])
+    # 异常数据（首字节晚于总计）不能让下载为负
+    assert parse_curl_metrics("200 0 0 0 0.5 0.4 100 1.1.1.1")["download_time"] == 0.0
+    # 残缺/非法输出 → None，不抛异常
+    for bad in ("", "garbage", "200 0.1 0.2", None, "200 0.1 0.2 0.3 0.4 0.5"):
+        assert parse_curl_metrics(bad) is None, bad

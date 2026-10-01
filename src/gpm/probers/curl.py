@@ -38,6 +38,33 @@ def curl_cmd(url: str, timeout: float, resolved_ip: str = "", follow: bool = Tru
     return args
 
 
+def parse_curl_metrics(out: str) -> dict | None:
+    """解析 curl -w 输出，返回阶段耗时（ms，保留 2 位小数）。无法解析时返回 None。
+
+    说明：curl 没有单独的「下载耗时」变量，这里用 total − starttransfer 的差值，
+    并在**原始秒值**上相减后再取整（先各自 round 再相减会产生 0.09000000000000341 这类浮点噪声）。
+    """
+    nums = re.findall(r"\S+", (out or "").strip())
+    if len(nums) < 8 or not re.match(r"^\d{3}$", nums[0]):
+        return None
+    try:
+        total_s, ttfb_s = float(nums[5]), float(nums[4])
+    except ValueError:
+        return None
+    return {
+        "http_code": int(nums[0]),
+        "dns_time": round(float(nums[1]) * 1000, 2),
+        "connect_time": round(float(nums[2]) * 1000, 2),
+        "tls_time": round(float(nums[3]) * 1000, 2),
+        "ttfb": round(ttfb_s * 1000, 2),
+        "total_time": round(total_s * 1000, 2),
+        "download_time": round(max(0.0, total_s - ttfb_s) * 1000, 2),
+        "size": int(float(nums[6])),
+        "remote_ip": nums[7],
+        "http_reached": True,     # 有 HTTP 响应（网络可达）
+    }
+
+
 def run_curl(task: dict, url: str, dns_server: str, resolved_ip: str,
              dns_time_ms, ts: int) -> dict:
     params = task.get("params") or {}
@@ -52,23 +79,12 @@ def run_curl(task: dict, url: str, dns_server: str, resolved_ip: str,
     except ToolTimeout as e:
         return make_result(ts, "fail", "response_timeout", str(e), dns_server, resolved_ip, dns_time_ms)
 
-    nums = re.findall(r"\S+", out.strip())
-    if len(nums) < 8 or not re.match(r"^\d{3}$", nums[0]):
+    m = parse_curl_metrics(out)
+    if m is None:
         cls = _CURL_EXIT.get(code, "other")
         detail = (err or out).strip()[:200] or f"curl exit={code}"
         return make_result(ts, "fail", cls, detail, dns_server, resolved_ip, dns_time_ms)
-    http_code = int(nums[0])
-    m = {
-        "http_code": http_code,
-        "dns_time": round(float(nums[1]) * 1000, 2),
-        "connect_time": round(float(nums[2]) * 1000, 2),
-        "tls_time": round(float(nums[3]) * 1000, 2),
-        "ttfb": round(float(nums[4]) * 1000, 2),
-        "total_time": round(float(nums[5]) * 1000, 2),
-        "size": int(float(nums[6])),
-        "remote_ip": nums[7],
-        "http_reached": True,     # 有 HTTP 响应（网络可达）
-    }
+    http_code = m["http_code"]
     ok = _in_expected(http_code, expected)
     if not ok:
         return make_result(ts, "fail", f"http_{http_code}",

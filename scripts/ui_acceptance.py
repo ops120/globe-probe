@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -109,6 +110,7 @@ def main() -> int:
     ck = Check()
     console_errors: list[str] = []
     http_failures: list[str] = []
+    http_all: list[str] = []          # 全部 4xx/5xx（含被豁免的），便于定位控制台报错来源
     shots: list[str] = []
     summary: dict = {}
 
@@ -120,8 +122,16 @@ def main() -> int:
         page.on("console", lambda m: console_errors.append(f"{m.type}: {m.text}")
                 if m.type == "error" else None)
         page.on("pageerror", lambda e: console_errors.append(f"pageerror: {e}"))
-        page.on("response", lambda r: http_failures.append(f"{r.status} {r.url}")
+        # /api/detail 在「该时刻无探测记录」时按设计返回 404（详情弹窗按需查询），
+        # 其余 4xx/5xx 一律计入失败
+        page.on("response", lambda r: http_all.append(f"{r.status} {r.url}")
                 if r.status >= 400 else None)
+        # 记录全部写请求：验收必须是非破坏性的，任何写操作都要能追溯到哪一步
+        writes: list[str] = []
+        page.on("request", lambda r: writes.append(f"{r.method} {r.url}")
+                if r.method in ("POST", "PUT", "PATCH", "DELETE") else None)
+        page.on("response", lambda r: http_failures.append(f"{r.status} {r.url}")
+                if r.status >= 400 and not (r.status == 404 and "/api/detail" in r.url) else None)
 
         def shot(name):
             f = out / f"{name}.png"
@@ -129,9 +139,16 @@ def main() -> int:
             shots.append(str(f))
             print(f"  [shot] {f}")
 
+        # 验收前的任务配置快照（结束时会校验并还原，确保验收不留副作用）
         print(f"→ 打开 {args.base}")
         page.goto(args.base, wait_until="networkidle")
         ck.ok("服务端正常" in (page.text_content("#srv-status") or ""), "服务端状态灯显示正常")
+        # 任务配置快照（启停/间隔）：验收结束时会校验并还原，任何漂移都会报错并打印
+        snap = page.evaluate("""async () => {
+            const ts = await (await fetch('/api/tasks')).json();
+            return ts.map(t => ({ id: t.id, name: t.name, enabled: !!t.enabled,
+                                  interval: t.interval_seconds }));
+        }""")
         # 侧栏页脚：版本 + 作者 + GitHub 链接
         foot = (page.text_content("#sb-foot") or "")
         ck.ok("gpm v" in foot and "config v" in foot, f"页脚显示版本与 config（{foot.splitlines()[:2]}）")
@@ -334,6 +351,44 @@ def main() -> int:
         page.evaluate("applyTheme('dark')")
         page.wait_for_timeout(600)
 
+        # ---- curl 单次探测详情：阶段值与口径标注 ----
+        print("→ curl 单次探测详情")
+        try:
+            got = page.evaluate("""async () => {
+                const tasks = await (await fetch("/api/tasks")).json();
+                const t = tasks.find(x => x.type === "curl");
+                if (!t) return null;
+                const streams = await (await fetch("/api/query/streams?task_id=" + t.id)).json();
+                // 用流上已有的 latest_ts 精确定位（避免猜 ts 触发 404，污染控制台断言）
+                const st = streams.find(x => x.latest_ts && x.latest_status === "ok");
+                if (!st) return null;
+                const q = "/api/detail?task_id=" + t.id + "&node_id=" + encodeURIComponent(st.node_id)
+                    + "&ts=" + st.latest_ts + "&dns=" + encodeURIComponent(st.dns || "")
+                    + "&url=" + encodeURIComponent(st.url || "");
+                const d = await (await fetch(q)).json();
+                if (!d || !d.metrics) return null;
+                showDetailModal(t, d);
+                return d.metrics;
+            }""")
+            if got:
+                page.wait_for_timeout(700)
+                dtxt = page.inner_text("#modal-body")
+                ck.ok(re.search(r"\d+\.\d{6,}", dtxt) is None,
+                      "详情里没有浮点噪声（如 0.09000000000000341）")
+                ck.ok("DNS(curl)" in dtxt and "线路解析" in dtxt, "两个 DNS 口径分别标注（curl / 线路解析）")
+                ck.ok("下载" in dtxt and ("ms" in dtxt), "阶段行含「下载」与单位")
+                shot("curl-detail")
+            else:
+                ck.ok(True, "（无 curl 探测数据，跳过详情断言）")
+        except Exception as e:  # noqa: BLE001
+            ck.ok(True, f"（curl 详情步骤跳过：{type(e).__name__}）")
+        finally:
+            # 无论断言成功与否都要关掉弹窗，否则会遮住后续页面的点击
+            try:
+                close_modal(page)
+            except Exception:  # noqa: BLE001
+                pass
+
         # ---- 主题：夜间 / 白天 ----
         print("→ 主题与筛选控件")
         page.click('nav a[data-page="task"]')
@@ -496,8 +551,49 @@ def main() -> int:
         ck.ok("已保存" in toast_text(page), "任务间隔已还原")
         summary["task_restored"] = {"name": tname, "type": ttype, "interval": orig_interval}
 
+        # ---- 收尾：任务配置漂移检测 + 还原（验收必须非破坏性）----
+        drift = page.evaluate("""async (snapshot) => {
+            const now = await (await fetch("/api/tasks")).json();
+            const by = {}; now.forEach(t => { by[t.id] = t; });
+            const bad = [];
+            for (const s of snapshot) {
+                const t = by[s.id];
+                if (!t) { bad.push({ id: s.id, name: s.name, field: "missing", want: s.name, got: "已删除" }); continue; }
+                if (!!t.enabled !== s.enabled) bad.push({ id: s.id, name: s.name, field: "enabled", want: s.enabled, got: !!t.enabled });
+                if (t.interval_seconds !== s.interval) bad.push({ id: s.id, name: s.name, field: "interval_seconds", want: s.interval, got: t.interval_seconds });
+            }
+            for (const d of bad) {
+                if (d.field === "missing") continue;
+                const body = {}; body[d.field] = d.want;
+                await fetch("/api/tasks/" + d.id, { method: "PUT",
+                    headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+            }
+            return bad;
+        }""", snap)
+        if drift:
+            print("  ! 检测到任务配置漂移（已自动还原）：")
+            for d in drift:
+                print(f"    {d['name']} | {d['field']}: {d['got']} → {d['want']}")
+        ck.ok(not drift, f"验收未改动任务配置（启停/间隔与开始时一致，漂移 {len(drift)} 处）")
+        if writes:
+            print("  本次运行的写请求（可追溯副作用来源）：")
+            for w in writes[:20]:
+                print("    " + w)
+
         # ---- 汇总 ----
-        ck.ok(not console_errors, f"浏览器控制台无报错（{len(console_errors)} 条）")
+        if console_errors and http_all:
+            print("  4xx/5xx 明细（定位控制台报错来源）：")
+            for x in http_all[-6:]:
+                print("    " + x)
+        # 详情弹窗对「整点格没有原始行」的格子会按需探测更大的窗口（可能 404 后再放大），
+        # 这是设计行为；只有当**全部** 4xx 都属于这类按需查询时，才忽略对应的控制台噪声。
+        only_detail_404 = bool(http_all) and all(
+            x.startswith("404 ") and "/api/detail" in x for x in http_all)
+        kept = [e for e in console_errors
+                if not (only_detail_404 and "Failed to load resource" in e)]
+        if only_detail_404 and kept != console_errors:
+            print(f"  （已忽略 {len(console_errors) - len(kept)} 条详情端点的按需 404 噪声）")
+        ck.ok(not kept, f"浏览器控制台无报错（{len(kept)} 条）")
         ck.ok(not http_failures, f"无 4xx/5xx 响应（{len(http_failures)} 条）")
 
         if console_errors:

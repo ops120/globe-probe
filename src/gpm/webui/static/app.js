@@ -492,18 +492,31 @@ async function openDetail(t, ts, label, bucket) {
   const cands = state.streams.filter(s => s.node_id === node_id && (!state.dns || s.dns === state.dns) && (!state.url || s.url === state.url));
   const pick = cands[0] || state.streams[0];
   if (pick) { node_id = pick.node_id; dns = pick.dns || ''; url = pick.url || ''; }
+  const q = (b) => api(`/api/detail?task_id=${t.id}&node_id=${node_id}&ts=${ts}&dns=${encodeURIComponent(dns)}&url=${encodeURIComponent(url)}&bucket=${b}`);
   try {
-    const r = await api(`/api/detail?task_id=${t.id}&node_id=${node_id}&ts=${ts}&dns=${encodeURIComponent(dns)}&url=${encodeURIComponent(url)}&bucket=${bucket || 0}`);
-    showDetailModal(t, r, pick);
+    showDetailModal(t, await q(bucket || 0), pick);
   } catch (e) {
-    toast('该时刻无探测记录（' + e.message + '）');
+    // 该格没有原始记录（节点没探测到那一轮 / 被去重 / 探测间隔与格不对齐）：
+    // 退一步在更大窗口里找最近一次并**明确标注是邻近记录**，而不是直接报「无记录」
+    for (const b of [600, 3600]) {
+      try {
+        showDetailModal(t, await q(b), pick, b);
+        return;
+      } catch (e2) { /* 继续放大窗口 */ }
+    }
+    toast('该时刻前后 1 小时都没有探测记录（' + e.message + '）');
   }
 }
-function showDetailModal(t, r, pick) {
+function showDetailModal(t, r, pick, approxBucket) {
   const m = r.metrics || {};
   let body = '';
+  // 邻近记录提示：点到的格子本身没有原始行，展示的是放大窗口后最近的一次
+  const approxNote = approxBucket
+    ? `<div class="m-note" style="margin-bottom:8px">该格没有原始探测记录，下面是前后 ${approxBucket / 60} 分钟内最近的一次</div>`
+    : '';
   const headRow = (k, v) => `<div class="pk-row"><span>${k}</span><span class="mono">${v}</span></div>`;
-  const dnsLine = `<div class="pk-row"><span>解析</span><span class="mono">${esc(r.dns_server || 'system')} → ${esc(r.resolved_ip || '—')}${r.dns_time_ms != null ? `（${r.dns_time_ms} ms）` : ''}</span></div>`;
+  // 「线路解析」= 我们按任务指定 DNS 线路做的预解析；与 curl 自身的 DNS 阶段口径不同（见阶段提示）
+  const dnsLine = `<div class="pk-row" title="我们按任务指定的 DNS 线路（或系统默认）预解析目标域名，并可用 --resolve 固定到该 IP"><span>线路解析</span><span class="mono">${esc(r.dns_server || 'system')} → ${esc(r.resolved_ip || '—')}${r.dns_time_ms != null ? `（${r.dns_time_ms} ms）` : ''}</span></div>`;
   if (t.type === 'ping') {
     body = `<div class="m-block">${dnsLine}
       ${headRow('发包/收包', `${m.sent ?? '—'} / ${m.received ?? '—'}`)}
@@ -514,12 +527,24 @@ function showDetailModal(t, r, pick) {
       ${r.error ? `<span style="color:var(--muted);font-size:12px"> ${esc(r.error)}</span>` : ''}</div>`;
   } else if (t.type === 'curl') {
     if (r.status === 'ok') {
-      const stages = [['DNS', C('--accent-4'), m.dns_time], ['TCP', C('--accent'), m.connect_time], ['TLS', C('--accent-3'), m.tls_time], ['首字节', C('--warn'), m.ttfb], ['下载', C('--ok'), Math.max(0, (m.total_time || 0) - (m.ttfb || 0))]];
+      // 下载耗时优先用后端存的 download_time（后端在原始秒值上相减后取整）；
+      // 老数据没有该字段时兜底自行相减并 round，避免出现 0.09000000000000341 这种浮点噪声
+      const dl = m.download_time != null
+        ? m.download_time
+        : Math.round(Math.max(0, (m.total_time || 0) - (m.ttfb || 0)) * 100) / 100;
+      const stages = [
+        ['DNS(curl)', C('--accent-4'), m.dns_time, 'curl 自身的域名解析（通常命中系统缓存，所以接近 0）；左上的「线路解析」是我们按指定 DNS 线路预解析的耗时，两者口径不同'],
+        ['TCP', C('--accent'), m.connect_time, 'TCP 建连耗时（TLS 另计）'],
+        ['TLS', C('--accent-3'), m.tls_time, 'TLS 握手耗时（HTTP 站点为 0）'],
+        ['首字节', C('--warn'), m.ttfb, '从发起请求到收到第一个响应字节（curl time_starttransfer）'],
+        ['下载', C('--ok'), dl, '下载 = 总计 − 首字节。curl 没有独立的下载计时变量，这是差值；正文很小时该差值已接近计时精度'],
+      ];
       const total = m.total_time || stages.reduce((a, s) => a + (s[2] || 0), 0);
+      const stageVal = s => s[2] == null ? '—' : (s[0] === '下载' && s[2] < 1 ? '< 1 ms' : s[2] + ' ms');
       body = `<div style="margin-bottom:8px"><span class="badge b-ok">HTTP ${m.http_code}</span>
         <span style="font-size:12px;color:var(--fg-strong2);font-family:Consolas,monospace"> ${esc(r.url || t.target)}</span></div>
-        <div style="margin-bottom:10px;font-size:12px;color:var(--muted)">${esc(r.dns_server || 'system')} → ${esc(m.remote_ip || r.resolved_ip || '—')}${r.dns_time_ms != null ? ` · 解析 ${r.dns_time_ms}ms` : ''} · ${m.size ?? '—'} B</div>` +
-        stages.map(s => `<div class="wf-row"><span class="wf-label">${s[0]}</span><span class="wf-track"><span class="wf-bar" style="width:${Math.max(2, (s[2] || 0) / (total || 1) * 100).toFixed(1)}%;background:${s[1]}"></span></span><span class="wf-val">${s[2] != null ? s[2] : '—'} ms</span></div>`).join('') +
+        <div style="margin-bottom:10px;font-size:12px;color:var(--muted)">${esc(r.dns_server || 'system')} → ${esc(m.remote_ip || r.resolved_ip || '—')}${r.dns_time_ms != null ? ` · 线路解析 ${r.dns_time_ms}ms` : ''} · ${m.size ?? '—'} B</div>` +
+        stages.map(s => `<div class="wf-row" title="${esc(s[3] || '')}"><span class="wf-label">${s[0]}</span><span class="wf-track"><span class="wf-bar" style="width:${Math.max(2, (s[2] || 0) / (total || 1) * 100).toFixed(1)}%;background:${s[1]}"></span></span><span class="wf-val">${stageVal(s)}</span></div>`).join('') +
         `<div class="wf-row"><span class="wf-label" style="color:var(--fg-strong2)">总计</span><span class="wf-track"></span><span class="wf-val" style="color:var(--fg-strong2)">${m.total_time ?? '—'} ms</span></div>`;
     } else {
       body = `<div class="m-block">${headRow('URL', esc(r.url || t.target))}${headRow('错误分类', esc(r.error_class || ''))}${headRow('错误', esc(r.error || ''))}</div>
@@ -533,7 +558,7 @@ function showDetailModal(t, r, pick) {
       `</tbody></table>`;
   }
   $('#modal-body').innerHTML = `<span class="m-close" onclick="closeModal()">✕</span>
-    <div class="m-title">单次探测详情</div>
+    <div class="m-title">单次探测详情</div>${approxNote}
     <div class="m-sub">${esc(t.name)} · ${esc(pick ? pick.node_name : r.node_id)}${r.dns ? ' · ' + esc(r.dns) : ''} · ${fmtTS(r.ts)}</div>${body}`;
   $('#modal-mask').classList.remove('hidden');
 }
