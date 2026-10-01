@@ -203,7 +203,13 @@ docker run -d --name gpm-agent-node --add-host=host.docker.internal:host-gateway
    ```bash
    bash scripts/verify_linux_install.sh
    ```
-5. **基准**
+5. **验证通知渠道**（本地起接收器，然后在「告警与报表」新建 webhook 渠道指向它并点「测试」）
+
+   ```bash
+   python scripts/hook_receiver.py    # 127.0.0.1:8699，打印并落盘报文体
+   ```
+
+6. **基准**
    ```bash
    python scripts/benchmark.py 5000
    ```
