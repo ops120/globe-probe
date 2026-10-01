@@ -111,16 +111,23 @@ async function renderOverview() {
   $('#ov-results').textContent = `累计结果 ${ov.results_total.toLocaleString()} 条`;
   const tb = $('#ov-task-body'); tb.innerHTML = '';
   for (const t of tasks) {
-    const st = t.current_status === 'ok' ? '<span class="badge b-ok">正常</span>'
-      : t.current_status === 'fail' ? '<span class="badge b-fail">故障</span>'
-        : t.current_status === 'partial' ? '<span class="badge b-warn">部分失败</span>'
-          : t.current_status === 'skipped'
-            ? `<span class="badge b-off" title="${esc(t.skip_reason || '探测被跳过')}（不计入可用率）">工具缺失</span>`
-            : '<span class="badge b-off">无数据</span>';
-    const av = t.avail_24h == null ? '—' : (t.avail_24h * 100).toFixed(2) + '%';
-    tb.insertAdjacentHTML('beforeend', `<tr style="cursor:pointer" onclick="gotoTask('${t.id}')">
+    const on = t.enabled !== 0 && t.enabled !== false;
+    // 停用任务：不参与探测，所以「当前状态」不能显示成故障/无数据（那是停用前的旧值），
+    // 统一显示「已停用」，可用率标注为停用前历史值
+    const st = !on ? '<span class="badge b-off" title="任务已停用，不参与探测；下面的可用率是停用前的历史值">已停用</span>'
+      : t.current_status === 'ok' ? '<span class="badge b-ok">正常</span>'
+        : t.current_status === 'fail' ? '<span class="badge b-fail">故障</span>'
+          : t.current_status === 'partial' ? '<span class="badge b-warn">部分失败</span>'
+            : t.current_status === 'skipped'
+              ? `<span class="badge b-off" title="${esc(t.skip_reason || '探测被跳过')}（不计入可用率）">工具缺失</span>`
+              : '<span class="badge b-off">无数据</span>';
+    const av = t.avail_24h == null
+      ? `<span title="${on ? '窗口内无数据' : '停用前窗口内无数据'}">—</span>`
+      : `<span title="${on ? '最近 24 小时' : '停用前的历史值（任务已停用）'}" style="${on ? '' : 'color:var(--faint)'}">${(t.avail_24h * 100).toFixed(2)}%</span>`;
+    tb.insertAdjacentHTML('beforeend', `<tr style="cursor:pointer${on ? '' : ';opacity:.62'}" onclick="gotoTask('${t.id}')">
       <td style="color:var(--fg-strong2)">${esc(t.name)}</td>
       <td><span class="badge ${TYPE_BADGE[t.type]}">${t.type.toUpperCase()}</span></td>
+      <td>${on ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-off">停用</span>'}</td>
       <td style="color:var(--muted)">${esc(t.target || (t.urls || [])[0] || '')}</td>
       <td>${t.interval_seconds}s</td><td class="num">${t.streams}</td><td>${st}</td><td class="num">${av}</td></tr>`);
   }

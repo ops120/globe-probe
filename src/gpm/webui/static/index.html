@@ -208,9 +208,9 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           <div class="card up"><div class="k">24h 平均可用率</div><div class="v" id="ov-avail">–</div><div class="s" id="ov-results"></div></div>
         </div>
         <div class="panel">
-          <div class="panel-head">任务状态 <span class="sub">按任务聚合 · 最近 24 小时（1h 聚合表）</span></div>
+          <div class="panel-head">任务状态 <span class="sub">按任务聚合 · 最近 24 小时（1h 聚合表）· 已停用任务标灰，其可用率为停用前的历史值</span></div>
           <table class="tbl">
-            <thead><tr><th>任务</th><th>类型</th><th>目标</th><th>间隔</th><th>结果流</th><th>当前状态</th><th>24h 可用率</th></tr></thead>
+            <thead><tr><th>任务</th><th>类型</th><th>启用</th><th>目标</th><th>间隔</th><th>结果流</th><th>当前状态</th><th>24h 可用率</th></tr></thead>
             <tbody id="ov-task-body"></tbody>
           </table>
         </div>
@@ -481,7 +481,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=30"></script>
-<script src="/static/app.js?v=30"></script>
+<script src="/static/echarts.min.js?v=31"></script>
+<script src="/static/app.js?v=31"></script>
 </body>
 </html>

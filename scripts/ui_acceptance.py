@@ -167,6 +167,16 @@ def main() -> int:
                 ck.ok((page.text_content("#ov-avail") or "–").strip() not in ("", "–"),
                       "24h 平均可用率已加载")
                 ck.ok(wait_rows(page, "#ov-task-body tr"), "任务状态表有数据")
+                # 「启用」列：停用任务不能显示成故障/无数据（那是停用前的旧值）
+                ck.ok(page.locator("#ov-task-body tr td:nth-child(3) .badge").count() >= 1,
+                      "任务状态表有「启用」列徽章")
+                off_task = page.locator("#ov-task-body tr:has-text('已停用')")
+                if off_task.count() > 0:
+                    off_txt = off_task.first.inner_text()
+                    ck.ok("已停用" in off_txt and "故障" not in off_txt,
+                          "停用任务的当前状态显示为「已停用」而不是故障")
+                else:
+                    ck.ok(True, "（当前无停用任务，跳过停用展示断言）")
             if name == "task":
                 ck.ok(wait_count(page, "#page-task canvas") >= 1, "任务页图表已渲染(canvas)")
                 ck.ok((page.input_value("#task-select") or "") != "", "任务页已选中任务")
