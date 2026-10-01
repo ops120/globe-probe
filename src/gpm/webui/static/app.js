@@ -37,10 +37,20 @@ function fmtHM(ts) { const d = new Date(ts * 1000); return `${String(d.getHours(
 function fmtMDHM(ts) { const d = new Date(ts * 1000); return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')} ${fmtHM(ts)}`; }
 function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-async function api(path, opts) {
-  const r = await fetch(path, opts);
-  if (!r.ok) { let d = ''; try { d = (await r.json()).detail; } catch (e) { } throw new Error(d || r.status); }
-  return r.json();
+async function api(path, opts, timeoutMs = 15000) {
+  // 带超时：服务端假死（如线程池异常）时 fetch 会一直挂着，界面就「静默卡住」
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const r = await fetch(path, Object.assign({ signal: ctl.signal }, opts || {}));
+    if (!r.ok) { let d = ''; try { d = (await r.json()).detail; } catch (e) { } throw new Error(d || r.status); }
+    return await r.json();
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error('请求超时（' + (timeoutMs / 1000) + 's 无响应）');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 let toastTimer;
 // kind: 'ok' | 'err' | 'info'（不传时按文案自动判断：失败/错误 → 红）
