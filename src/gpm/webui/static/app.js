@@ -819,16 +819,68 @@ async function renderSla() {
       + '<td class="num">' + pctText(n.avail) + '</td>'
       + '<td class="num">' + (n.uptime_seconds == null ? '—' : fmtDur(n.uptime_seconds)) + '</td></tr>').join('')
       || '<tr><td colspan="6" style="color:var(--faint)">无节点</td></tr>') + '</tbody>';
-  const items = (d.incidents && d.incidents.items) || [];
-  $('#sla-incs').innerHTML = '<thead><tr><th>类型</th><th>目标</th><th>开始</th><th>持续</th><th>原因</th></tr></thead><tbody>' +
-    (items.map(i => '<tr style="cursor:pointer" title="点开事件详情" onclick="eventModal(' + i.id + ')"><td>'
-      + (i.kind === 'node' ? '<span class="badge b-off">节点侧</span>' : '<span class="badge b-fail">探测</span>') + '</td>'
-      + '<td>' + esc(i.title || (i.task_name || i.node_name || '')) + '</td>'
+  renderSlaIncidents(d);
+}
+
+// 事件折叠渲染：默认按「目标」折叠（业界 Alertmanager group_by / PagerDuty 多告警合并），
+// 底层每条事件都保留，可展开、可点进详情
+function renderSlaIncidents(d) {
+  const inc = d.incidents || {};
+  const items = inc.items || [];
+  const groups = inc.groups || [];
+  const fold = state.evFold !== false;
+  const kindBadge = k => k === 'node'
+    ? '<span class="badge b-off">节点侧</span>' : '<span class="badge b-fail">探测</span>';
+  const reason = i => esc((i.reason && (i.reason.error_class || i.reason.event)) || '');
+  $('#inc-sub').textContent = '共 ' + (inc.total || 0) + ' 次 · 折叠为 ' + (inc.group_count || groups.length) + ' 组'
+    + ((inc.flapping_groups || 0) ? ' · 其中 ' + inc.flapping_groups + ' 组判定为抖动' : '')
+    + ' · 累计停机 ' + fmtDur(inc.downtime_seconds || 0);
+  $$('#inc-fold button').forEach(b => b.classList.toggle('active', (b.dataset.f === '1') === fold));
+  if (!items.length) {
+    $('#sla-incs').innerHTML = '<thead><tr><th>类型</th><th>目标</th><th>首次</th><th>最近</th><th>累计</th><th>状态</th></tr></thead>'
+      + '<tbody><tr><td colspan="6" style="color:var(--faint)">窗口内无事件</td></tr></tbody>';
+    return;
+  }
+  if (!fold) {
+    $('#sla-incs').innerHTML = '<thead><tr><th>类型</th><th>目标</th><th>开始</th><th>持续</th><th>原因</th><th></th></tr></thead><tbody>'
+      + items.map(i => '<tr style="cursor:pointer" title="点开事件详情" onclick="eventModal(' + i.id + ')"><td>'
+        + kindBadge(i.kind) + '</td>'
+        + '<td>' + esc(i.title || (i.task_name || i.node_name || '')) + '</td>'
+        + '<td style="color:var(--muted)">' + fmtTS(i.started_at) + '</td>'
+        + '<td class="num">' + (i.duration_ms ? fmtDur(Math.round(i.duration_ms / 1000)) : '(进行中)') + '</td>'
+        + '<td style="color:var(--muted)">' + reason(i) + '</td>'
+        + '<td style="color:var(--faint)">详情</td></tr>').join('') + '</tbody>';
+    return;
+  }
+  const rows = groups.map((g, gi) => {
+    const occ = (g.items || []).map(i => '<tr style="cursor:pointer" title="点开事件详情" onclick="eventModal(' + i.id + ')">'
+      + '<td style="color:var(--faint)">#' + i.id + '</td>'
+      + '<td style="color:var(--muted)">' + (i.url ? esc(i.url) : '默认线路') + '</td>'
       + '<td style="color:var(--muted)">' + fmtTS(i.started_at) + '</td>'
       + '<td class="num">' + (i.duration_ms ? fmtDur(Math.round(i.duration_ms / 1000)) : '(进行中)') + '</td>'
-      + '<td style="color:var(--muted)">' + esc((i.reason && (i.reason.error_class || i.reason.event)) || '') + '</td></tr>').join('')
-      || '<tr><td colspan="5" style="color:var(--faint)">窗口内无事件</td></tr>') + '</tbody>';
+      + '<td style="color:var(--muted)">' + reason(i) + '</td>'
+      + '<td>' + (i.reopen_count ? '<span class="badge b-off">抖动合并 ' + i.reopen_count + '</span>' : '') + '</td></tr>').join('');
+    return '<tr style="cursor:pointer" title="点击展开/收起该目标的每次事件" onclick="toggleEvGroup(' + gi + ')">'
+      + '<td>' + kindBadge(g.kind) + '</td>'
+      + '<td style="color:var(--fg-strong2)">' + esc(g.title)
+      + (g.count > 1 ? ' <span class="badge b-warn">' + g.count + ' 次</span>' : '')
+      + (g.flapping ? ' <span class="badge b-fail" title="同一目标在 ' + Math.round(1800 / 60) + ' 分钟内反复失败">抖动</span>' : '')
+      + (g.streams > 1 ? ' <span class="badge b-off">' + g.streams + ' 条流</span>' : '') + '</td>'
+      + '<td style="color:var(--muted)">' + fmtTS(g.first_ts) + '</td>'
+      + '<td style="color:var(--muted)">' + fmtTS(g.last_ts) + '</td>'
+      + '<td class="num">' + fmtDur(g.downtime_seconds) + '</td>'
+      + '<td>' + (g.ongoing ? '<span class="badge b-warn">进行中</span>' : '<span class="badge b-ok">已恢复</span>')
+      + ' <span style="color:var(--faint)">' + (g.count > 1 ? '▾' : '') + '</span></td></tr>'
+      + '<tr class="ev-oc hidden" data-g="' + gi + '"><td colspan="6" style="padding:0;background:var(--bg-soft)">'
+      + '<table class="tbl" style="margin:0"><thead><tr><th>事件</th><th>URL / 流</th><th>开始</th><th>持续</th><th>原因</th><th>合并</th></tr></thead>'
+      + '<tbody>' + occ + '</tbody></table></td></tr>';
+  }).join('');
+  $('#sla-incs').innerHTML = '<thead><tr><th>类型</th><th>目标（折叠）</th><th>首次</th><th>最近</th><th>累计</th><th>状态</th></tr></thead>'
+    + '<tbody>' + rows + '</tbody>';
 }
+window.toggleEvGroup = (gi) => {
+  $$('#sla-incs tr.ev-oc').forEach(tr => { if (tr.dataset.g === String(gi)) tr.classList.toggle('hidden'); });
+};
 
 function slaCsv() {
   const d = state.slaData; if (!d) return '';
@@ -911,18 +963,78 @@ async function renderWindows() {
 
 async function renderAlertHistory() {
   const st = state.alFilter || '';
-  const d = await api('/api/alerts?limit=50' + (st ? '&status=' + st : ''));
-  $('#al-sub').textContent = '未恢复 ' + d.counts.firing + ' · 累计 ' + d.counts.total;
-  $('#al-tbl').innerHTML = '<thead><tr><th>时间</th><th>状态</th><th>标题</th><th>规则</th><th>送达</th><th>失败原因</th></tr></thead><tbody>' +
-    ((d.items || []).length ? d.items.map(a => '<tr>'
-      + '<td style="color:var(--muted)">' + fmtTS(a.ts) + '</td>'
-      + '<td>' + (a.status === 'firing' ? '<span class="badge b-fail">告警</span>' : '<span class="badge b-ok">恢复</span>') + '</td>'
-      + '<td>' + esc(a.title) + '</td>'
-      + '<td style="color:var(--muted)">' + esc(a.rule_name) + '</td>'
-      + '<td>' + (a.delivered ? '<span class="badge b-ok">' + a.n_ok + '/' + a.n_channels + '</span>' : '<span class="badge b-warn">0/' + a.n_channels + '</span>') + '</td>'
-      + '<td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis" title="' + esc(a.detail || '') + '">' + esc(a.detail || '—') + '</td></tr>').join('')
-      : '<tr><td colspan="6" style="color:var(--faint)">暂无告警记录</td></tr>') + '</tbody>';
+  const d = await api('/api/alerts?limit=80' + (st ? '&status=' + st : ''));
+  const rows = d.items || [];
+  const fold = state.alFold !== false;
+  $('#al-sub').textContent = '未恢复 ' + d.counts.firing + ' · 累计 ' + d.counts.total
+    + (fold ? ' · 同规则同目标已折叠' : '');
+  $$('#al-fold button').forEach(b => b.classList.toggle('active', (b.dataset.f === '1') === fold));
+  if (!rows.length) {
+    $('#al-tbl').innerHTML = '<thead><tr><th>时间</th><th>状态</th><th>标题</th><th>规则</th><th>送达</th><th>失败原因</th></tr></thead>'
+      + '<tbody><tr><td colspan="6" style="color:var(--faint)">暂无告警记录</td></tr></tbody>';
+    return;
+  }
+  const statusBadge = a => a.status === 'firing'
+    ? '<span class="badge b-fail">告警</span>' : '<span class="badge b-ok">恢复</span>';
+  const deliver = a => a.delivered
+    ? '<span class="badge b-ok">' + a.n_ok + '/' + a.n_channels + '</span>'
+    : '<span class="badge b-warn">0/' + a.n_channels + '</span>';
+  const detailCell = a => '<td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis" title="'
+    + esc(a.detail || '') + '">' + esc(a.detail || '—') + '</td>';
+
+  if (!fold) {
+    $('#al-tbl').innerHTML = '<thead><tr><th>时间</th><th>状态</th><th>标题</th><th>规则</th><th>送达</th><th>失败原因</th></tr></thead><tbody>'
+      + rows.map(a => '<tr><td style="color:var(--muted)">' + fmtTS(a.ts) + '</td><td>' + statusBadge(a) + '</td>'
+        + '<td>' + esc(a.title) + '</td><td style="color:var(--muted)">' + esc(a.rule_name) + '</td>'
+        + '<td>' + deliver(a) + '</td>' + detailCell(a) + '</tr>').join('') + '</tbody>';
+    return;
+  }
+  // 折叠：同一条规则 + 同一个目标（label）合并成一行，展开看每次告警
+  const groups = [], map = {};
+  rows.forEach(a => {
+    const label = (a.target && (a.target.label || a.target.task_id || a.target.node_id)) || a.key || '';
+    const key = a.rule_name + '|' + label;
+    let g = map[key];
+    if (!g) {
+      g = { key: key, rule: a.rule_name, label: label, count: 0, last: a.ts, first: a.ts,
+            firing: false, resolved: false, ok: 0, channels: 0, detail: '', items: [] };
+      map[key] = g;
+      groups.push(g);
+    }
+    g.count += 1;
+    g.last = Math.max(g.last, a.ts);
+    g.first = Math.min(g.first, a.ts);
+    if (a.status === 'firing') g.firing = true; else g.resolved = true;
+    if (a.n_ok > g.ok) g.ok = a.n_ok;
+    g.channels = Math.max(g.channels, a.n_channels || 0);
+    if (!g.detail && a.detail) g.detail = a.detail;
+    g.items.push(a);
+  });
+  const body = groups.map((g, gi) => {
+    const occ = g.items.map(a => '<tr><td style="color:var(--muted)">' + fmtTS(a.ts) + '</td>'
+      + '<td>' + statusBadge(a) + '</td><td>' + esc(a.title) + '</td><td>' + deliver(a) + '</td>'
+      + '<td style="color:var(--muted)">' + esc(a.detail || '—') + '</td></tr>').join('');
+    return '<tr style="cursor:pointer" title="点击展开该目标的每次告警" onclick="toggleAlGroup(' + gi + ')">'
+      + '<td style="color:var(--muted)">' + fmtTS(g.last) + '</td>'
+      + '<td>' + (g.firing ? '<span class="badge b-fail">告警</span>' : '')
+      + (g.resolved ? '<span class="badge b-ok">已恢复</span>' : '') + '</td>'
+      + '<td style="color:var(--fg-strong2)">' + esc(g.rule) + ' · ' + esc(g.label)
+      + (g.count > 1 ? ' <span class="badge b-warn">' + g.count + ' 次</span>' : '') + '</td>'
+      + '<td style="color:var(--muted)">' + esc(g.rule) + '</td>'
+      + '<td>' + (g.ok ? '<span class="badge b-ok">' + g.ok + '/' + g.channels + '</span>'
+        : '<span class="badge b-warn">0/' + g.channels + '</span>') + '</td>'
+      + '<td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis" title="'
+      + esc(g.detail || '') + '">' + esc(g.detail || '—') + ' ' + (g.count > 1 ? '<span style="color:var(--faint)">▾</span>' : '') + '</td></tr>'
+      + '<tr class="al-oc hidden" data-g="' + gi + '"><td colspan="6" style="padding:0;background:var(--bg-soft)">'
+      + '<table class="tbl" style="margin:0"><thead><tr><th>时间</th><th>状态</th><th>标题</th><th>送达</th><th>失败原因</th></tr></thead>'
+      + '<tbody>' + occ + '</tbody></table></td></tr>';
+  }).join('');
+  $('#al-tbl').innerHTML = '<thead><tr><th>最近</th><th>状态</th><th>规则 · 目标（折叠）</th><th>规则</th><th>送达</th><th>失败原因</th></tr></thead>'
+    + '<tbody>' + body + '</tbody>';
 }
+window.toggleAlGroup = (gi) => {
+  $$('#al-tbl tr.al-oc').forEach(tr => { if (tr.dataset.g === String(gi)) tr.classList.toggle('hidden'); });
+};
 
 async function renderAlerts() {
   const nodes = await api('/api/nodes');
@@ -940,6 +1052,10 @@ $$('#sla-range button').forEach(b => b.onclick = () => {
   b.classList.add('active');
   state.slaHours = +b.dataset.h;
   renderSla();
+});
+$$('#al-fold button').forEach(b => b.onclick = () => {
+  state.alFold = b.dataset.f === '1';
+  renderAlertHistory();
 });
 $$('#al-filter button').forEach(b => b.onclick = () => {
   $$('#al-filter button').forEach(x => x.classList.remove('active'));
@@ -1268,6 +1384,10 @@ async function renderAudit() {
       : '<tr><td colspan="7" style="color:var(--faint)">暂无审计记录（任何写操作都会自动留痕）</td></tr>')
     + '</tbody>';
 }
+$$('#inc-fold button').forEach(b => b.onclick = () => {
+  state.evFold = b.dataset.f === '1';
+  if (state.slaData) renderSlaIncidents(state.slaData);
+});
 $$('#au-filter button').forEach(b => b.onclick = () => {
   $$('#au-filter button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');

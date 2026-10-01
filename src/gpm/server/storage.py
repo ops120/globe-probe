@@ -153,7 +153,8 @@ class Storage:
                 self.db.execute("ALTER TABLE incidents ADD COLUMN kind TEXT DEFAULT 'probe'")
             for col, ddl in (("acked_at", "INTEGER DEFAULT 0"),
                              ("acked_by", "TEXT DEFAULT ''"),
-                             ("note", "TEXT DEFAULT ''")):
+                             ("note", "TEXT DEFAULT ''"),
+                             ("reopen_count", "INTEGER DEFAULT 0")):
                 if col not in icols:
                     self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} {ddl}")
             ncols = [r[1] for r in self.db.execute("PRAGMA table_info(nodes)")]
@@ -650,6 +651,29 @@ class Storage:
                 "SELECT * FROM incidents WHERE task_id=? AND node_id=? AND dns=? AND url=? "
                 "AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
                 (task_id, node_id, dns, url)).fetchone()
+
+    def last_closed_incident(self, task_id: str, node_id: str, dns: str, url: str) -> dict | None:
+        """同一流最近一次已关闭的事件（用于「抖动合并」）。"""
+        with self.lock:
+            r = self.db.execute(
+                "SELECT * FROM incidents WHERE task_id=? AND node_id=? AND dns=? AND url=?"
+                " AND ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 1",
+                (task_id, node_id, dns or "", url or "")).fetchone()
+            return dict(r) if r else None
+
+    def incident_reopen(self, iid: int, ts: int, reason: dict) -> bool:
+        """抖动合并：把刚关闭的同一流事件重新打开（不新增一行，reopen_count+1）。
+
+        对应业界「有界合并窗口」做法：短时间内同目标反复失败仍属同一事件，
+        避免一次抖动被拆成十几条事件（也就不需要在 UI 里假装它们不是一回事）。
+        """
+        with self.lock:
+            cur = self.db.execute(
+                "UPDATE incidents SET ended_at=NULL, reopen_count=reopen_count+1, reason_json=?"
+                " WHERE id=? AND ended_at IS NOT NULL",
+                (json.dumps(reason, ensure_ascii=False), iid))
+            self.db.commit()
+            return cur.rowcount > 0
 
     def list_incidents(self, limit: int = 30, open_only: bool = False,
                        t_from: int = 0, t_to: int = 0) -> list[dict]:

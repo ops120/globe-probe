@@ -246,6 +246,9 @@ def main() -> int:
         au_txt = page.text_content("#au-tbl") or ""
         ck.ok(("任务" in au_txt) or ("告警" in au_txt) or ("节点" in au_txt), "审计表显示中文动作")
         shot("alerts-ops")
+        # 折叠视图下点的是「分组行」（展开/收起），要开详情弹窗先切到平铺
+        page.click('#inc-fold button[data-f="0"]')
+        page.wait_for_timeout(900)
         page.locator("#sla-incs tbody tr").first.click()
         wait_modal(page)
         ev_txt = page.text_content("#modal-body") or ""
@@ -254,6 +257,33 @@ def main() -> int:
         ck.ok(page.locator("#ev-ack").count() == 1, "事件详情有「确认并保存备注」入口")
         shot("event-detail")
         close_modal(page)
+
+        # 事件折叠（业界 group_by 做法）：默认按目标折叠，可展开、可切平铺
+        page.click('#inc-fold button[data-f="1"]')
+        page.wait_for_timeout(900)
+        inc_sub = page.text_content("#inc-sub") or ""
+        ck.ok("折叠为" in inc_sub and "组" in inc_sub, f"事件头显示折叠统计（{inc_sub[:48]}）")
+        folded_rows = page.locator("#sla-incs tbody tr:visible").count()
+        ck.ok(page.locator("#inc-fold button").count() == 2, "事件表有「折叠/平铺」切换")
+        page.click('#inc-fold button[data-f="0"]')
+        page.wait_for_timeout(900)
+        flat_rows = page.locator("#sla-incs tbody tr").count()
+        ck.ok(flat_rows >= folded_rows, f"平铺行数不少于折叠行数（{folded_rows} → {flat_rows}）")
+        page.click('#inc-fold button[data-f="1"]')
+        page.wait_for_timeout(900)
+        ck.ok(page.locator('#inc-fold button[data-f="1"]').get_attribute("class").find("active") >= 0,
+              "可切回折叠视图")
+        ck.ok(page.locator("#al-fold button").count() == 2, "告警历史也有折叠切换")
+        shot("incidents-folded")
+        # 展开某一组（若存在多次事件的行）
+        multi = page.locator("#sla-incs tbody tr:has(.badge.b-warn)").first
+        if multi.count() > 0:
+            multi.click()
+            page.wait_for_timeout(600)
+            ck.ok(page.locator("#sla-incs tr.ev-oc:visible").count() >= 1, "点分组行可展开每次事件")
+            shot("incidents-expanded")
+        else:
+            ck.ok(True, "（本窗口没有多次事件的分组，跳过展开断言）")
 
         # ---- 主题：夜间 / 白天 ----
         print("→ 主题与筛选控件")

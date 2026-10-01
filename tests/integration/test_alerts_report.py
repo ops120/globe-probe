@@ -133,9 +133,9 @@ def test_sla_report_and_digest(tmp_path):
     add_results(client, nid, token, ping_rows(tid, now - 300, 10, ok=False, step=15))
     reagg(s, now - 3600, now + 60)
 
-    # 窗口要对齐整点：1h 聚合桶的时间戳是整点，若 t_from 落在整点之后，
-    # 当前小时的桶会被排除（会随时钟飘红，与实现无关）
-    d = client.get(f"/api/report/sla?t_from={now - 3600}&t_to={now + 60}").json()
+    # 窗口端点在服务端会对齐到聚合桶边界（report.sla 内 t_from//step*step），
+    # 因此这里用 1 小时窗口即可稳定覆盖刚写入的两个分钟桶
+    d = client.get(f"/api/report/sla?t_from={now - 3600}&t_to={now}").json()
     assert set(["window", "overall", "tasks", "nodes", "incidents"]).issubset(d)
     assert d["overall"]["count"] >= 20
     assert 0 <= d["overall"]["avail"] < 1
@@ -311,3 +311,72 @@ def test_event_detail_and_ack(tmp_path):
     # 备注不再是空串后，再确认时应保留原备注（传空字符串不覆盖）
     client.post("/api/event/" + str(iid) + "/ack", json={"note": ""})
     assert client.get("/api/event/" + str(iid)).json()["incident"]["note"] == "已知悉，上游抖动"
+
+
+# ---------------- 事件折叠：源侧抖动合并 + 展示侧分组 ----------------
+
+def test_incident_flap_merge_and_window(tmp_path):
+    """业界「有界合并窗口」：关闭后短时间内再次失败 → 重新打开同一事件，而不是新建。"""
+    from gpm.server.incidents import IncidentMachine
+    from gpm.server.storage import Storage
+
+    s = Storage(str(tmp_path / "flap.db"))
+    m = IncidentMachine(s, fail_threshold=3, recover_threshold=2,
+                        flap_window=600, flap_max=21600)
+    tid, nid, t0 = "t1", "n1", 1_700_000_000
+    for i in range(3):                       # 连续失败 → 开事件
+        m.on_result(tid, nid, "", "", "fail", t0 + i * 10, "timeout")
+    inc = s.list_incidents(limit=10)
+    assert len(inc) == 1 and inc[0]["ended_at"] is None
+    for i in range(2):                       # 连续成功 → 关事件
+        m.on_result(tid, nid, "", "", "ok", t0 + 100 + i * 10, "")
+    inc = s.list_incidents(limit=10)
+    assert len(inc) == 1 and inc[0]["ended_at"] is not None and inc[0]["reopen_count"] == 0
+
+    # 600s 内再次失败 → 合并回同一事件（不新增行）
+    for i in range(3):
+        m.on_result(tid, nid, "", "", "fail", t0 + 300 + i * 10, "timeout")
+    inc = s.list_incidents(limit=10)
+    assert len(inc) == 1, ("同一目标抖动不应拆成多条事件", inc)
+    assert inc[0]["ended_at"] is None and inc[0]["reopen_count"] == 1, inc[0]
+
+    # 关闭后超过窗口再失败 → 才算新事件
+    for i in range(2):
+        m.on_result(tid, nid, "", "", "ok", t0 + 400 + i * 10, "")
+    for i in range(3):
+        m.on_result(tid, nid, "", "", "fail", t0 + 2000 + i * 10, "timeout")
+    inc = s.list_incidents(limit=10)
+    assert len(inc) == 2, ("超过合并窗口应新建事件", len(inc))
+    assert s.list_incidents(limit=10)[0]["reopen_count"] == 0
+
+
+def test_sla_incident_groups_folding(tmp_path):
+    """同目标事件在 SLA 报表里折叠成一组，底层每条仍保留（可展开、可点详情）。"""
+    client, cfg, s = make_client(tmp_path)
+    nid, _ = register(client, cfg, "fold-node")
+    tid = client.post("/api/tasks", json={
+        "name": "fold-ping", "type": "ping", "target": "1.1.1.1"}).json()["id"]
+    t0 = int(time.time()) - 600
+    # 同一目标 3 次（第 3 次进行中）
+    for i in range(3):
+        iid = s.incident_open(tid, nid, "223.5.5.5", "", t0 + i * 100,
+                              {"error_class": "timeout", "fail_streak": 3})
+        if i < 2:
+            s.incident_close(iid, t0 + i * 100 + 60)
+    # 另一个目标的 1 次
+    s.incident_open(tid, nid, "8.8.8.8", "", t0 + 50, {"error_class": "path_fail"})
+
+    d = client.get(f"/api/report/sla?t_from={t0 - 60}&t_to={t0 + 900}").json()
+    inc = d["incidents"]
+    assert inc["total"] == 4 and inc["group_count"] == 2, inc
+    g = next(x for x in inc["groups"] if x["dns"] == "223.5.5.5")
+    assert g["count"] == 3 and len(g["items"]) == 3          # 折叠但一条不少
+    assert g["ongoing"] is True and g["streams"] == 1
+    assert g["flapping"] is True, g                         # 3 次 / 30 分钟内 → 抖动
+    # 两次已恢复各 60s；第三条进行中，按「窗口末」计入（这是既定口径）
+    assert g["downtime_seconds"] >= 120, g
+    assert g["downtime_seconds"] <= 120 + 900, g
+    other = next(x for x in inc["groups"] if x["dns"] == "8.8.8.8")
+    assert other["count"] == 1 and other["flapping"] is False
+    # 折叠不影响整体统计（total/open/downtime 仍按每条事件算）
+    assert inc["open"] == 2

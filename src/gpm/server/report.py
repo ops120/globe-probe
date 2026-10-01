@@ -118,10 +118,15 @@ def _pick_bucket(span_seconds: int) -> str:
 
 def _read_window(storage, task_id: str, t_from: int, t_to: int, bucket: str):
     """读聚合桶，返回 (rows, 实际读取的 bucket)。'1d' 无数据时回退 '1h'。"""
-    rows = list(storage.agg_buckets_existing(bucket, task_id, t_from, t_to) or [])
+    # 桶的时间戳是桶**起点**：把读取范围向整桶外扩，否则 t_from/t_to 落在桶中间时
+    # 端点桶会被 ts>=t_from / ts<=t_to 过滤掉（表现为「最近 1 小时 0 条」）。
+    _step = {"1m": 60, "5m": 300, "1h": 3600, "1d": 86400}.get(bucket, 3600)
+    b_from, b_to = t_from // _step * _step, t_to // _step * _step
+    rows = list(storage.agg_buckets_existing(bucket, task_id, b_from, b_to) or [])
     if rows or bucket != "1d":
         return rows, bucket
-    rows = list(storage.agg_buckets_existing("1h", task_id, t_from, t_to) or [])
+    rows = list(storage.agg_buckets_existing("1h", task_id, t_from // 3600 * 3600,
+                                             t_to // 3600 * 3600) or [])
     return rows, "1h"
 
 
@@ -188,9 +193,77 @@ def _collect_incidents(storage, t_from: int, t_to: int,
             "ended_at": ended,
             "duration_ms": dur,
             "title": title,
+            "url": str(_get(i, "url", "") or ""),
+            "dns": str(_get(i, "dns", "") or ""),
+            "reopen_count": _int(_get(i, "reopen_count", 0) or 0),
         })
     items.sort(key=lambda x: x["started_at"], reverse=True)
     return items
+
+
+# ---------------------------------------------------------------- 事件折叠
+
+# 抖动判定：同一目标在这么长的窗口内出现这么多次，就标记为抖动（仍然全部保留，可展开）
+FLAP_MIN_COUNT = 3
+FLAP_WINDOW_SECONDS = 1800
+
+
+def _group_incidents(items: list[dict]) -> list[dict]:
+    """把重复的同类事件折叠成「目标组」。
+
+    业界做法（Alertmanager 的 group_by + PagerDuty「多告警合并成一个 incident」+
+    OneUptime「有界合并窗口、不隐藏根因」）：
+    - 分组的键必须是**稳定的服务/依赖标识**（这里 = 事件类型 + 任务 + 节点 + 线路），
+      而不是「时间挨得近」；
+    - 折叠只影响展示：每条底层事件都保留在 groups[].items 里，可展开、可点进详情；
+    - 组上给出 opened_at / last_activity / 累计时长 / 抖动标记，便于快速判断严重程度。
+    """
+    groups: dict = {}
+    for it in items:
+        key = (it["kind"], it.get("task_id") or "", it.get("node_id") or "", it.get("dns") or "")
+        g = groups.get(key)
+        if g is None:
+            g = {
+                "key": "|".join(key),
+                "kind": it["kind"],
+                "task_id": it.get("task_id") or "",
+                "task_name": it.get("task_name") or "",
+                "node_id": it.get("node_id") or "",
+                "node_name": it.get("node_name") or "",
+                "dns": it.get("dns") or "",
+                # 标题带节点名：同一任务+线路在不同节点上是**不同分组**（分组键=任务+节点+线路），
+                # 不写节点会出现两行看着一模一样的组，用户无法区分
+                "title": (it["title"] + " · " + it["node_name"]) if it.get("node_name") else it["title"],
+                "count": 0,
+                "first_ts": it["started_at"],
+                "last_ts": it["started_at"],
+                "downtime_seconds": 0.0,
+                "ongoing": False,
+                "reopens": 0,
+                "streams": set(),
+                "items": [],
+            }
+            groups[key] = g
+        g["count"] += 1
+        g["first_ts"] = min(g["first_ts"], it["started_at"])
+        g["last_ts"] = max(g["last_ts"], it["last_ts"] if "last_ts" in it else
+                           (it["ended_at"] if it["ended_at"] else it["started_at"]))
+        g["downtime_seconds"] += it["duration_ms"] / 1000.0
+        g["ongoing"] = g["ongoing"] or it["ended_at"] is None
+        g["reopens"] += int(it.get("reopen_count") or 0)
+        g["streams"].add(it.get("url") or "")
+        g["items"].append(it)
+
+    out = []
+    for g in groups.values():
+        g["downtime_seconds"] = int(round(g["downtime_seconds"]))
+        g["streams"] = len(g["streams"])
+        g["items"].sort(key=lambda x: x["started_at"], reverse=True)
+        g["flapping"] = (g["count"] >= FLAP_MIN_COUNT and
+                         (g["last_ts"] - g["first_ts"]) <= FLAP_WINDOW_SECONDS)
+        out.append(g)
+    out.sort(key=lambda x: x["last_ts"], reverse=True)
+    return out
 
 
 # ---------------------------------------------------------------- 对外接口
@@ -258,6 +331,7 @@ def sla(storage, t_from: int, t_to: int, task_id: str = "", node_id: str = "") -
 
     node_names = {n["node_id"]: n["name"] for n in node_rows}
     items = _collect_incidents(storage, t_from, t_to, task_names, node_names)
+    groups = _group_incidents(items)
     probe = [x for x in items if x["kind"] == "probe"]
     recovered = [x for x in probe if x["ended_at"] is not None]
     downtime = int(round(sum(x["duration_ms"] for x in probe) / 1000.0))
@@ -277,7 +351,10 @@ def sla(storage, t_from: int, t_to: int, task_id: str = "", node_id: str = "") -
             "downtime_seconds": downtime,
             "mttr_seconds": mttr,
             "mtbf_seconds": mtbf,
-            "items": items,
+            "items": items,                      # 平铺（每条事件一行）
+            "groups": groups,                    # 折叠：同目标合并成一行
+            "group_count": len(groups),
+            "flapping_groups": sum(1 for g in groups if g["flapping"]),
         },
     }
 

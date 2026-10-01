@@ -51,6 +51,8 @@ DEFAULTS = {
         "dns_cache_max": 300,
         "fail_threshold": 3,
         "recover_threshold": 2,
+        "flap_window_seconds": 600,   # 抖动合并窗口：关闭后多久内再次失败算同一次事件
+        "flap_max_seconds": 21600,    # 单次事件上限（超过则不再合并，防止无限累积）
         "jitter_ratio": 0.1,
     },
     "logging": {"level": "INFO", "file": ""},

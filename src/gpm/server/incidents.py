@@ -5,10 +5,15 @@ from ..common.util import now
 
 
 class IncidentMachine:
-    def __init__(self, storage, fail_threshold: int = 3, recover_threshold: int = 2):
+    def __init__(self, storage, fail_threshold: int = 3, recover_threshold: int = 2,
+                 flap_window: int = 600, flap_max: int = 6 * 3600):
         self.s = storage
         self.fail_threshold = fail_threshold
         self.recover_threshold = recover_threshold
+        # 抖动合并（业界「有界合并窗口」）：关闭后 flap_window 秒内再次失败，
+        # 且该事件自首次开始不超过 flap_max 秒 → 视为同一次事件，重新打开而不是新建
+        self.flap_window = max(0, int(flap_window))
+        self.flap_max = max(60, int(flap_max))
         # key -> {"fail_streak":int,"ok_streak":int,"incident_id":int|None}
         self.state: dict[tuple, dict] = {}
 
@@ -39,7 +44,18 @@ class IncidentMachine:
                     st["incident_id"] = open_inc["id"]
                 else:
                     reason = {"error_class": error_class, "fail_streak": st["fail_streak"]}
-                    st["incident_id"] = self.s.incident_open(*k, ts, reason)
+                    merged = False
+                    if not rebuild and self.flap_window > 0:
+                        prev = self.s.last_closed_incident(*k)
+                        if prev:
+                            gap = ts - int(prev.get("ended_at") or 0)
+                            span = ts - int(prev.get("started_at") or ts)
+                            if 0 <= gap <= self.flap_window and span <= self.flap_max:
+                                merged = self.s.incident_reopen(int(prev["id"]), ts, reason)
+                                if merged:
+                                    st["incident_id"] = int(prev["id"])
+                    if not merged:
+                        st["incident_id"] = self.s.incident_open(*k, ts, reason)
         elif status == "ok":
             st["ok_streak"] += 1
             st["fail_streak"] = 0

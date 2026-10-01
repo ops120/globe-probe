@@ -27,7 +27,9 @@ REPO = "https://github.com/ops120/globe-probe"
 def create_app(cfg, storage: Storage | None = None):
     storage = storage or Storage(cfg.server["database"])
     machine = IncidentMachine(storage, cfg.probe.get("fail_threshold", 3),
-                              cfg.probe.get("recover_threshold", 2))
+                              cfg.probe.get("recover_threshold", 2),
+                              cfg.probe.get("flap_window_seconds", 600),
+                              cfg.probe.get("flap_max_seconds", 21600))
     ingest = Ingest(storage, machine, cfg.server)
     state = {"storage": storage, "cfg": cfg, "ingest": ingest,
              "register_token": cfg.agent.get("register_token", "gpm-dev-register")}

@@ -344,8 +344,15 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
             <div><div class="sub" style="margin:6px 0">按任务</div><table class="tbl" id="sla-tasks"></table></div>
             <div><div class="sub" style="margin:6px 0">按节点</div><table class="tbl" id="sla-nodes"></table></div>
           </div>
-          <div style="margin-top:14px"><div class="sub" style="margin:6px 0">事件（窗口内）</div>
-            <table class="tbl" id="sla-incs"></table></div>
+          <div class="panel-head" style="margin-top:10px;border:0;padding-left:0">事件（窗口内）
+            <span class="sub" id="inc-sub"></span>
+            <span style="flex:1"></span>
+            <div class="seg" id="inc-fold">
+              <button data-f="1" class="active">折叠相同目标</button>
+              <button data-f="0">平铺明细</button>
+            </div>
+          </div>
+          <table class="tbl" id="sla-incs"></table>
         </div>
         <div class="panel">
           <div class="panel-head">通知渠道 <span class="sub">Webhook / 企业微信 / 钉钉 / 飞书 / SMTP；可测试发送</span>
@@ -367,6 +374,10 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
         <div class="panel">
           <div class="panel-head">最近告警 <span class="sub" id="al-sub"></span>
             <span style="flex:1"></span>
+            <div class="seg" id="al-fold">
+              <button data-f="1" class="active">折叠相同目标</button>
+              <button data-f="0">平铺明细</button>
+            </div>
             <div class="seg" id="al-filter">
               <button data-s="" class="active">全部</button>
               <button data-s="firing">未恢复</button>
@@ -463,7 +474,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=25"></script>
-<script src="/static/app.js?v=25"></script>
+<script src="/static/echarts.min.js?v=26"></script>
+<script src="/static/app.js?v=26"></script>
 </body>
 </html>
