@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -44,6 +45,7 @@ def create_app(cfg, storage: Storage | None = None):
             asyncio.create_task(_alert_loop(state, stop)),
             asyncio.create_task(_retry_loop(state, stop)),
             asyncio.create_task(_digest_loop(state, stop)),
+            asyncio.create_task(_selfcheck_loop(state, stop)),
         ]
         log.info("服务端启动: %s (db=%s)", cfg.server["listen"], cfg.server["database"])
         yield
@@ -57,9 +59,15 @@ def create_app(cfg, storage: Storage | None = None):
     app.include_router(web_router(state))
 
     @app.get("/api/health")
-    def health():
+    async def health():
+        """存活探测。**故意用 async def**：不占用 AnyIO 线程池，也不碰 DB/锁。
+
+        这样即使线程池被拖住/耗尽（曾经因为线程启动 MemoryError 导致「假死」），
+        这个接口仍会秒回 —— 界面与运维脚本才能区分「进程挂了」与「线程池卡住」。
+        """
         return {"ok": True, "time": now(), "config_version": storage.config_version(),
-                "version": __version__, "author": AUTHOR, "repo": REPO}
+                "version": __version__, "author": AUTHOR, "repo": REPO,
+                "threads": threading.active_count()}
 
     @app.middleware("http")
     async def audit_middleware(request, call_next):
@@ -139,6 +147,27 @@ async def _alert_loop(state: dict, stop: asyncio.Event):
                 log.warning("告警评估产生 %d 条事件（firing/remind/resolved）", len(events))
         except Exception as e:  # noqa
             log.error("告警评估失败: %s", e)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _selfcheck_loop(state: dict, stop: asyncio.Event):
+    """每 60s 记录一次内存与线程数：出现「假死」时可回看是内存压力还是线程池耗尽。"""
+    interval = 60
+    while not stop.is_set():
+        try:
+            rss = -1.0
+            try:
+                import psutil  # 可选依赖（agent 的 stats extra 里带）
+                rss = psutil.Process().memory_info().rss / 1048576.0
+            except Exception:  # noqa: BLE001 - 没装 psutil 就只记线程数
+                pass
+            log.info("selfcheck: rss=%s threads=%d", ("%.1f MB" % rss) if rss > 0 else "n/a",
+                     threading.active_count())
+        except Exception as e:  # noqa: BLE001
+            log.debug("selfcheck 失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except asyncio.TimeoutError:

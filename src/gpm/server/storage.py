@@ -167,6 +167,10 @@ class Storage:
             self.db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','1')")
             self.db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('config_version','1')")
             self.db.commit()
+            # config_version 走内存缓存：/api/health 必须**不碰 DB/锁**才能在线程池被拖住时
+            # 仍然如实回答（服务端「假死」时也能区分「线程池卡住」与「进程没了」）
+            self._cv_cache = int(self.db.execute(
+                "SELECT value FROM meta WHERE key='config_version'").fetchone()[0])
 
     # ---------- meta ----------
     def meta_get(self, key: str, default: str = "") -> str:
@@ -179,6 +183,11 @@ class Storage:
             self.db.execute("INSERT INTO meta(key,value) VALUES(?,?) "
                             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
             self.db.commit()
+            if key == "config_version":          # 同步内存缓存，保证 /api/health 读到最新值
+                try:
+                    self._cv_cache = int(value)
+                except (TypeError, ValueError):
+                    pass
 
     # ---------- nodes ----------
     def register_node(self, name: str, token_hash: str, tags: dict,
@@ -390,7 +399,8 @@ class Storage:
         self.meta_set("config_version", str(v))
 
     def config_version(self) -> int:
-        return int(self.meta_get("config_version", "1"))
+        """内存缓存读取（无 DB、无锁）——供 /api/health 这类必须在事件循环上秒回的接口使用。"""
+        return getattr(self, "_cv_cache", 1)
 
     def get_task(self, tid: str):
         with self.lock:

@@ -27,7 +27,7 @@ function applyTheme(theme, rerender) {
 refreshThemeColors();
 
 const state = {
-  page: 'overview', task: null, range: 3600, dns: '', url: '', node: '',
+  page: 'overview', task: null, range: 3600, dns: '', url: '', node: '', srvDown: false,
   cmpMode: 'yesterday', tasks: [], streams: [], timer: null,
   mtrTs: 0, mtrSel: null,   // 通断条带被点选的那一轮（驱动 mtr 明细联动）
 };
@@ -90,19 +90,35 @@ const PCT = ts => fmtHM(ts);
 /* ---------- 健康检查 ---------- */
 async function pollHealth() {
   try {
-    const h = await api('/api/health');
-    $('#srv-status').innerHTML = `<i class="dot g"></i>服务端正常 · 配置v${h.config_version}`;
+    // 8s 超时：服务端假死时尽快给出「无响应」而不是无限等
+    const h = await api('/api/health', null, 8000);
+    const back = state.srvDown;                 // 之前是不是处于不可达/无响应
+    state.srvDown = false;
+    $('#srv-status').style.cursor = '';
+    $('#srv-status').onclick = null;
+    $('#srv-status').innerHTML = `<i class="dot g"></i>服务端正常 · 配置v${h.config_version}`
+      + (h.threads ? ` <span style="color:var(--faint)">线程 ${h.threads}</span>` : '');
     $('#srv-time').textContent = fmtTS(h.time);
     // 版本/作者/仓库都取服务端下发的值（单一来源，避免前端写死版本号）
-  const author = h.author || 'ops120';
-  const repo = h.repo || 'https://github.com/ops120/globe-probe';
-  $('#sb-foot').innerHTML = 'gpm v' + (h.version || '0.1.0') + '<br>config v' + h.config_version
-    + '<br><span style="color:var(--faint)">作者 <b style="color:var(--muted);font-weight:500">'
-    + esc(author) + '</b></span>'
-    + '<br><a href="' + esc(repo) + '" target="_blank" rel="noopener"'
-    + ' style="color:var(--accent-2);text-decoration:none" title="GitHub · globe-probe">GitHub ↗</a>';
+    const author = h.author || 'ops120';
+    const repo = h.repo || 'https://github.com/ops120/globe-probe';
+    $('#sb-foot').innerHTML = 'gpm v' + (h.version || '0.1.0') + '<br>config v' + h.config_version
+      + '<br><span style="color:var(--faint)">作者 <b style="color:var(--muted);font-weight:500">'
+      + esc(author) + '</b></span>'
+      + '<br><a href="' + esc(repo) + '" target="_blank" rel="noopener"'
+      + ' style="color:var(--accent-2);text-decoration:none" title="GitHub · globe-probe">GitHub ↗</a>';
+    if (back) {                                 // 恢复后自动重画当前页，修掉「半渲染卡住」
+      toast('服务端已恢复，正在重新渲染当前页');
+      const R = RENDER[state.page];
+      if (R) { try { R(); } catch (e) { /* 单页失败不影响其它 */ } }
+    }
   } catch (e) {
-    $('#srv-status').innerHTML = `<i class="dot r"></i>服务端不可达`;
+    const timeout = /超时/.test((e && e.message) || '');
+    state.srvDown = true;
+    $('#srv-status').innerHTML = `<i class="dot r"></i>${timeout ? '服务端无响应（超时）' : '服务端不可达'}`
+      + ' <span style="color:var(--accent-2);text-decoration:underline">点击重试</span>';
+    $('#srv-status').style.cursor = 'pointer';
+    $('#srv-status').onclick = () => location.reload();
   }
 }
 
