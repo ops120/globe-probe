@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -12,6 +13,8 @@ from ..common.models import NodeUpdate, TaskCreate, TaskUpdate
 from ..common.util import new_id, now, sha256, validate_target
 from . import alerting, geo
 from .storage import BUCKET_SECONDS
+
+log = logging.getLogger("gpm.web")
 
 
 def setup_router(app_state) -> APIRouter:
