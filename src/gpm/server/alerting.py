@@ -128,12 +128,17 @@ def flatten(channel: dict) -> dict:
     return {"type": channel.get("type"), **(channel.get("config") or {})}
 
 
+# 失败重投退避（秒）：第 1/2/3 次重试分别等这么久
+RETRY_BACKOFF = (60, 300, 900)
+
+
 def _dispatch(storage, channels: list[dict], title: str, text: str, ts: int):
+    """派发到全部渠道，返回 (是否有渠道成功, 渠道数, 成功数, 错误摘要, 失败渠道列表)。"""
     if not channels:
-        return False, 0, 0, "未配置可用通知渠道"
+        return False, 0, 0, "未配置可用通知渠道", []
     if _notify is None:
-        return False, len(channels), 0, "通知模块（notify.py）不可用"
-    n_ok, errs = 0, []
+        return False, len(channels), 0, "通知模块（notify.py）不可用", list(channels)
+    n_ok, errs, failed = 0, [], []
     for ch in channels:
         try:
             ok, msg = _notify.send(flatten(ch), title, text)
@@ -143,7 +148,83 @@ def _dispatch(storage, channels: list[dict], title: str, text: str, ts: int):
         n_ok += 1 if ok else 0
         if not ok:
             errs.append(ch["name"] + ": " + msg)
-    return n_ok > 0, len(channels), n_ok, "; ".join(errs)
+            failed.append((ch, msg))
+    return n_ok > 0, len(channels), n_ok, "; ".join(errs), failed
+
+
+def retry_pending(storage, ts: int = 0, limit: int = 10) -> list[dict]:
+    """重投队列：把派发失败的通知按退避重试（默认 60s / 300s / 900s，3 次后标记 failed）。"""
+    import time
+    ts = ts or int(time.time())
+    out: list[dict] = []
+    if _notify is None:
+        return out
+    chans = {c["id"]: c for c in storage.list_channels()}
+    for row in storage.outbox_due(ts, limit):
+        ch = chans.get(row["channel_id"])
+        if not ch or not ch["enabled"]:
+            storage.outbox_mark(row["id"], "failed", "渠道不存在或已停用")
+            out.append({"id": row["id"], "status": "failed", "error": "渠道不存在或已停用"})
+            continue
+        try:
+            ok, msg = _notify.send(flatten(ch), row["title"], row["text"])
+        except Exception as e:  # noqa: BLE001
+            ok, msg = False, "异常: " + type(e).__name__ + ": " + str(e)[:120]
+        attempts = int(row["attempts"] or 0)
+        if ok:
+            storage.outbox_mark(row["id"], "done")
+            storage.channel_touch(ch["id"], True, "", ts)
+        elif attempts + 1 >= len(RETRY_BACKOFF):
+            storage.outbox_mark(row["id"], "failed", msg)
+        else:
+            storage.outbox_mark(row["id"], "pending", msg, ts + RETRY_BACKOFF[attempts])
+        out.append({"id": row["id"], "status": "done" if ok else ("pending" if attempts + 1 < len(RETRY_BACKOFF) else "failed"),
+                    "error": "" if ok else msg})
+    return out
+
+
+def retry_one(storage, oid: int, ts: int = 0) -> tuple[bool, str]:
+    """手动强制重投一条（UI「立即重投」按钮），不等退避时间。"""
+    import time
+    ts = ts or int(time.time())
+    row = storage.outbox_get(oid)
+    if not row:
+        return False, "记录不存在"
+    if row["status"] == "done":
+        return True, "该通知已成功送达"
+    ch = next((c for c in storage.list_channels() if c["id"] == row["channel_id"]), None)
+    if not ch:
+        storage.outbox_mark(oid, "failed", "渠道不存在")
+        return False, "渠道不存在"
+    if _notify is None:
+        return False, "通知模块不可用"
+    try:
+        ok, msg = _notify.send(flatten(ch), row["title"], row["text"])
+    except Exception as e:  # noqa: BLE001
+        ok, msg = False, "异常: " + type(e).__name__ + ": " + str(e)[:120]
+    storage.channel_touch(ch["id"], ok, "" if ok else msg, ts)
+    if ok:
+        storage.outbox_mark(oid, "done")
+    else:
+        storage.outbox_mark(oid, "pending", msg, ts + RETRY_BACKOFF[0])
+    return ok, msg
+
+
+def push_digest(storage, hours: int = 24, channel_ids: list[str] | None = None,
+                ts: int = 0) -> dict:
+    """生成巡检摘要并推送（定时调度与 UI 手动推送共用）。"""
+    import time
+    from . import report
+    ts = ts or int(time.time())
+    title, text = report.digest_text(storage, hours, ts)
+    chans = {c["id"]: c for c in storage.list_channels() if c["enabled"]}
+    ids = channel_ids or list(chans)
+    channels = [chans[c] for c in ids if c in chans]
+    delivered, n_ch, n_ok, err, failed = _dispatch(storage, channels, title, text, ts)
+    for ch, msg in failed:
+        storage.outbox_add(ts, 0, ch["id"], title, text, ts + RETRY_BACKOFF[0], err=msg)
+    storage.setting_set("digest_last_ts", str(ts))
+    return {"title": title, "channels": n_ch, "ok": n_ok, "delivered": delivered, "error": err}
 
 
 def evaluate(storage, ts: int = 0) -> list[dict]:
@@ -157,6 +238,7 @@ def evaluate(storage, ts: int = 0) -> list[dict]:
     chans = {c["id"]: c for c in storage.list_channels() if c["enabled"]}
     tasks = {t["id"]: t for t in storage.list_tasks()}
     nodes = {n["id"]: n for n in storage.list_nodes()}
+    changes: list[dict] = []
 
     for rule in rules:
         metric = rule["metric"]
@@ -196,20 +278,56 @@ def evaluate(storage, ts: int = 0) -> list[dict]:
                 kind = "resolved"
 
             title, text = _fmt(rule, label, value, stats, ts, kind)
-            channels = [chans[c] for c in rule["channel_ids"] if c in chans]
-            delivered, n_ch, n_ok, err = _dispatch(storage, channels, title, text, ts)
             target = {"task_id": t_id, "node_id": n_id, "label": label,
                       "value": _scaled(metric, value),
                       "threshold": _scaled(metric, rule["threshold"]),
                       "count": stats.get("count"), "ok": stats.get("ok"),
                       "fail": stats.get("fail")}
-            aid = storage.alert_add(ts, rule, key,
-                                    "firing" if kind != "resolved" else "resolved",
-                                    title, text, target, delivered, n_ch, n_ok, err)
-            out.append({"id": aid, "kind": kind, "rule": rule["name"], "metric": metric,
-                        "key": key, "label": label, "title": title,
-                        "delivered": delivered, "channels": n_ch, "ok": n_ok, "error": err})
-            log.info("告警 %s: %s（渠道 %d/%d 成功）", kind, title, n_ok, n_ch)
+            changes.append({"rule": rule, "key": key, "label": label, "kind": kind,
+                            "title": title, "text": text, "target": target})
+
+    # ---- 聚合派发：同一条规则同一轮里的多个目标合并成一条通知，避免「多节点/多线路刷屏」----
+    groups: dict = {}
+    for ch in changes:
+        dkind = "resolved" if ch["kind"] == "resolved" else "firing"
+        groups.setdefault((ch["rule"]["id"], dkind), []).append(ch)
+
+    for (rid, dkind), items in groups.items():
+        rule = items[0]["rule"]
+        channels = [chans[c] for c in rule["channel_ids"] if c in chans]
+        if len(items) == 1:
+            send_title, send_text = items[0]["title"], items[0]["text"]
+        else:
+            head = "【告警】" if dkind == "firing" else "【恢复】"
+            names = "、".join(str(i["label"]) for i in items[:6])
+            more = "" if len(items) <= 6 else (" 等 " + str(len(items)) + " 个目标")
+            send_title = head + rule["name"] + " · " + str(len(items)) + " 个目标同时" + \
+                ("异常" if dkind == "firing" else "恢复")
+            lines = ["- 规则：" + rule["name"] + "（" + METRICS.get(rule["metric"], (rule["metric"],))[0] + "）",
+                     "- 影响：" + str(len(items)) + " 个目标 —— " + names + more,
+                     "- 时间：" + _time_text(ts), ""]
+            for i in items:
+                lines.append("- " + str(i["label"]) + "：" + i["title"].split("】")[-1])
+            send_text = "\n".join(lines)
+        delivered, n_ch, n_ok, err, failed = _dispatch(storage, channels, send_title, send_text, ts)
+        for i in items:
+            note = err
+            if len(items) > 1:
+                note = (note + "；" if note else "") + "聚合发送(" + str(len(items)) + " 个目标)"
+            aid = storage.alert_add(ts, rule, i["key"],
+                                    "firing" if i["kind"] != "resolved" else "resolved",
+                                    i["title"], i["text"], i["target"],
+                                    delivered, n_ch, n_ok, note)
+            out.append({"id": aid, "kind": i["kind"], "rule": rule["name"], "metric": rule["metric"],
+                        "key": i["key"], "label": i["label"], "title": i["title"],
+                        "delivered": delivered, "channels": n_ch, "ok": n_ok, "error": err,
+                        "grouped": len(items)})
+            log.info("告警 %s: %s（%d 个目标聚合，渠道 %d/%d 成功）",
+                     i["kind"], i["title"], len(items), n_ok, n_ch)
+        # 派发失败的渠道进重投队列（按退避重试，失败也不影响评估）
+        for ch, msg in failed:
+            storage.outbox_add(ts, 0, ch["id"], send_title, send_text,
+                               ts + RETRY_BACKOFF[0], err=msg)
     return out
 
 

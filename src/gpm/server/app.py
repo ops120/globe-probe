@@ -40,6 +40,8 @@ def create_app(cfg, storage: Storage | None = None):
             asyncio.create_task(_agg_loop(state, stop)),
             asyncio.create_task(_retention_loop(state, stop)),
             asyncio.create_task(_alert_loop(state, stop)),
+            asyncio.create_task(_retry_loop(state, stop)),
+            asyncio.create_task(_digest_loop(state, stop)),
         ]
         log.info("服务端启动: %s (db=%s)", cfg.server["listen"], cfg.server["database"])
         yield
@@ -56,6 +58,26 @@ def create_app(cfg, storage: Storage | None = None):
     def health():
         return {"ok": True, "time": now(), "config_version": storage.config_version(),
                 "version": __version__, "author": AUTHOR, "repo": REPO}
+
+    @app.middleware("http")
+    async def audit_middleware(request, call_next):
+        """写操作留痕：谁（admin/本机）/ 何时 / 改了什么（中文动作）/ 结果。
+
+        只记 /api/* 的写请求，节点侧上报接口（/api/agent/*）不记（量大且语义固定）。
+        """
+        resp = await call_next(request)
+        try:
+            from . import audit
+            if audit.is_mutating(request.method, request.url.path):
+                who = "admin" if request.headers.get("x-admin-token") else "本机"
+                fwd = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+                ip = fwd or (request.client.host if request.client else "")
+                audit.record(storage, method=request.method, path=request.url.path,
+                             status=resp.status_code, who=who, ip=ip, ts=now(),
+                             detail=request.url.path)
+        except Exception as e:  # noqa: BLE001 - 审计失败绝不影响业务
+            log.debug("审计中间件跳过: %s", e)
+        return resp
 
     @app.get("/metrics")
     def prometheus_metrics():
@@ -115,6 +137,47 @@ async def _alert_loop(state: dict, stop: asyncio.Event):
                 log.warning("告警评估产生 %d 条事件（firing/remind/resolved）", len(events))
         except Exception as e:  # noqa
             log.error("告警评估失败: %s", e)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _retry_loop(state: dict, stop: asyncio.Event):
+    """通知重投循环：把派发失败的通知按退避重试（默认每 60s 扫一次队列）。"""
+    s: Storage = state["storage"]
+    interval = int(state["cfg"].server.get("notify_retry_interval", 60) or 60)
+    while not stop.is_set():
+        try:
+            from . import alerting
+            done = alerting.retry_pending(s, now(), limit=10)
+            if done:
+                log.info("通知重投：%d 条（成功 %d）", len(done),
+                         sum(1 for d in done if d["status"] == "done"))
+        except Exception as e:  # noqa: BLE001
+            log.error("通知重投失败: %s", e)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _digest_loop(state: dict, stop: asyncio.Event):
+    """定时巡检报告：按 settings 里的开关与间隔推送（默认每 5 分钟检查一次是否到期）。"""
+    s: Storage = state["storage"]
+    interval = int(state["cfg"].server.get("digest_check_interval", 300) or 300)
+    while not stop.is_set():
+        try:
+            if s.setting_get("digest_enabled", "0") == "1":
+                hours = int(s.setting_get("digest_interval_hours", "24") or 24)
+                last = int(s.setting_get("digest_last_ts", "0") or 0)
+                if now() - last >= max(1, hours) * 3600:
+                    from . import alerting
+                    ids = [c for c in (s.setting_get("digest_channel_ids", "") or "").split(",") if c]
+                    r = alerting.push_digest(s, hours, ids, now())
+                    log.warning("巡检报告已推送：%s（渠道 %d/%d 成功）", r["title"], r["ok"], r["channels"])
+        except Exception as e:  # noqa: BLE001
+            log.error("巡检报告推送失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
         except asyncio.TimeoutError:

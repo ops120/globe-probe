@@ -19,8 +19,8 @@
 5. 已恢复/进行中的判定：ended_at 为空即「进行中」，其时长算到窗口末尾。
 
 已知限制：
-- list_incidents() 没有时间过滤参数，只按最近 _INCIDENT_SCAN_LIMIT 条扫描后在内存裁剪；
-- node_avail(node_id, t_from) 也没有 t_to，节点侧 count/ok 的统计区间是 [t_from, now]。
+- list_incidents() 已支持 t_from/t_to（时间过滤下推到 SQL）；
+- node_avail(node_id, t_from, task_ids, t_to) 已支持 t_to；事件时长按窗口边界裁剪。
 """
 from __future__ import annotations
 
@@ -132,8 +132,11 @@ def _streams(storage, task_id: str) -> int:
         return 0
 
 
-def _node_avail(storage, node_id: str, t_from: int, task_ids) -> dict:
+def _node_avail(storage, node_id: str, t_from: int, task_ids, t_to: int = 0) -> dict:
+    """节点侧窗口统计：t_to 必须传，否则区间会一直延伸到 now（历史报表会偏大）。"""
     try:
+        r = storage.node_avail(node_id, t_from, task_ids, t_to)
+    except TypeError:            # 兼容没有 t_to 的旧实现
         r = storage.node_avail(node_id, t_from, task_ids)
     except Exception:
         r = None
@@ -148,6 +151,9 @@ def _collect_incidents(storage, t_from: int, t_to: int,
                        task_names: dict, node_names: dict) -> list[dict]:
     """窗口内的事件（按 started_at 倒序）。node 事件保留但不计入停机。"""
     try:
+        # 时间过滤下推到 SQL（只取与窗口有交集的事件），避免「只扫最近 N 条」漏掉最旧事件
+        raw = storage.list_incidents(limit=_INCIDENT_SCAN_LIMIT, t_from=t_from, t_to=t_to) or []
+    except TypeError:                 # 兼容没有时间参数的旧实现
         raw = storage.list_incidents(limit=_INCIDENT_SCAN_LIMIT) or []
     except Exception:
         raw = []
@@ -159,12 +165,10 @@ def _collect_incidents(storage, t_from: int, t_to: int,
         if started > t_to or (ended is not None and ended < t_from):
             continue                      # 与窗口无交集
         kind = str(_get(i, "kind", "") or "probe")
-        dur = _get(i, "duration_ms")
-        if ended is None:
-            dur = max(0, t_to - started) * 1000          # 进行中：算到窗口末尾
-        elif dur is None:
-            dur = max(0, ended - started) * 1000
-        dur = max(0, _int(dur))
+        # 时长按窗口边界裁剪：跨窗的长事件只计入落在窗口内的部分
+        clip_start = max(started, t_from)
+        clip_end = t_to if ended is None else min(ended, t_to)
+        dur = max(0, clip_end - clip_start) * 1000
         tid = str(_get(i, "task_id", "") or "")
         nid = str(_get(i, "node_id", "") or "")
         task_name = task_names.get(tid) or tid
@@ -238,7 +242,7 @@ def sla(storage, t_from: int, t_to: int, task_id: str = "", node_id: str = "") -
     node_rows: list[dict] = []
     for n in nodes:
         nid = str(_get(n, "id", "") or "")
-        na = _node_avail(storage, nid, t_from, scope_tasks)
+        na = _node_avail(storage, nid, t_from, scope_tasks, t_to)
         count, ok = na["count"], na["ok"]
         status = str(_get(n, "status", "") or "")
         since = _int(_get(n, "online_since"))

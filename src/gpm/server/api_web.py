@@ -899,4 +899,97 @@ def setup_router(app_state) -> APIRouter:
         title, text = report.digest_text(s, max(1, min(hours, 24 * 30)), now())
         return {"title": title, "text": text}
 
+    # ---------- 通知重投队列 ----------
+    @router.get("/alerts/outbox")
+    def outbox_list(limit: int = 50, status: str = ""):
+        return {"items": s.outbox_list(limit=max(1, min(limit, 200)), status=status),
+                "counts": s.outbox_counts()}
+
+    @router.post("/alerts/outbox/{oid}/retry")
+    def outbox_retry(oid: int, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        ok, msg = alerting.retry_one(s, oid)
+        return {"ok": ok, "detail": msg}
+
+    @router.delete("/alerts/outbox/{oid}")
+    def outbox_delete(oid: int, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        if not s.outbox_delete(oid):
+            raise HTTPException(404, "记录不存在")
+        return {"deleted": oid}
+
+    # ---------- 巡检报告：设置与手动推送 ----------
+    def _digest_settings() -> dict:
+        return {"enabled": s.setting_get("digest_enabled", "0") == "1",
+                "interval_hours": int(s.setting_get("digest_interval_hours", "24") or 24),
+                "channel_ids": [c for c in (s.setting_get("digest_channel_ids", "") or "").split(",") if c],
+                "last_ts": int(s.setting_get("digest_last_ts", "0") or 0)}
+
+    @router.get("/report/digest/settings")
+    def digest_settings():
+        return _digest_settings()
+
+    @router.put("/report/digest/settings")
+    def digest_settings_set(body: dict, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        if "enabled" in body:
+            s.setting_set("digest_enabled", "1" if body["enabled"] else "0")
+        if body.get("interval_hours") is not None:
+            try:
+                h = int(body["interval_hours"])
+            except (TypeError, ValueError):
+                raise HTTPException(422, "interval_hours 必须是整数")
+            s.setting_set("digest_interval_hours", str(max(1, min(h, 24 * 30))))
+        if body.get("channel_ids") is not None:
+            if not isinstance(body["channel_ids"], list):
+                raise HTTPException(422, "channel_ids 必须是数组")
+            known = {c["id"] for c in s.list_channels()}
+            bad = [c for c in body["channel_ids"] if c not in known]
+            if bad:
+                raise HTTPException(422, f"渠道不存在: {bad}")
+            s.setting_set("digest_channel_ids", ",".join(str(c) for c in body["channel_ids"]))
+        return _digest_settings()
+
+    @router.post("/report/digest/push")
+    def digest_push(body: dict | None = None, x_admin_token: str | None = Header(default=None)):
+        """立即生成并推送巡检报告（定时推送由 server.digest_check_interval 驱动）。"""
+        check_write(x_admin_token)
+        b = body or {}
+        hours = int(b.get("hours") or (int(s.setting_get("digest_interval_hours", "24") or 24)))
+        ids = b.get("channel_ids")
+        if ids is None:
+            raw = s.setting_get("digest_channel_ids", "")
+            ids = [c for c in raw.split(",") if c] or None
+        return alerting.push_digest(s, max(1, min(hours, 24 * 30)), ids, now())
+
+    # ---------- 操作审计 ----------
+    @router.get("/audit")
+    def audit_list(limit: int = 100, action: str = "", target: str = "", since: int = 0):
+        try:
+            from . import audit
+            items = audit.query(s, limit=max(1, min(limit, 500)), action=action,
+                                target=target, since=since)
+        except Exception as e:  # noqa: BLE001 - 审计模块缺失/异常不应 5xx
+            items = []
+            log.warning("审计查询失败: %s", e)
+        return {"items": items, "counts": s.audit_counts()}
+
+    # ---------- 事件详情与确认 ----------
+    @router.get("/event/{iid}")
+    def event_detail(iid: int):
+        try:
+            from . import eventview
+            return eventview.detail(s, iid, now())
+        except KeyError:
+            raise HTTPException(404, "事件不存在")
+
+    @router.post("/event/{iid}/ack")
+    def event_ack(iid: int, body: dict | None = None, x_admin_token: str | None = Header(default=None)):
+        check_write(x_admin_token)
+        b = body or {}
+        who = "admin" if x_admin_token else str(b.get("who") or "local")
+        if not s.incident_ack(iid, now(), who, str(b.get("note") or "")):
+            raise HTTPException(404, "事件不存在")
+        return s.incident_get(iid)
+
     return router

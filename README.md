@@ -25,7 +25,13 @@
 - 🖥 **中文 WebUI**：总览 / 任务详情（通断条带 + 10s 曲线 + 单次详情弹窗 + mtr 多节点并排）/ 历史对比 / 全球地图 / 节点管理（接入示例、分组、Token、IP 段映射）/ 任务管理；**白天·夜间主题一键切换**
 - 🔔 **告警闭环**：通知渠道（通用 Webhook / 企业微信 / 钉钉（含加签）/ 飞书 / SMTP 邮件，支持「测试发送」）；
   规则支持**可用率 / 延迟均值 / 延迟 P95 / 丢包率 / 节点离线**，可按任务或节点生效；
-  含**静默期去重**、**恢复通知**、**维护窗口豁免**，告警历史记录每次送达结果与失败原因
+  含**静默期去重**、**恢复通知**、**维护窗口豁免**、**抑制与聚合**（同一轮多目标合并成一条，不刷屏）、
+  **失败自动重投**（60s/300s/900s 退避 3 次，队列可手动重投）；告警历史记录每次送达结果与失败原因
+- 🧾 **巡检报告推送**：可选开关、间隔（1h/6h/12h/24h/每周）与推送渠道，后台按时自动推送可用率摘要
+  （最差任务 Top3、事件与 MTTR/MTBF、节点在线情况）；也可在页面「立即推送」
+- 🔎 **事件详情**：点击事件看**时间线**、**影响范围**（同期同任务/同节点异常）、窗口内可用率曲线，
+  并可**手工确认与备注**（谁在何时确认）
+- 📜 **操作审计**：所有写操作自动留痕（中文动作 / 目标 / 目标 ID / 状态 / 来源 IP），支持按类型筛选与 CSV 导出
 - 📊 **SLA 报表**：按任务/节点的可用率、探测数、失败数、RTT 均值/P95、丢包率，事件时长合计与 **MTTR/MTBF**，
   支持 24 小时 / 7 天 / 30 天窗口与 **CSV 导出**；另可生成「巡检报告」Markdown 摘要（可直接推给通知渠道）
 - 📈 **Prometheus 指标**：`/metrics` 暴露 `gpm_*`（节点在线/心跳年龄/CPU/内存、任务可用率/流数、事件数、接入计数），
@@ -139,7 +145,9 @@ docker run -d --name gpm-agent-node --add-host=host.docker.internal:host-gateway
 │   │   ├── alerting.py  # 告警规则评估与派发（静默期/恢复/维护窗口）
 │   │   ├── notify.py    # 通知渠道发送器（Webhook/企业微信/钉钉/飞书/SMTP）
 │   │   ├── metrics.py   # Prometheus 指标渲染
-│   │   └── report.py    # SLA 报表与巡检摘要
+│   │   ├── report.py    # SLA 报表与巡检摘要
+│   │   ├── audit.py     # 操作审计（中文动作映射 / 查询 / CSV）
+│   │   └── eventview.py # 事件详情（时间线 / 影响范围 / 曲线）
 │   ├── common/          # 协议模型、DNS 解析器（UDP/TCP/DoH/DoT）、工具
 │   └── webui/static/    # 中文 WebUI（原生 JS + 本地 ECharts + 精简世界地图）
 ├── tests/unit/          # 解析器/DNS 线路/Agent 解析路径
@@ -254,6 +262,14 @@ docker run -d --name gpm-agent-node --add-host=host.docker.internal:host-gateway
 | `/api/alerts/windows/{id}` | DELETE | 删除维护窗口 |
 | `/api/alerts` | GET | 告警历史（含送达结果与失败原因） |
 | `/api/alerts/evaluate` | POST | 立即评估一轮规则 |
+| `/api/alerts/outbox` | GET | 通知重投队列（待重投 / 已送达 / 最终失败） |
+| `/api/alerts/outbox/{id}/retry` | POST | 对某条失败通知立即重投 |
+| `/api/alerts/outbox/{id}` | DELETE | 从队列删除某条 |
+| `/api/report/digest/settings` | GET / PUT | 巡检报告推送设置（开关 / 间隔 / 渠道） |
+| `/api/report/digest/push` | POST | 立即生成并推送巡检报告 |
+| `/api/event/{id}` | GET | 事件详情（时间线 / 影响范围 / 曲线 / 统计） |
+| `/api/event/{id}/ack` | POST | 确认事件并保存备注 |
+| `/api/audit` | GET | 操作审计（筛选：动作 / 目标类型 / 起始时间） |
 | `/api/report/sla` | GET | SLA 报表（窗口/任务/节点/事件/MTTR/MTBF） |
 | `/api/report/daily` | GET | 逐日可用率序列 |
 | `/api/report/digest` | GET | 巡检报告（Markdown 标题+正文，可推送给通知渠道） |

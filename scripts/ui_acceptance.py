@@ -236,6 +236,25 @@ def main() -> int:
         ck.ok("告警" in (page.text_content("#al-tbl") or ""), "告警历史显示标题")
         shot("alerts")
 
+        # P0/P1 收口：巡检推送 / 重投队列 / 操作审计 / 事件详情弹窗
+        ck.ok(page.locator("#dg-enable").count() == 1 and page.locator("#dg-push").count() == 1,
+              "巡检报告推送有开关与「立即推送」")
+        ck.ok(page.locator("#ob-tbl tbody tr").count() >= 1, "通知重投队列表已渲染")
+        ob_sub = page.text_content("#ob-sub") or ""
+        ck.ok(("待重投" in ob_sub) and ("已送达" in ob_sub), "重投队列显示计数")
+        ck.ok(page.locator("#au-tbl tbody tr").count() >= 1, "操作审计表有记录")
+        au_txt = page.text_content("#au-tbl") or ""
+        ck.ok(("任务" in au_txt) or ("告警" in au_txt) or ("节点" in au_txt), "审计表显示中文动作")
+        shot("alerts-ops")
+        page.locator("#sla-incs tbody tr").first.click()
+        wait_modal(page)
+        ev_txt = page.text_content("#modal-body") or ""
+        ck.ok("时间线" in ev_txt and "影响范围" in ev_txt, "事件详情含时间线与影响范围")
+        ck.ok(page.locator("#ev-chart canvas").count() >= 1, "事件详情有指标曲线")
+        ck.ok(page.locator("#ev-ack").count() == 1, "事件详情有「确认并保存备注」入口")
+        shot("event-detail")
+        close_modal(page)
+
         # ---- 主题：夜间 / 白天 ----
         print("→ 主题与筛选控件")
         page.click('nav a[data-page="task"]')

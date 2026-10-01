@@ -97,6 +97,23 @@ CREATE TABLE IF NOT EXISTS alerts(
 CREATE INDEX IF NOT EXISTS ix_alerts_ts ON alerts(ts);
 CREATE INDEX IF NOT EXISTS ix_alerts_open ON alerts(rule_id, key, status, ts);
 
+-- 键值设置（巡检推送配置、UI 偏好等服务端可持久化项）
+CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
+
+-- 操作审计：所有写接口都会留痕（谁 / 何时 / 改了什么 / 结果）
+CREATE TABLE IF NOT EXISTS audit_log(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, who TEXT, action TEXT, target TEXT,
+  target_id TEXT DEFAULT '', status INTEGER DEFAULT 0, ip TEXT DEFAULT '', detail TEXT DEFAULT '');
+CREATE INDEX IF NOT EXISTS ix_audit_ts ON audit_log(ts);
+
+-- 通知重投队列：派发失败的渠道进这里，按退避重试
+CREATE TABLE IF NOT EXISTS notify_outbox(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, alert_id INTEGER DEFAULT 0,
+  channel_id TEXT, title TEXT, text TEXT, attempts INTEGER DEFAULT 0,
+  next_retry_at INTEGER DEFAULT 0, status TEXT DEFAULT 'pending',
+  last_error TEXT DEFAULT '', done_at INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS ix_outbox_due ON notify_outbox(status, next_retry_at);
+
 -- 自定义「IP 段 → 位置」：IDC 内网段/固定出口段直接指定地理位置（优先于在线查询）
 CREATE TABLE IF NOT EXISTS geo_networks(
   id TEXT PRIMARY KEY, cidr TEXT UNIQUE, place TEXT, lat REAL, lng REAL,
@@ -134,6 +151,11 @@ class Storage:
             icols = [r[1] for r in self.db.execute("PRAGMA table_info(incidents)")]
             if "kind" not in icols:
                 self.db.execute("ALTER TABLE incidents ADD COLUMN kind TEXT DEFAULT 'probe'")
+            for col, ddl in (("acked_at", "INTEGER DEFAULT 0"),
+                             ("acked_by", "TEXT DEFAULT ''"),
+                             ("note", "TEXT DEFAULT ''")):
+                if col not in icols:
+                    self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} {ddl}")
             ncols = [r[1] for r in self.db.execute("PRAGMA table_info(nodes)")]
             for col, ddl in (("local_ip", "TEXT DEFAULT ''"),
                              ("egress_ip", "TEXT DEFAULT ''"),
@@ -582,12 +604,18 @@ class Storage:
             return [dict(r) for r in rows]
 
     def node_avail(self, node_id: str, t_from: int,
-                   task_ids: list[str] | None = None) -> dict:
-        """节点可用率：跨该节点的全部线路/URL 流聚合（避免逐流读取的 N+1）。"""
+                   task_ids: list[str] | None = None, t_to: int = 0) -> dict:
+        """节点可用率：跨该节点的全部线路/URL 流聚合（避免逐流读取的 N+1）。
+
+        t_to>0 时限定窗口上界（历史报表必须传，否则统计区间会一直延伸到 now）。
+        """
         with self.lock:
             sql = ("SELECT SUM(count) AS c, SUM(ok) AS o FROM aggregates"
                    " WHERE bucket='1m' AND node_id=? AND ts>=?")
             args: list = [node_id, t_from]
+            if t_to:
+                sql += " AND ts<=?"
+                args.append(t_to)
             if task_ids is not None:
                 if not task_ids:
                     return {"count": 0, "ok": 0, "avail": None}
@@ -623,13 +651,26 @@ class Storage:
                 "AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
                 (task_id, node_id, dns, url)).fetchone()
 
-    def list_incidents(self, limit: int = 30, open_only: bool = False) -> list[dict]:
+    def list_incidents(self, limit: int = 30, open_only: bool = False,
+                       t_from: int = 0, t_to: int = 0) -> list[dict]:
+        """事件列表。t_from/t_to 非 0 时按「与窗口有交集」过滤（在 SQL 里做，
+        避免只扫最近 N 条再内存裁剪导致超长窗口漏掉最旧事件）。"""
         with self.lock:
             sql = "SELECT * FROM incidents"
+            where, args = [], []
             if open_only:
-                sql += " WHERE ended_at IS NULL"
+                where.append("ended_at IS NULL")
+            if t_from:
+                where.append("(ended_at IS NULL OR ended_at >= ?)")
+                args.append(t_from)
+            if t_to:
+                where.append("started_at <= ?")
+                args.append(t_to)
+            if where:
+                sql += " WHERE " + " AND ".join(where)
             sql += " ORDER BY started_at DESC LIMIT ?"
-            rows = self.db.execute(sql, (limit,)).fetchall()
+            args.append(limit)
+            rows = self.db.execute(sql, args).fetchall()
             out = []
             for r in rows:
                 d = dict(r)
@@ -1098,6 +1139,140 @@ class Storage:
             ).fetchone()["c"]
             total = self.db.execute("SELECT COUNT(*) c FROM alerts").fetchone()["c"]
             return {"firing": firing, "total": total}
+
+    # ---------- 设置（键值）----------
+    def setting_get(self, key: str, default: str = "") -> str:
+        with self.lock:
+            r = self.db.execute("SELECT v FROM settings WHERE k=?", (key,)).fetchone()
+            return r["v"] if r else default
+
+    def setting_set(self, key: str, value: str):
+        with self.lock:
+            self.db.execute("INSERT INTO settings(k,v) VALUES(?,?)"
+                            " ON CONFLICT(k) DO UPDATE SET v=excluded.v", (key, value))
+            self.db.commit()
+
+    def settings_all(self) -> dict:
+        with self.lock:
+            return {r["k"]: r["v"] for r in self.db.execute("SELECT k,v FROM settings")}
+
+    # ---------- 操作审计 ----------
+    def audit_add(self, ts: int, who: str, action: str, target: str, target_id: str = "",
+                  status: int = 0, ip: str = "", detail: str = "") -> int:
+        with self.lock:
+            cur = self.db.execute(
+                "INSERT INTO audit_log(ts,who,action,target,target_id,status,ip,detail)"
+                " VALUES(?,?,?,?,?,?,?,?)",
+                (ts, who, action, target, target_id, status, ip, detail[:400]))
+            self.db.commit()
+            return cur.lastrowid
+
+    def audit_list(self, limit: int = 100, action: str = "", target: str = "",
+                   since: int = 0) -> list[dict]:
+        with self.lock:
+            sql = "SELECT * FROM audit_log"
+            where, args = [], []
+            if action:
+                where.append("action=?")
+                args.append(action)
+            if target:
+                where.append("target LIKE ?")
+                args.append(target + "%")
+            if since:
+                where.append("ts>=?")
+                args.append(since)
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+            args.append(limit)
+            return [dict(r) for r in self.db.execute(sql, args).fetchall()]
+
+    def audit_counts(self) -> dict:
+        with self.lock:
+            return {
+                "total": self.db.execute("SELECT COUNT(*) c FROM audit_log").fetchone()["c"],
+                "day": self.db.execute("SELECT COUNT(*) c FROM audit_log WHERE ts>=?",
+                                       (now() - 86400,)).fetchone()["c"],
+            }
+
+    # ---------- 通知重投队列 ----------
+    def outbox_add(self, ts: int, alert_id: int, channel_id: str, title: str, text: str,
+                   next_retry_at: int = 0, err: str = "") -> int:
+        with self.lock:
+            cur = self.db.execute(
+                "INSERT INTO notify_outbox(ts,alert_id,channel_id,title,text,next_retry_at,last_error)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (ts, alert_id, channel_id, title, text, next_retry_at, err[:200]))
+            self.db.commit()
+            return cur.lastrowid
+
+    def outbox_get(self, oid: int) -> dict | None:
+        with self.lock:
+            r = self.db.execute("SELECT * FROM notify_outbox WHERE id=?", (oid,)).fetchone()
+            return dict(r) if r else None
+
+    def outbox_due(self, ts: int, limit: int = 20) -> list[dict]:
+        with self.lock:
+            return [dict(r) for r in self.db.execute(
+                "SELECT * FROM notify_outbox WHERE status='pending' AND next_retry_at<=?"
+                " ORDER BY next_retry_at LIMIT ?", (ts, limit)).fetchall()]
+
+    def outbox_mark(self, oid: int, status: str, err: str = "", next_retry_at: int = 0):
+        with self.lock:
+            if status == "pending":
+                self.db.execute(
+                    "UPDATE notify_outbox SET attempts=attempts+1, next_retry_at=?,"
+                    " last_error=? WHERE id=?", (next_retry_at, err[:200], oid))
+            else:
+                self.db.execute(
+                    "UPDATE notify_outbox SET status=?, last_error=?, done_at=?,"
+                    " attempts=attempts+1 WHERE id=?", (status, err[:200], now(), oid))
+            self.db.commit()
+
+    def outbox_list(self, limit: int = 50, status: str = "") -> list[dict]:
+        with self.lock:
+            sql = "SELECT * FROM notify_outbox"
+            args: list = []
+            if status:
+                sql += " WHERE status=?"
+                args.append(status)
+            sql += " ORDER BY ts DESC LIMIT ?"
+            args.append(limit)
+            return [dict(r) for r in self.db.execute(sql, args).fetchall()]
+
+    def outbox_counts(self) -> dict:
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT status, COUNT(*) c FROM notify_outbox GROUP BY status").fetchall()
+            out = {"pending": 0, "done": 0, "failed": 0}
+            for r in rows:
+                out[r["status"]] = r["c"]
+            return out
+
+    def outbox_delete(self, oid: int) -> bool:
+        with self.lock:
+            cur = self.db.execute("DELETE FROM notify_outbox WHERE id=?", (oid,))
+            self.db.commit()
+            return cur.rowcount > 0
+
+    # ---------- 事件确认 / 备注 ----------
+    def incident_get(self, iid: int) -> dict | None:
+        with self.lock:
+            r = self.db.execute("SELECT * FROM incidents WHERE id=?", (iid,)).fetchone()
+            if not r:
+                return None
+            d = dict(r)
+            d["reason"] = json.loads(d.pop("reason_json") or "{}")
+            return d
+
+    def incident_ack(self, iid: int, ts: int, who: str, note: str = "") -> bool:
+        with self.lock:
+            cur = self.db.execute(
+                "UPDATE incidents SET acked_at=?, acked_by=?,"
+                " note=CASE WHEN ?='' THEN note ELSE ? END WHERE id=?",
+                (ts, who, note, note, iid))
+            self.db.commit()
+            return cur.rowcount > 0
 
     # ---------- 保留策略 ----------
     def retention(self, raw_days: int, a1m: int, a5m: int, a1h: int, hb_days: int, ts: int):

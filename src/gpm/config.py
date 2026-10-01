@@ -21,6 +21,8 @@ DEFAULTS = {
         "retention_1h_days": 730,
         "retention_hb_days": 7,
         "alert_eval_interval": 30,    # 告警规则评估周期（秒）
+        "notify_retry_interval": 60,  # 通知失败重投的扫描周期（秒）
+        "digest_check_interval": 300, # 巡检报告定时推送的检查周期（秒）
     },
     "agent": {
         "server_url": "http://127.0.0.1:8620",

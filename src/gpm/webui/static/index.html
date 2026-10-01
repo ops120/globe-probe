@@ -375,6 +375,37 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           </div>
           <table class="tbl" id="al-tbl"></table>
         </div>
+        <div class="panel">
+          <div class="panel-head">巡检报告推送 <span class="sub" id="dg-sub"></span>
+            <span style="flex:1"></span>
+            <label class="fcheck" style="margin-right:10px"><input type="checkbox" id="dg-enable"> <span>启用定时推送</span></label>
+            <select id="dg-hours" style="max-width:120px">
+              <option value="1">每 1 小时</option><option value="6">每 6 小时</option>
+              <option value="12">每 12 小时</option><option value="24">每天</option>
+              <option value="168">每周</option>
+            </select>
+            <button class="btn sm" id="dg-push">立即推送</button>
+          </div>
+          <div id="dg-chans" style="font-size:12px;color:var(--muted);line-height:2.2"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">通知重投队列 <span class="sub" id="ob-sub"></span>
+            <span style="flex:1"></span><button class="btn sm ghost" id="ob-refresh">刷新</button></div>
+          <table class="tbl" id="ob-tbl"></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head">操作审计 <span class="sub" id="au-sub"></span>
+            <span style="flex:1"></span>
+            <div class="seg" id="au-filter">
+              <button data-t="" class="active">全部</button>
+              <button data-t="任务">任务</button>
+              <button data-t="节点">节点</button>
+              <button data-t="告警">告警</button>
+            </div>
+            <button class="btn sm ghost" id="au-export">导出 CSV</button>
+          </div>
+          <table class="tbl" id="au-tbl"></table>
+        </div>
       </section>
 
       <section class="page hidden" id="page-nodes">
@@ -432,7 +463,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=24"></script>
-<script src="/static/app.js?v=24"></script>
+<script src="/static/echarts.min.js?v=25"></script>
+<script src="/static/app.js?v=25"></script>
 </body>
 </html>

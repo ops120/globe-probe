@@ -821,7 +821,8 @@ async function renderSla() {
       || '<tr><td colspan="6" style="color:var(--faint)">无节点</td></tr>') + '</tbody>';
   const items = (d.incidents && d.incidents.items) || [];
   $('#sla-incs').innerHTML = '<thead><tr><th>类型</th><th>目标</th><th>开始</th><th>持续</th><th>原因</th></tr></thead><tbody>' +
-    (items.map(i => '<tr><td>' + (i.kind === 'node' ? '<span class="badge b-off">节点侧</span>' : '<span class="badge b-fail">探测</span>') + '</td>'
+    (items.map(i => '<tr style="cursor:pointer" title="点开事件详情" onclick="eventModal(' + i.id + ')"><td>'
+      + (i.kind === 'node' ? '<span class="badge b-off">节点侧</span>' : '<span class="badge b-fail">探测</span>') + '</td>'
       + '<td>' + esc(i.title || (i.task_name || i.node_name || '')) + '</td>'
       + '<td style="color:var(--muted)">' + fmtTS(i.started_at) + '</td>'
       + '<td class="num">' + (i.duration_ms ? fmtDur(Math.round(i.duration_ms / 1000)) : '(进行中)') + '</td>'
@@ -929,6 +930,9 @@ async function renderAlerts() {
   if (!state.tasks || !state.tasks.length) state.tasks = await api('/api/tasks');
   await Promise.all([renderSla(), renderChannels(), renderRules(), renderWindows()]);
   await renderAlertHistory();
+  await renderDigest();
+  await renderOutbox();
+  await renderAudit();
 }
 
 $$('#sla-range button').forEach(b => b.onclick = () => {
@@ -1160,6 +1164,190 @@ window.delWindow = async (wid) => {
 $('#ch-new').addEventListener('click', () => chModal(''));
 $('#rule-new').addEventListener('click', () => ruleModal(''));
 $('#mw-new').addEventListener('click', () => mwModal());
+
+/* ---------- 巡检推送 / 重投队列 / 操作审计 / 事件详情 ---------- */
+async function renderDigest() {
+  const d = await api('/api/report/digest/settings');
+  state.digest = d;
+  $('#dg-enable').checked = !!d.enabled;
+  $('#dg-hours').value = String(d.interval_hours);
+  $('#dg-sub').textContent = d.last_ts ? ('上次推送 ' + fmtTS(d.last_ts)) : '尚未推送过';
+  const chans = state.channels || [];
+  if (!chans.length) {
+    $('#dg-chans').textContent = '还没有通知渠道 —— 先在上面新建渠道，再选择推送目标';
+    return;
+  }
+  const picked = d.channel_ids || [];
+  $('#dg-chans').innerHTML = '推送渠道：' + chans.map(c => {
+    const on = picked.indexOf(c.id) >= 0;
+    return '<button class="btn sm ' + (on ? '' : 'ghost') + '" style="margin:2px 4px" '
+      + 'onclick="toggleDigestChan(&quot;' + c.id + '&quot;)">' + (on ? '✓ ' : '') + esc(c.name) + '</button>';
+  }).join('') + (picked.length ? '' : '<span style="color:var(--warn-fg)">（未选择 → 推送给全部启用渠道）</span>');
+}
+window.toggleDigestChan = async (cid) => {
+  const cur = (state.digest && state.digest.channel_ids) || [];
+  const next = cur.indexOf(cid) >= 0 ? cur.filter(x => x !== cid) : cur.concat([cid]);
+  try {
+    await api('/api/report/digest/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel_ids: next }) });
+    renderDigest();
+  } catch (e) { toast('失败: ' + e.message); }
+};
+$('#dg-enable').addEventListener('change', async () => {
+  try {
+    await api('/api/report/digest/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: $('#dg-enable').checked }) });
+    toast($('#dg-enable').checked ? '已启用定时推送' : '已停用定时推送');
+  } catch (e) { toast('失败: ' + e.message); }
+});
+$('#dg-hours').addEventListener('change', async () => {
+  try {
+    await api('/api/report/digest/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ interval_hours: parseInt($('#dg-hours').value) || 24 }) });
+    toast('推送间隔已保存');
+  } catch (e) { toast('失败: ' + e.message); }
+});
+$('#dg-push').addEventListener('click', async () => {
+  const hours = parseInt($('#dg-hours').value) || 24;
+  try {
+    const r = await api('/api/report/digest/push', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hours: hours }) });
+    toast(r.channels ? ('巡检报告已推送 ' + r.ok + '/' + r.channels + ' 渠道') : '没有可用渠道');
+    renderDigest(); renderOutbox();
+  } catch (e) { toast('失败: ' + e.message); }
+});
+
+async function renderOutbox() {
+  const d = await api('/api/alerts/outbox?limit=50');
+  const c = d.counts || {};
+  $('#ob-sub').textContent = '待重投 ' + (c.pending || 0) + ' · 已送达 ' + (c.done || 0) + ' · 最终失败 ' + (c.failed || 0);
+  const cname = {}; (state.channels || []).forEach(x => { cname[x.id] = x.name; });
+  const badge = { pending: '<span class="badge b-warn">待重投</span>', done: '<span class="badge b-ok">已送达</span>', failed: '<span class="badge b-fail">失败</span>' };
+  $('#ob-tbl').innerHTML = '<thead><tr><th>时间</th><th>渠道</th><th>标题</th><th>尝试</th><th>下次重试</th><th>状态</th><th>最近错误</th><th>操作</th></tr></thead><tbody>'
+    + ((d.items || []).length ? d.items.map(o => '<tr>'
+      + '<td style="color:var(--muted)">' + fmtTS(o.ts) + '</td>'
+      + '<td>' + esc(cname[o.channel_id] || o.channel_id) + '</td>'
+      + '<td style="max-width:280px;overflow:hidden;text-overflow:ellipsis">' + esc(o.title) + '</td>'
+      + '<td class="num">' + o.attempts + '/3</td>'
+      + '<td style="color:var(--muted)">' + (o.status === 'pending' ? fmtTS(o.next_retry_at) : '—') + '</td>'
+      + '<td>' + (badge[o.status] || esc(o.status)) + '</td>'
+      + '<td style="color:var(--fail-fg);max-width:240px;overflow:hidden;text-overflow:ellipsis" title="' + esc(o.last_error || '') + '">' + esc(o.last_error || '—') + '</td>'
+      + '<td><button class="btn sm ghost" onclick="retryOutbox(' + o.id + ')">立即重投</button>'
+      + '<button class="btn sm danger" onclick="delOutbox(' + o.id + ')">删除</button></td></tr>').join('')
+      : '<tr><td colspan="8" style="color:var(--faint)">队列为空 —— 通知派发失败时会自动进这里，按 60s/300s/900s 退避重试 3 次</td></tr>')
+    + '</tbody>';
+}
+window.retryOutbox = async (id) => {
+  try {
+    const r = await api('/api/alerts/outbox/' + id + '/retry', { method: 'POST' });
+    toast(r.ok ? '重投成功' : ('重投失败: ' + r.detail));
+    renderOutbox();
+  } catch (e) { toast('失败: ' + e.message); }
+};
+window.delOutbox = async (id) => {
+  if (!confirm('确认从队列删除这条通知？')) return;
+  try { await api('/api/alerts/outbox/' + id, { method: 'DELETE' }); toast('已删除'); renderOutbox(); }
+  catch (e) { toast('失败: ' + e.message); }
+};
+$('#ob-refresh').addEventListener('click', () => renderOutbox());
+
+async function renderAudit() {
+  const t = state.auTarget || '';
+  const d = await api('/api/audit?limit=100' + (t ? '&target=' + encodeURIComponent(t) : ''));
+  state.auditRows = d.items || [];
+  $('#au-sub').textContent = '累计 ' + (d.counts.total || 0) + ' 条 · 近 24h ' + (d.counts.day || 0) + ' 条';
+  $('#au-tbl').innerHTML = '<thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>目标ID</th><th>结果</th><th>来源 IP</th></tr></thead><tbody>'
+    + (state.auditRows.length ? state.auditRows.map(a => '<tr>'
+      + '<td style="color:var(--muted)">' + esc(a.time || fmtTS(a.ts)) + '</td>'
+      + '<td>' + esc(a.who || '') + '</td>'
+      + '<td style="color:var(--fg-strong2)">' + esc(a.action || '') + '</td>'
+      + '<td style="color:var(--muted)">' + esc(a.target || '') + '</td>'
+      + '<td style="color:var(--muted);font-family:Consolas,monospace">' + esc(a.target_id || '—') + '</td>'
+      + '<td>' + (a.ok ? '<span class="badge b-ok">' + a.status + '</span>' : '<span class="badge b-fail">' + (a.status || '—') + '</span>') + '</td>'
+      + '<td style="color:var(--muted)">' + esc(a.ip || '—') + '</td></tr>').join('')
+      : '<tr><td colspan="7" style="color:var(--faint)">暂无审计记录（任何写操作都会自动留痕）</td></tr>')
+    + '</tbody>';
+}
+$$('#au-filter button').forEach(b => b.onclick = () => {
+  $$('#au-filter button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  state.auTarget = b.dataset.t;
+  renderAudit();
+});
+$('#au-export').addEventListener('click', () => {
+  const rows = state.auditRows || [];
+  if (!rows.length) { toast('暂无数据'); return; }
+  const head = ['时间', '操作者', '动作', '目标类型', '目标ID', '状态', '来源IP', '详情'];
+  const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  const csv = [head.map(q).join(',')].concat(rows.map(a => [a.time || fmtTS(a.ts), a.who, a.action,
+    a.target, a.target_id, a.status, a.ip, a.detail].map(q).join(','))).join('\n');
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+  const el = document.createElement('a');
+  el.href = URL.createObjectURL(blob);
+  el.download = 'gpm-audit.csv';
+  el.click();
+  URL.revokeObjectURL(el.href);
+  toast('已导出 ' + rows.length + ' 条');
+});
+
+/* 事件详情：时间线 / 影响范围 / 指标曲线 / 确认备注 */
+window.eventModal = async (iid) => {
+  let d;
+  try { d = await api('/api/event/' + iid); }
+  catch (e) { toast('读取事件失败: ' + e.message); return; }
+  const inc = d.incident || {}, st = d.stats || {}, win = d.window || {};
+  const kindBadge = inc.kind === 'node' ? '<span class="badge b-off">节点侧</span>' : '<span class="badge b-fail">探测</span>';
+  const st2 = inc.ended_at ? '<span class="badge b-ok">已恢复</span>' : '<span class="badge b-warn">进行中</span>';
+  const card = (k, v) => '<div class="card"><div class="k">' + k + '</div><div class="v" style="font-size:18px">' + v + '</div></div>';
+  const tl = (d.timeline || []).map(t => '<div style="display:flex;gap:10px;padding:4px 0;border-bottom:1px solid var(--bd)">'
+    + '<span style="color:var(--muted);min-width:150px">' + fmtTS(t.ts) + '</span>'
+    + '<span>' + esc(t.text) + '</span></div>').join('') || '<div style="color:var(--faint)">无时间线</div>';
+  const blast = (d.blast || []).length
+    ? '<table class="tbl"><thead><tr><th>类型</th><th>任务 / 节点</th><th>同期事件</th><th>状态</th></tr></thead><tbody>'
+      + d.blast.map(b => '<tr><td>' + (b.kind === 'node' ? '<span class="badge b-off">节点侧</span>' : '<span class="badge b-fail">探测</span>') + '</td>'
+        + '<td>' + esc(b.task_name || b.node_name || '') + '</td><td class="num">' + b.incidents + '</td>'
+        + '<td>' + (b.ongoing ? '<span class="badge b-warn">仍在进行</span>' : '<span class="badge b-ok">已恢复</span>') + '</td></tr>').join('')
+      + '</tbody></table>'
+    : '<div style="color:var(--faint);font-size:12px">窗口内没有其它相关事件</div>';
+  $('#modal-body').innerHTML = '<span class="m-close" onclick="closeModal()">✕</span>'
+    + '<div class="m-title">' + esc(inc.title || inc.task_name || inc.node_name || ('事件 #' + iid)) + '</div>'
+    + '<div class="m-sub">' + kindBadge + ' ' + st2 + ' · 开始 ' + fmtTS(inc.started_at)
+    + (inc.ended_at ? ' · 结束 ' + fmtTS(inc.ended_at) : ' · 持续 ' + fmtDur(Math.round((Date.now() / 1000) - inc.started_at)))
+    + (inc.acked_at ? ' · 已由 ' + esc(inc.acked_by || '') + ' 确认于 ' + fmtTS(inc.acked_at) : '') + '</div>'
+    + '<div class="cards" style="margin:10px 0">'
+    + card('样本', st.samples == null ? '—' : st.samples) + card('失败', st.fail == null ? '—' : st.fail)
+    + card('窗口可用率', st.avail == null ? '—' : (st.avail * 100).toFixed(2) + '%')
+    + card('RTT 均值', st.rtt_avg == null ? '—' : st.rtt_avg + ' ms') + '</div>'
+    + '<div class="sub" style="margin:12px 0 4px">指标曲线（' + esc(win.bucket || '') + ' 桶）</div>'
+    + '<div id="ev-chart" style="height:180px"></div>'
+    + '<div class="sub" style="margin:14px 0 4px">时间线</div><div>' + tl + '</div>'
+    + '<div class="sub" style="margin:14px 0 4px">影响范围（同期异常）</div>' + blast
+    + '<div class="form-row" style="align-items:flex-start;margin-top:14px"><label>确认/备注</label>'
+    + '<textarea id="ev-note" rows="2" style="flex:1" placeholder="例如：已通知机房 / 属上游抖动，已知悉">' + esc(inc.note || '') + '</textarea></div>'
+    + '<div style="text-align:right;margin-top:12px"><button class="btn ghost" onclick="closeModal()">关闭</button>'
+    + '<button class="btn" id="ev-ack">确认并保存备注</button></div>';
+  $('#modal-mask').classList.remove('hidden');
+  const xs = (d.series || []).map(p => fmtHM(p.ts));
+  chart('ev-chart', {
+    grid: { left: 46, right: 12, top: 22, bottom: 24 },
+    tooltip: Object.assign({}, TIP, { trigger: 'axis' }),
+    xAxis: Object.assign({}, AXC, { type: 'category', data: xs }),
+    yAxis: Object.assign({}, SPLIT, { type: 'value', name: '%', max: 100, min: 0, axisLabel: AXC.axisLabel }),
+    series: [{ name: '可用率', type: 'line', showSymbol: false, connectNulls: true,
+      data: (d.series || []).map(p => p.avail == null ? null : Math.round(p.avail * 10000) / 100),
+      lineStyle: { color: C('--accent') }, itemStyle: { color: C('--accent') },
+      areaStyle: { color: 'rgba(78,140,230,.08)' } }],
+  });
+  $('#ev-ack').onclick = async () => {
+    try {
+      await api('/api/event/' + iid + '/ack', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: $('#ev-note').value }) });
+      toast('已确认');
+      closeModal();
+      if (!$('#page-alerts').classList.contains('hidden')) renderAlerts();
+    } catch (e) { toast('失败: ' + e.message); }
+  };
+};
 
 /* ---------- 节点 / 任务管理 ---------- */
 /* 节点接入示例：地址用当前页面地址，Token 用开发默认值（生产请在服务端改 GPM_REGISTER_TOKEN） */
