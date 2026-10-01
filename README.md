@@ -198,6 +198,11 @@ docker run -d --name gpm-agent-node --add-host=host.docker.internal:host-gateway
 
 ## 验证步骤
 
+0. **静态检查**（与 CI 同一命令：只查语法错误/未定义名/无效转义这类致命问题）
+   ```bash
+   pip install ruff
+   ruff check src/ --select E9,F63,F7,F82 --ignore E402
+   ```
 1. **单元 + 集成测试**
    ```bash
    python -m pytest tests/ -q          # 105 passed
