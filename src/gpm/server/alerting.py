@@ -14,7 +14,7 @@ import logging
 try:  # 通知模块由独立模块提供；缺失时降级为「仅记录、不发送」
     from . import notify as _notify
 except Exception:  # noqa: BLE001
-    _notify = None
+    _notify = None  # type: ignore[assignment]
 
 log = logging.getLogger("gpm.alerts")
 
@@ -259,7 +259,7 @@ def evaluate(storage, ts: int = 0) -> list[dict]:
             stats = {}
             if metric == "node_offline":
                 online = (nodes.get(key, {}).get("status") == "online")
-                value = 0.0 if online else 1.0
+                value: float | None = 0.0 if online else 1.0
             else:
                 stats = window_stats(storage, key, rule["window_seconds"], ts)
                 value = stats.get(metric if metric != "loss" else "loss")

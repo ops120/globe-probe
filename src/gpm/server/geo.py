@@ -83,9 +83,9 @@ def _is_private(ip: str) -> bool:
 
 def _tag_latlng(tags: dict):
     try:
-        lat = float(tags.get("lat"))
-        lng = float(tags.get("lng") if tags.get("lng") is not None else tags.get("lon"))
-    except (TypeError, ValueError):
+        lat = float(tags["lat"])
+        lng = float(tags["lng"] if tags.get("lng") is not None else tags["lon"])
+    except (KeyError, TypeError, ValueError):
         return None
     if -90 <= lat <= 90 and -180 <= lng <= 180:
         return lat, lng, str(tags.get("place") or tags.get("city") or tags.get("region") or "标签坐标")

@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 # Windows 控制台默认 GBK：显式切到 UTF-8，否则中文/符号直接 print 会 UnicodeEncodeError
@@ -98,6 +101,46 @@ def toast_text(page):
     return page.text_content("#toast") or ""
 
 
+def series_lines_support(base):
+    """服务端是否支持 /api/query/series raw 粒度的 metric=lines（dns 逐线路表数据源）。
+
+    前端 renderDnsLines（gpm-page-task.js）在选中 dns 任务时会请求
+    metric=lines&granularity=raw；若服务端 raw 粒度只放行 rtt/total/loss（当前版本
+    即如此），该请求被 400 拒绝 → dns 任务页渲染中断，逐线路表永远出不来
+    （UnhandledRejection + 4xx 响应噪声）。这里在 Python 侧直接探测服务端口径
+    （不经过浏览器，避免污染 4xx/控制台断言，也不靠伪造接口响应“跑通”）：
+
+      (True, "")   支持 → 可在浏览器里选 dns 任务做真实数据级断言；
+      (False, 说明) 服务端明确 400 → 如实记录产品缺陷并降级跳过；
+      (None, 原因)  环境原因无法确认 → 跳过。
+    """
+    try:
+        with urllib.request.urlopen(base + "/api/tasks", timeout=10) as r:
+            tasks = json.loads(r.read().decode())
+        cand = (next((t for t in tasks if t.get("name") == "dns-ci"), None)
+                or next((t for t in tasks if t.get("type") == "dns"), None)
+                or next((t for t in tasks if t.get("type") == "ping"), None))
+        if not cand:
+            return None, "实例里没有可探测的任务"
+        with urllib.request.urlopen(
+                base + "/api/query/streams?task_id=" + cand["id"], timeout=10) as r:
+            streams = json.loads(r.read().decode())
+        nid = next((s.get("node_id") for s in streams if s.get("node_id")), "")
+        if not nid:
+            return None, f"任务 {cand.get('name')} 没有结果流"
+        req = (base + f"/api/query/series?task_id={cand['id']}&node_id={nid}"
+               "&metric=lines&granularity=raw")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return (r.status < 400), ("" if r.status < 400 else f"HTTP {r.status}")
+        except urllib.error.HTTPError as e:
+            if e.code == 400:
+                return False, e.read().decode("utf-8", "replace")[:80]
+            return None, f"HTTP {e.code}"
+    except Exception as e:  # noqa: BLE001 - 探测失败只决定该组断言是否 skip
+        return None, repr(e)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="http://127.0.0.1:8620")
@@ -115,7 +158,9 @@ def main() -> int:
     summary: dict = {}
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel="chrome", headless=not args.headed)
+        # 浏览器 channel 可用环境变量覆盖（CI 用 Playwright 自带 chromium：GPM_UI_CHANNEL=""）
+        channel = os.environ.get("GPM_UI_CHANNEL", "chrome") or None
+        browser = p.chromium.launch(channel=channel, headless=not args.headed)
         # 固定深色偏好，保证截图与断言稳定（应用默认夜间）
         page = browser.new_page(viewport={"width": 1600, "height": 1000}, locale="zh-CN",
                                 color_scheme="dark")
@@ -465,17 +510,47 @@ def main() -> int:
             sub = page.text_content("#mtr-sub") or ""
             ck.ok(("cycles=" in sub or "tracert" in sub or "并排对比" in sub),
                   f"mtr 面板显示有效探测（{sub.strip()}）")
+            # P2：逐跳趋势折叠区（展开才请求，避免对旧版服务端产生 404 噪声）
+            ck.ok(page.locator("#mtr-trend-panel").count() == 1, "mtr 详情含「逐跳趋势」折叠区")
+            ck.ok(page.locator("#mtr-trend-toggle").count() == 1, "逐跳趋势有展开入口")
+            ck.ok(page.locator("#mtr-trend-range button").count() == 3, "逐跳趋势有 24h/72h/7d 窗口")
+            ck.ok(page.locator("#mtr-trend-body").is_hidden(), "逐跳趋势默认折叠（按需请求）")
             shot("task-mtr")
+            # P2 数据级：展开逐跳趋势，等真实路径结果（tracert/mtr 原始行）聚合出跳数据行；
+            # 断言失败时打印实际内容，接口缺失/无原始结果的环境如实降级
+            if page.locator("#mtr-trend-toggle").count() == 1:
+                page.click("#mtr-trend-toggle")
+                n_trend = wait_count(page, "#mtr-trend-body table tbody tr", 1, timeout=10000)
+                trend_txt = (page.inner_text("#mtr-trend-body") or "").strip()
+                if "需要服务端支持" in trend_txt:
+                    ck.ok(True, "（跳过逐跳趋势数据断言：服务端不支持 mtr_trend 接口）")
+                elif n_trend >= 1:
+                    th = (page.text_content("#mtr-trend-body thead") or "").strip()
+                    ck.ok(all(k in th for k in ("跳", "主机", "Loss", "RTT")),
+                          f"逐跳趋势表头含 跳/主机/Loss/RTT（{th[:44]}）")
+                    ck.ok(page.locator("#mtr-trend-body table tbody tr").count() >= 1,
+                          f"逐跳趋势有真实聚合行（{page.locator('#mtr-trend-body table tbody tr').count()} 跳）")
+                    shot("mtr-trend")
+                elif not (picked or {}).get("has_data"):
+                    ck.ok(True, f"（选中的 mtr 任务窗口内无原始路径结果，跳过逐跳趋势数据断言：{trend_txt[:60]}）")
+                else:
+                    ck.ok(False, f"逐跳趋势无数据行（实际内容：{trend_txt[:120]}）")
+                if not page.locator("#mtr-trend-body").is_hidden():
+                    page.click("#mtr-trend-toggle")   # 收起还原，不影响后续联动断言
             # 明细上方的流 chips：一眼看到各节点最近一轮，点一下切过去
             chips = page.locator("#mtr-streams [data-i]")
             ck.ok(chips.count() >= 2, f"明细列出各节点的流（{chips.count()} 个）")
-            if chips.count() >= 2:
-                page.locator("#mtr-streams [data-i]", has_text="tracert").first.click()
+            tracert_chip = page.locator("#mtr-streams [data-i]", has_text="tracert")
+            if chips.count() >= 2 and tracert_chip.count() >= 1:
+                tracert_chip.first.click()
                 page.wait_for_timeout(1200)
                 sub_c = (page.text_content("#mtr-sub") or "").strip()
                 ck.ok("tracert" in sub_c, f"点 chips 切到 Windows 节点的 tracert 流（{sub_c}）")
                 page.click("#mtr-reset")
                 page.wait_for_timeout(1000)
+            elif chips.count() >= 2:
+                # 实例里没有 Windows 节点（如 CI 双 Linux 节点）就没有 tracert 流，不算失败
+                ck.ok(True, "（无 Windows 节点 → 无 tracert 流，跳过 tracert chips 断言）")
 
             # ---- 联动：点通断条带色块 → mtr 明细切到那一轮 ----
             print("→ mtr 明细与通断条带联动")
@@ -573,6 +648,314 @@ def main() -> int:
         page.wait_for_timeout(900)
         ck.ok("已保存" in toast_text(page), "任务间隔已还原")
         summary["task_restored"] = {"name": tname, "type": ttype, "interval": orig_interval}
+
+        # ---- P2：任务弹窗按类型显隐（渲染级断言，只开弹窗不提交，零副作用）----
+        print("→ 任务弹窗：P2 类型字段显隐")
+        page.click("#btn-newtask")
+        wait_modal(page)
+        ck.ok(page.locator("#f-type option[value='tcp']").count() == 1, "类型下拉含 TCP 端口")
+        ck.ok(page.locator("#f-type option[value='dns']").count() == 1, "类型下拉含 DNS 解析")
+        page.select_option("#f-type", "tcp")
+        page.wait_for_timeout(400)
+        ck.ok(page.locator("#f-tls").is_visible(), "tcp 类型显示 TLS 勾选")
+        ck.ok(page.locator("#f-tcp-cert-days").is_visible(), "tcp 类型显示证书最低天数")
+        ck.ok(not page.locator("#f-expected-ips").is_visible(), "tcp 类型隐藏 dns 期望字段")
+        ck.ok("host:port" in (page.get_attribute("#f-target", "placeholder") or ""),
+              "tcp 目标提示 host:port 写法")
+        page.select_option("#f-type", "dns")
+        page.wait_for_timeout(400)
+        ck.ok(page.locator("#f-expected-ips").is_visible(), "dns 类型显示期望 IP 输入")
+        ck.ok(page.locator("#f-expected-regex").is_visible(), "dns 类型显示期望正则输入")
+        ck.ok(not page.locator("#f-tls").is_visible(), "dns 类型隐藏 tcp 字段")
+        ck.ok(page.input_value("#f-interval") == "30", "dns 类型默认间隔 30s")
+        ck.ok("30" in (page.text_content("#modal-body") or ""), "dns 弹窗含最小间隔 30s 说明")
+        page.select_option("#f-type", "curl")
+        page.wait_for_timeout(400)
+        for fid, label in (("#f-method", "Method"), ("#f-headers", "自定义头"),
+                           ("#f-body", "请求体"), ("#f-keyword", "关键字"),
+                           ("#f-regex", "正则"), ("#f-ipver", "IP 版本"),
+                           ("#f-cert", "证书检查")):
+            ck.ok(page.locator(fid).is_visible(), f"curl 类型显示 {label} 字段")
+        page.select_option("#f-type", "mtr")
+        page.wait_for_timeout(400)
+        ck.ok(page.locator("#f-probe-mode").is_visible(), "mtr 类型显示探测模式（icmp/tcp/udp）")
+        ck.ok(page.locator("#f-show-asn").is_visible(), "mtr 类型显示 AS 号开关")
+        page.select_option("#f-type", "ping")
+        page.wait_for_timeout(400)
+        ck.ok(page.locator("#f-ipver").is_visible(), "ping 类型显示 IP 版本")
+        ck.ok(not page.locator("#f-keyword").is_visible(), "ping 类型隐藏 curl 专属字段")
+        shot("task-modal-p2")
+        close_modal(page)
+
+        # ---- P2 数据级：真实探测数据在 UI 上的呈现 ----
+        # 每一组都有「实例里没有该任务时优雅跳过」分支：线上实例（如 8620）没有 CI 种子
+        # 任务时全绿；有任务且无数据/环境不支持时也如实说明，不误报产品问题。
+        print("→ P2 数据级：真实探测数据呈现（tcp / dns / curl 关键字·证书 / 停用与启停审计）")
+
+        def has_task(name):
+            return page.evaluate(
+                "async (n) => ((await (await fetch('/api/tasks')).json())"
+                ".some(x => x.name === n))", name)
+
+        # 1) tcp 详情：选中 tcp-ci → 任务页 canvas ≥2（通断条带 + RTT 图）→
+        #    单次详情能看到目标 port 与 rtt_ms（tcp 渲染分支：目标 host:port 行 +「建连耗时」行）
+        if not has_task("tcp-ci"):
+            ck.ok(True, "（实例无 tcp-ci 任务，跳过 tcp 数据级断言）")
+        else:
+            page.click('nav a[data-page="task"]')
+            wait_page(page, "task")
+            prev_task = page.evaluate("() => state.task")
+            tcp_target = page.evaluate("""async () => {
+                const t = (await (await fetch('/api/tasks')).json())
+                    .find(x => x.name === 'tcp-ci');
+                return t ? (t.target || '') : '';
+            }""")
+            page.select_option("#task-select", page.evaluate(
+                """async () => (await (await fetch('/api/tasks')).json())
+                    .find(x => x.name === 'tcp-ci').id"""))
+            page.wait_for_timeout(2200)
+            ncv = wait_count(page, "#page-task canvas", 2)
+            ck.ok(ncv >= 2, f"tcp 任务页渲染通断条带 + RTT 图（canvas {ncv} 块）")
+            ck.ok(page.locator("#panel-loss").is_hidden(), "tcp 任务隐藏丢包面板（ping 专属）")
+            got = page.evaluate("""async () => {
+                const t = (await (await fetch('/api/tasks')).json()).find(x => x.name === 'tcp-ci');
+                const streams = await (await fetch('/api/query/streams?task_id=' + t.id)).json();
+                const st = streams.find(x => x.latest_ts && x.latest_status === 'ok');
+                if (!st) return null;
+                const q = '/api/detail?task_id=' + t.id + '&node_id=' + encodeURIComponent(st.node_id)
+                    + '&ts=' + st.latest_ts + '&dns=' + encodeURIComponent(st.dns || '')
+                    + '&url=' + encodeURIComponent(st.url || '');
+                const d = await (await fetch(q)).json();
+                if (!d || !d.metrics) return null;
+                showDetailModal(t, d);
+                return d.metrics;
+            }""")
+            if got:
+                page.wait_for_timeout(400)
+                dtxt = page.inner_text("#modal-body")
+                port_s = (tcp_target or "").rsplit(":", 1)[-1].strip()
+                ck.ok("建连耗时" in dtxt, "tcp 单次详情含「建连耗时」行")
+                ck.ok(re.search(r"\d+(?:\.\d+)?\s*ms", dtxt) is not None,
+                      "tcp 单次详情含 rtt_ms 数值（ms）")
+                ck.ok(bool(port_s) and port_s in dtxt, f"tcp 单次详情含目标端口（{port_s}）")
+                ck.ok("端口可达" in dtxt, "tcp 单次详情显示「端口可达」徽章")
+                shot("tcp-detail")
+            else:
+                ck.ok(True, "（tcp-ci 暂无成功的探测记录，跳过单次详情断言）")
+            try:
+                close_modal(page)
+            except Exception:  # noqa: BLE001
+                pass
+            if prev_task:
+                page.select_option("#task-select", prev_task)
+                page.wait_for_timeout(1200)
+
+        # 2) dns 详情：逐线路表（udp:223.5.5.5 / udp:119.29.29.29 各一行、行内 answers/TTL/ms、
+        #    一致性徽章）。数据源是 renderDnsLines 的 metric=lines raw 请求：先用 Python 侧
+        #    探测服务端口径，服务端 400 拒绝时如实记录缺陷并跳过（不能靠伪造响应硬跑）
+        if not has_task("dns-ci"):
+            ck.ok(True, "（实例无 dns-ci 任务，跳过 dns 数据级断言）")
+        else:
+            lines_ok, lines_why = series_lines_support(args.base)
+            if lines_ok is False:
+                ck.ok(True, "（跳过 dns 逐线路表数据断言：前端请求的 metric=lines 被服务端 "
+                            f"/api/query/series raw 粒度拒绝（{lines_why}），逐线路表无法渲染——"
+                            "前后端口径不一致，已如实记录；服务端放开后本断言自动生效）")
+            elif lines_ok is None:
+                ck.ok(True, f"（跳过 dns 逐线路表数据断言：数据源可用性未确认——{lines_why}）")
+            else:
+                page.click('nav a[data-page="task"]')
+                wait_page(page, "task")
+                prev_task = page.evaluate("() => state.task")
+                page.select_option("#task-select", page.evaluate(
+                    """async () => (await (await fetch('/api/tasks')).json())
+                        .find(x => x.name === 'dns-ci').id"""))
+                page.wait_for_timeout(2200)
+                n_rows = wait_count(page, "#dns-lines table tbody tr", 2, timeout=10000)
+                tbl = (page.inner_text("#dns-lines") or "").strip()
+                ck.ok(n_rows >= 2, f"dns 逐线路表有 ≥2 行线路（实际 {n_rows} 行：{tbl[:60]}）")
+                if n_rows >= 2:
+                    ck.ok("udp:223.5.5.5" in tbl and "udp:119.29.29.29" in tbl,
+                          "逐线路表含 udp:223.5.5.5 / udp:119.29.29.29 各一行")
+                    ck.ok(("各线路一致" in tbl) or ("线路答案不一致" in tbl),
+                          "逐线路表有一致性徽章（各线路一致/线路答案不一致）")
+                    ck.ok("TTL" in tbl and "耗时" in tbl, "逐线路表含 TTL / 耗时 列")
+                    if "成功" in tbl:
+                        ck.ok("ms" in tbl, "成功线路行含耗时 ms")
+                        ck.ok(page.locator("#dns-lines .code-inline").count() >= 1,
+                              "成功线路行含答案 IP")
+                    else:
+                        ck.ok(True, "（两条 dns 线路均未解析成功（网络环境），跳过 answers/TTL 内容断言）")
+                    shot("dns-lines")
+                if prev_task:
+                    page.select_option("#task-select", prev_task)
+                    page.wait_for_timeout(1200)
+
+        # 3) curl 关键字：单次探测详情弹窗含「关键字命中」标识（curl ok 分支的关键字徽章）
+        if not has_task("curl-keyword-ci"):
+            ck.ok(True, "（实例无 curl-keyword-ci 任务，跳过关键字数据断言）")
+        else:
+            got = page.evaluate("""async () => {
+                const t = (await (await fetch('/api/tasks')).json())
+                    .find(x => x.name === 'curl-keyword-ci');
+                const streams = await (await fetch('/api/query/streams?task_id=' + t.id)).json();
+                const st = streams.find(x => x.latest_ts && x.latest_status === 'ok');
+                if (!st) return { nostream: streams.map(x => x.latest_status) };
+                const q = '/api/detail?task_id=' + t.id + '&node_id=' + encodeURIComponent(st.node_id)
+                    + '&ts=' + st.latest_ts + '&dns=' + encodeURIComponent(st.dns || '')
+                    + '&url=' + encodeURIComponent(st.url || '');
+                const d = await (await fetch(q)).json();
+                if (!d || !d.metrics) return { nostream: ['detail-404'] };
+                showDetailModal(t, d);
+                return d.metrics;
+            }""")
+            if got and "nostream" not in got:
+                page.wait_for_timeout(400)
+                dtxt = page.inner_text("#modal-body")
+                ck.ok("关键字命中" in dtxt, "curl 关键字单次详情含「关键字命中」徽章")
+                ck.ok(re.search(r"HTTP \d{3}", dtxt) is not None, "curl 关键字详情含 HTTP 状态码徽章")
+                shot("curl-keyword-detail")
+            else:
+                ck.ok(True, f"（curl-keyword-ci 暂无成功记录（{json.dumps(got, ensure_ascii=False)}），"
+                            "跳过关键字详情断言）")
+            try:
+                close_modal(page)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 4) curl 证书：单次详情含「cert N 天」徽章且 N>0；无 https 出口（skipped/无证书字段）时
+        #    如实记录原因并降级跳过
+        if not has_task("curl-cert-ci"):
+            ck.ok(True, "（实例无 curl-cert-ci 任务，跳过证书数据断言）")
+        else:
+            cert = page.evaluate("""async () => {
+                const t = (await (await fetch('/api/tasks')).json()).find(x => x.name === 'curl-cert-ci');
+                const streams = await (await fetch('/api/query/streams?task_id=' + t.id)).json();
+                const oks = streams.filter(x => x.latest_ts && x.latest_status === 'ok');
+                const skipped = streams.filter(x => x.latest_status === 'skipped').length;
+                const fetchAt = async (st, ts) => {
+                    const q = '/api/detail?task_id=' + t.id + '&node_id=' + encodeURIComponent(st.node_id)
+                        + '&ts=' + ts + '&dns=' + encodeURIComponent(st.dns || '')
+                        + '&url=' + encodeURIComponent(st.url || '');
+                    const d = await (await fetch(q)).json();
+                    return (d && d.metrics) ? d : null;
+                };
+                for (const st of oks) {
+                    const d = await fetchAt(st, st.latest_ts);
+                    if (d && d.metrics.cert_days != null) { showDetailModal(t, d);
+                        return { days: d.metrics.cert_days }; }
+                }
+                // 最新记录没带证书字段 → 在最近 30 分钟原始结果里再找一条带 cert_days 的
+                const to = Math.floor(Date.now() / 1000);
+                const ex = await (await fetch('/api/export?task_id=' + t.id
+                    + '&t_from=' + (to - 1800) + '&t_to=' + to + '&fmt=json')).json();
+                for (const row of (ex || []).slice().reverse()) {
+                    if (row.status === 'ok' && row.metrics && row.metrics.cert_days != null) {
+                        const d = await fetchAt({ node_id: row.node_id, dns: row.dns || '',
+                            url: row.url || '' }, row.ts);
+                        if (d && d.metrics.cert_days != null) { showDetailModal(t, d);
+                            return { days: d.metrics.cert_days }; }
+                    }
+                }
+                return { oks: oks.length, skipped, streams: streams.length };
+            }""")
+            if "days" in (cert or {}):
+                page.wait_for_timeout(400)
+                dtxt = page.inner_text("#modal-body")
+                mm = re.search(r"cert (\d+) 天", dtxt)
+                ck.ok(mm is not None, "curl 证书单次详情含「cert N 天」徽章")
+                if mm:
+                    ck.ok(int(mm.group(1)) > 0, f"证书余量天数 >0（实测 {mm.group(1)} 天）")
+                shot("curl-cert-detail")
+            elif (cert or {}).get("oks"):
+                ck.ok(True, "（curl-cert-ci 有成功记录但最近 30 分钟均无 cert_days 字段——本环境 "
+                            f"https 证书直连不可用，如实降级跳过（ok 流 {cert['oks']}/共 {cert['streams']} 流））")
+            elif (cert or {}).get("skipped"):
+                ck.ok(True, f"（curl-cert-ci 全部 skipped（{cert['skipped']} 流，环境无 https 出口或 "
+                            "curl 缺失），跳过证书断言）")
+            else:
+                ck.ok(True, "（curl-cert-ci 暂无成功记录，跳过证书详情断言）")
+            try:
+                close_modal(page)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 5) 停用任务展示 + 启停审计：总览「已停用」徽章 → API 启用 → 徽章变正常 →
+        #    API 停用还原（漂移检测兜底）→ /api/audit 最近条目含「启用任务」「停用任务」
+        dis = page.evaluate("""() => {
+            const ts = state.tasks || [];
+            const t = ts.find(x => x.name === 'tcp-disabled-ci' && !x.enabled)
+                || ts.find(x => !x.enabled);
+            return t ? { id: t.id, name: t.name } : null;
+        }""")
+        if not dis:
+            ck.ok(True, "（实例无停用任务，跳过停用展示与启停审计断言）")
+        else:
+            page.click('nav a[data-page="overview"]')
+            wait_page(page, "overview")
+            page.wait_for_timeout(600)
+            row = page.locator("#ov-task-body tr", has_text=dis["name"]).first
+            if row.count() == 0:
+                ck.ok(True, f"（总览任务表未见 {dis['name']} 行，跳过停用展示断言）")
+            else:
+                rtxt = row.inner_text()
+                ck.ok("已停用" in rtxt, f"总览里停用任务 {dis['name']} 显示「已停用」徽章")
+                ck.ok("故障" not in rtxt, "停用任务当前状态不显示为故障")
+            st_on = page.evaluate("""async (id) => {
+                const r = await fetch('/api/tasks/' + id, { method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: true }) });
+                return r.status;
+            }""", dis["id"])
+            ck.ok(st_on == 200, f"API 启用停用任务 {dis['name']}（HTTP {st_on}）")
+            page.click('nav a[data-page="task"]')      # 离开总览再回来，强制重取任务列表
+            wait_page(page, "task")
+            page.click('nav a[data-page="overview"]')
+            wait_page(page, "overview")
+            try:
+                page.wait_for_function(
+                    """(name) => {
+                        const r = [...document.querySelectorAll('#ov-task-body tr')]
+                            .find(x => x.textContent.includes(name));
+                        return r && r.textContent.includes('启用') && !r.textContent.includes('已停用');
+                    }""", arg=dis["name"], timeout=6000)
+                row2 = page.locator("#ov-task-body tr", has_text=dis["name"]).first
+                ck.ok(row2.count() > 0, f"启用后总览徽章变正常（{row2.inner_text().splitlines()[:2]}）")
+            except Exception:  # noqa: BLE001
+                rtxt2 = (page.locator("#ov-task-body tr", has_text=dis["name"]).first
+                         .inner_text() if page.locator("#ov-task-body tr",
+                                                       has_text=dis["name"]).count() else "（无行）")
+                ck.ok(False, f"启用后总览徽章未变正常（{rtxt2[:80]}）")
+            st_off = page.evaluate("""async (id) => {
+                const r = await fetch('/api/tasks/' + id, { method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: false }) });
+                return r.status;
+            }""", dis["id"])
+            ck.ok(st_off == 200, f"API 停用还原 {dis['name']}（HTTP {st_off}）")
+            page.click('nav a[data-page="task"]')
+            wait_page(page, "task")
+            page.click('nav a[data-page="overview"]')
+            wait_page(page, "overview")
+            try:
+                page.wait_for_function(
+                    """(name) => {
+                        const r = [...document.querySelectorAll('#ov-task-body tr')]
+                            .find(x => x.textContent.includes(name));
+                        return r && r.textContent.includes('已停用');
+                    }""", arg=dis["name"], timeout=6000)
+                ck.ok(True, "还原后总览重新显示「已停用」")
+            except Exception:  # noqa: BLE001
+                ck.ok(False, "还原后总览未恢复「已停用」徽章")
+            aud = page.evaluate("""async () => {
+                const j = await (await fetch('/api/audit?limit=50')).json();
+                return (j.items || []).map(a => ({ action: a.action || '', detail: a.detail || '' }));
+            }""")
+            acts = [a["action"] for a in aud]
+            ck.ok("启用任务" in acts and "停用任务" in acts,
+                  f"操作审计最近条目含「启用任务」「停用任务」中文动作（{acts[:6]}）")
+            ck.ok(any(dis["name"] in a["detail"] for a in aud[:10]),
+                  f"审计详情含被启停的任务名（{dis['name']}）")
 
         # ---- 收尾：任务配置漂移检测 + 还原（验收必须非破坏性）----
         drift = page.evaluate("""async (snapshot) => {

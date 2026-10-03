@@ -10,11 +10,16 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from ..common.dnsres import DnsCache, DnsError, is_fake_ip, resolve_a
+from ..common.dnsres import DnsCache, DnsError, is_fake_ip, resolve_a, resolve_aaaa
 from ..common.util import IS_WINDOWS, is_ip, now, run_cmd
 from ..probers.curl import run_curl
+from ..probers.dnsmon import run_dnsmon
 from ..probers.mtr import run_mtr
 from ..probers.ping import run_ping
+from ..probers.tcp import run_tcp, split_host_port
+
+# dns 值变更记忆容量：最多记多少个任务的「上次答案集」（LRU 式按插入序淘汰）
+DNS_MEMORY_MAX = 500
 
 log = logging.getLogger("gpm.agent")
 
@@ -95,6 +100,21 @@ def _local_ip(server_url: str) -> str:
         return ""
 
 
+def _url_hostname(target: str) -> str:
+    """从 URL/目标里取出用于 DNS 解析的主机名（剥掉 scheme 后的端口）。
+
+    "http://127.0.0.1:8622/api/health" → "127.0.0.1"；"example.com:8080" → "example.com"；
+    "[::1]:8080" → "::1"。裸 IPv6 字面量（多个冒号）原样返回，避免误切。
+    """
+    host = target.split("/")[2] if "://" in target else target
+    if host.startswith("["):                       # [v6]:port
+        end = host.find("]")
+        host = host[1:end] if end > 0 else host.strip("[]")
+    elif host.count(":") == 1 and host.rsplit(":", 1)[1].isdigit():
+        host = host.rsplit(":", 1)[0]
+    return host
+
+
 def _system_stats(tasks: int = 0) -> dict:
     """节点资源快照。tasks = 当前调度的探测流数量，随心跳上报给服务端。"""
     stats = {"version": "0.1.0", "tasks": tasks}
@@ -112,21 +132,28 @@ def _system_stats(tasks: int = 0) -> dict:
 
 
 def resolve_for(task: dict, dns_server: str, cache: DnsCache,
-                dns_timeout: float) -> tuple[str, float | None, str]:
-    """curl/mtr 的先解析后探测。返回 (ip, dns_ms, dns_label)。"""
+                dns_timeout: float, ip_version: str = "auto") -> tuple[str, float | None, str]:
+    """curl/mtr/tcp 的先解析后探测。返回 (ip, dns_ms, dns_label)。
+
+    ip_version=6 时解析 AAAA（显式线路走 resolve_aaaa；系统解析 AF_INET6），
+    fake-ip 升级只对 A 记录生效（fake-ip 是 A 应答劫持，不适用于 v6）。
+    """
     target = task["target"]
     if is_ip(target):
         return target, None, ""
     host = (url or target) if (url := task.get("_url")) else target
+    want_v6 = ip_version == "6"
     if dns_server:
-        ips, ms, _tr = resolve_a(host, dns_server, timeout=dns_timeout, cache=cache)
+        resolver = resolve_aaaa if want_v6 else resolve_a
+        ips, ms, _tr = resolver(host, dns_server, timeout=dns_timeout, cache=cache)
         return ips[0], round(ms, 2), dns_server
     import socket
     t0 = time.monotonic()
-    infos = socket.getaddrinfo(host, None, family=socket.AF_INET)
-    ip = infos[0][4][0]
+    family = socket.AF_INET6 if want_v6 else socket.AF_INET
+    infos = socket.getaddrinfo(host, None, family=family)
+    ip = str(infos[0][4][0])
     ms = round((time.monotonic() - t0) * 1000, 2)
-    if is_fake_ip(ip):
+    if not want_v6 and is_fake_ip(ip):
         # 系统 DNS 被代理 TUN 劫持（返回 fake-ip）：TCP 探测能走代理，但 ICMP（ping/mtr）
         # 打不到 → 改用 DoH 拿真实 IP；DoH 也拿不到时保留 fake-ip，由探测器如实标注
         for srv in ("223.5.5.5", "119.29.29.29", "8.8.8.8"):
@@ -160,6 +187,7 @@ class Agent:
         self.buffer: list[dict] = []
         self.jobs: dict[tuple, dict] = {}       # (task_id,dns,url) -> {interval,next_at,running}
         self.backoff = 1
+        self.dns_prev: dict[str, list[str]] = {}  # dns 任务值变更记忆：task_id -> 上次答案集
 
     # ---------- 凭据 ----------
     def load_creds(self):
@@ -228,14 +256,20 @@ class Agent:
         probe = self.cfg.probe
         min_i = probe.get("min_interval_seconds", 10)
         min_m = probe.get("min_mtr_interval_seconds", 60)
+        min_dns = probe.get("min_dns_interval_seconds", 30)
         jobs = {}
         for t in tasks:
             if not t.get("enabled", 1):
                 continue
-            interval = max(int(t.get("interval_seconds") or 10),
-                           min_m if t["type"] == "mtr" else min_i)
+            if t["type"] == "mtr":
+                interval = max(int(t.get("interval_seconds") or 10), min_m)
+            elif t["type"] == "dns":
+                interval = max(int(t.get("interval_seconds") or 30), min_dns)
+            else:
+                interval = max(int(t.get("interval_seconds") or 10), min_i)
+            # dns 任务是「单流多线路」：任务 dns 字段是要对比的线路列表，不能按线路拆流
             urls = t.get("urls") or [""]
-            dnames = t.get("dns") or [""]
+            dnames = [""] if t["type"] == "dns" else (t.get("dns") or [""])
             for d in dnames:
                 for u in urls:
                     key = (t["id"], d or "", u or "")
@@ -254,6 +288,13 @@ class Agent:
                  self.config_version, len(tasks), len(jobs))
 
     # ---------- 探测执行 ----------
+    def _remember_dns(self, tid: str, answers: list[str]):
+        """记录 dns 任务本次答案集（容量上限，插入序淘汰最旧）。"""
+        self.dns_prev.pop(tid, None)
+        self.dns_prev[tid] = answers
+        while len(self.dns_prev) > DNS_MEMORY_MAX:
+            self.dns_prev.pop(next(iter(self.dns_prev)))
+
     async def execute_job(self, key: tuple):
         job = self.jobs[key]
         task, dns, url = job["task"], job["dns"], job["url"]
@@ -266,11 +307,14 @@ class Agent:
                 target_url = url or task["target"]
                 ip, dns_ms, dns_label = "", None, ""
                 if not is_ip(task["target"]):
-                    host = target_url.split("/")[2] if "://" in target_url else task["target"]
+                    # URL 里的 host 可能带端口（http://127.0.0.1:8622/x）→ 只解析主机名，
+                    # 否则 getaddrinfo("127.0.0.1:8622") 直接失败（浏览器验收实测发现）
+                    host = _url_hostname(target_url if "://" in target_url else task["target"])
                     try:
                         ip, dns_ms, dns_label = await asyncio.to_thread(
                             resolve_for, {**task, "_url": host}, dns, self.cache,
-                            self.cfg.probe.get("dns_timeout", 2.0))
+                            self.cfg.probe.get("dns_timeout", 2.0),
+                            str((task.get("params") or {}).get("ip_version") or "auto"))
                     except DnsError as e:
                         r = {"ts": ts, "status": "fail", "error_class": e.kind,
                              "error": str(e), "dns_server": dns, "resolved_ip": "",
@@ -286,7 +330,8 @@ class Agent:
                     try:
                         ip, dns_ms, dns_label = await asyncio.to_thread(
                             resolve_for, task, dns, self.cache,
-                            self.cfg.probe.get("dns_timeout", 2.0))
+                            self.cfg.probe.get("dns_timeout", 2.0),
+                            str((task.get("params") or {}).get("ip_version") or "auto"))
                     except DnsError as e:
                         r = {"ts": ts, "status": "fail", "error_class": e.kind,
                              "error": str(e), "dns_server": dns, "resolved_ip": "",
@@ -295,6 +340,33 @@ class Agent:
                         r = await asyncio.to_thread(run_mtr, task, dns_label, ip, dns_ms, ts)
                 else:
                     r = await asyncio.to_thread(run_mtr, task, "", task["target"], None, ts)
+            elif task["type"] == "tcp":
+                host, _port = split_host_port(task["target"], task.get("params") or {})
+                ip, dns_ms, dns_label = "", None, ""
+                if not is_ip(host):
+                    try:
+                        ip, dns_ms, dns_label = await asyncio.to_thread(
+                            resolve_for, {**task, "target": host}, dns, self.cache,
+                            self.cfg.probe.get("dns_timeout", 2.0))
+                    except DnsError as e:
+                        r = {"ts": ts, "status": "fail", "error_class": e.kind,
+                             "error": str(e), "dns_server": dns, "resolved_ip": "",
+                             "dns_time_ms": None, "metrics": {}}
+                    else:
+                        r = await asyncio.to_thread(run_tcp, task, task["target"], ip,
+                                                    dns_label, dns_ms, ts)
+                else:
+                    r = await asyncio.to_thread(run_tcp, task, task["target"], host, "", None, ts)
+            elif task["type"] == "dns":
+                # 单流多线路：任务 dns 字段的全部线路一次跑完，进同一结果的 metrics.lines
+                prev = self.dns_prev.get(task["id"])
+                r = await asyncio.to_thread(
+                    run_dnsmon, task, self.cache, ts,
+                    self.cfg.probe.get("dns_timeout", 2.0), prev)
+                ok_answers = sorted({a for v in (r.get("metrics") or {}).get("lines", {}).values()
+                                     if v.get("ok") for a in (v.get("answers") or [])})
+                if ok_answers:
+                    self._remember_dns(task["id"], ok_answers)
             else:
                 return
         except Exception as e:  # noqa

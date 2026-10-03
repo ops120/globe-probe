@@ -261,6 +261,23 @@ def test_compare_metric_avail_for_non_ping(tmp_path):
 
 # ---------------- 历史对比：前一时段 + 对比线时间戳对齐 ----------------
 
+def test_compare_tiny_history_hours_truthy(tmp_path):
+    """刚上线几分钟的平台 history_hours 曾被 round(…,1) 归零：0 在前端是 falsy，
+    「历史不足 24h 自动切前一时段」永不触发、原因文案走错分支（CI 实例实测发现）。"""
+    client, cfg, s = make_client(tmp_path)
+    nid, token = register(client, cfg, "tiny-node")
+    cid = client.post("/api/tasks", json={
+        "name": "tiny-curl", "type": "curl", "target": "",
+        "urls": ["https://example.com/a"]}).json()["id"]
+    now = int(time.time())
+    res = [{"ts": now - 90 + i * 30, "task_id": cid, "type": "curl", "dns": "",
+            "url": "https://example.com/a", "status": "ok",
+            "metrics": {"total_time": 100 + i, "http_code": 200}} for i in range(3)]
+    client.post("/api/agent/results", json={"node_id": nid, "token": token, "results": res})
+    r = client.get(f"/api/compare?task_id={cid}&metric=avail").json()
+    assert 0 < r["history_hours"] < 1, r["history_hours"]   # 必须是「很小的正数」而不是 0
+
+
 def test_compare_prev_mode_and_offset_alignment(tmp_path):
     """两个回归点：
     ① 历史不足 24h 时「前一时段」必须能给出两条可比曲线（窗口自适应）；

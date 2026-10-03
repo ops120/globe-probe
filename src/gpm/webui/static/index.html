@@ -88,6 +88,8 @@ table.tbl{width:100%;border-collapse:collapse}
 .b-ping{background:rgba(48,163,107,.14);color:var(--ok-fg)}
 .b-curl{background:rgba(78,140,230,.14);color:var(--accent-2)}
 .b-mtr{background:rgba(167,139,250,.14);color:var(--b-mtr-fg)}
+.b-tcp{background:rgba(57,192,237,.14);color:var(--accent-3)}
+.b-dns{background:rgba(245,165,36,.16);color:var(--warn-fg)}
 .b-ok{background:rgba(48,163,107,.14);color:var(--ok-fg)}
 .b-fail{background:rgba(229,72,77,.16);color:var(--fail-fg)}
 .b-off{background:rgba(138,145,156,.15);color:var(--muted)}
@@ -261,9 +263,15 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
             <div class="panel-head">RTT 延迟 <span class="sub" id="gran-note"></span></div>
             <div id="chart-rtt" class="chart h300"></div>
           </div>
-          <div class="panel">
+          <div class="panel" id="panel-loss">
             <div class="panel-head">丢包率 <span class="sub">按节点 · 点击数据点查看详情</span></div>
             <div id="chart-loss" class="chart h220"></div>
+          </div>
+        </div>
+        <div id="panels-dns" class="hidden">
+          <div class="panel">
+            <div class="panel-head">逐线路解析 <span class="sub" id="dns-lines-sub">最新一轮 · 各线路独立统计</span></div>
+            <div id="dns-lines"></div>
           </div>
         </div>
         <div id="panels-curl" class="hidden">
@@ -279,6 +287,19 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
               <a id="mtr-reset" class="hidden" href="javascript:void(0)" style="font-size:12px;color:#4e8ce6" title="清除点选/流选择，跟随上方筛选显示最新一轮">↺ 回到最新</a></div>
             <div id="mtr-streams" style="padding:0 0 8px 0"></div>
             <div id="mtr-tables"></div>
+          </div>
+          <div class="panel" id="mtr-trend-panel">
+            <div class="panel-head">逐跳趋势
+              <span class="sub">窗口内原始路径结果按跳号聚合（均 Loss / 均 RTT / 出现次数，≤500 条）</span>
+              <span style="flex:1"></span>
+              <div class="seg" id="mtr-trend-range">
+                <button data-h="24" class="active">24小时</button>
+                <button data-h="72">72小时</button>
+                <button data-h="168">7天</button>
+              </div>
+              <button class="btn ghost sm" id="mtr-trend-toggle">展开</button>
+            </div>
+            <div id="mtr-trend-body" class="hidden"></div>
           </div>
         </div>
         <div class="hint">点击图表数据点或通断条带色块 → 该时刻单次探测详情；原始明细仅短窗提供（性能红线），长窗走聚合表</div>
@@ -473,7 +494,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           </div>
           <table class="tbl" id="task-mgr-tbl"></table>
         </div>
-        <div class="hint">间隔下限：ping / curl 为 10 秒，mtr 为 60 秒；curl 目标支持多个 URL（逗号分隔）；可指定多个 DNS 服务器（多线路独立统计）</div>
+        <div class="hint">间隔下限：ping / curl / tcp 为 10 秒，dns 为 30 秒，mtr 为 60 秒；curl 目标支持多个 URL；可指定多个 DNS 线路（多线路独立统计）。tcp 目标写 host:port，dns 目标写域名</div>
       </section>
 
     </main>
@@ -481,7 +502,19 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=33"></script>
-<script src="/static/app.js?v=33"></script>
+<script src="/static/echarts.min.js?v=34"></script>
+<!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
+<script src="/static/gpm-utils.js?v=34"></script>
+<script src="/static/gpm-api.js?v=34"></script>
+<script src="/static/gpm-theme.js?v=34"></script>
+<script src="/static/gpm-charts.js?v=34"></script>
+<script src="/static/gpm-page-overview.js?v=34"></script>
+<script src="/static/gpm-page-task.js?v=34"></script>
+<script src="/static/gpm-page-compare.js?v=34"></script>
+<script src="/static/gpm-page-geo.js?v=34"></script>
+<script src="/static/gpm-page-alerts.js?v=34"></script>
+<script src="/static/gpm-page-nodes.js?v=34"></script>
+<script src="/static/gpm-page-tasks.js?v=34"></script>
+<script src="/static/gpm-boot.js?v=34"></script>
 </body>
 </html>

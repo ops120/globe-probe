@@ -47,6 +47,20 @@ def create_app(cfg, storage: Storage | None = None):
             asyncio.create_task(_digest_loop(state, stop)),
             asyncio.create_task(_selfcheck_loop(state, stop)),
         ]
+        # AnyIO 线程池上限：默认虽是 40，但显式收敛到配置值 —— 曾因线程爆发
+        # MemoryError 假死，health 的 threads 字段应稳定在 tokens 附近，超出即异常。
+        try:
+            import anyio.to_thread
+            tokens = int(cfg.server.get("thread_pool_tokens", 40) or 40)
+            anyio.to_thread.current_default_thread_limiter().total_tokens = max(1, tokens)
+        except Exception as e:  # noqa: BLE001 - 调整失败不影响启动
+            log.warning("线程池上限设置失败（保持 AnyIO 默认）: %s", e)
+        # systemd sd_notify 看门狗：仅 NOTIFY_SOCKET 存在时启用（见 deploy/gpm-server.service）
+        try:
+            from . import sdwatch
+            tasks += sdwatch.spawn_tasks(stop)
+        except Exception as e:  # noqa: BLE001 - sd_notify 失败绝不影响主流程
+            log.debug("sd_notify 未启用: %s", e)
         log.info("服务端启动: %s (db=%s)", cfg.server["listen"], cfg.server["database"])
         yield
         stop.set()
@@ -246,10 +260,16 @@ async def _retention_loop(state: dict, stop: asyncio.Event):
     srv = state["cfg"].server
     while not stop.is_set():
         try:
-            s.retention(srv.get("retention_raw_days", 30), srv.get("retention_1m_days", 90),
-                        srv.get("retention_5m_days", 180), srv.get("retention_1h_days", 730),
-                        srv.get("retention_hb_days", 7), now())
+            n = s.retention(srv.get("retention_raw_days", 30), srv.get("retention_1m_days", 90),
+                            srv.get("retention_5m_days", 180), srv.get("retention_1h_days", 730),
+                            srv.get("retention_hb_days", 7), now(),
+                            alerts_days=srv.get("retention_alerts_days", 30),
+                            audit_days=srv.get("retention_audit_days", 30),
+                            outbox_days=srv.get("retention_outbox_days", 7),
+                            incidents_days=srv.get("retention_incidents_days", 180))
             s.meta_set("last_retention", str(now()))
+            if any(n.values()):
+                log.info("保留策略清理完成: %s", n)
         except Exception as e:  # noqa
             log.error("保留策略清理失败: %s", e)
         try:

@@ -1,0 +1,37 @@
+# deploy/gpm-server.service -- gpm 服务端的 systemd 单元（Linux，Type=notify + 看门狗）。
+#
+# 安装（按实际路径改 Environment / ExecStart 里的占位）：
+#   sudo cp deploy/gpm-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now gpm-server
+#
+# 看门狗：WatchdogSec=30 时 systemd 注入 NOTIFY_SOCKET 与 WATCHDOG_USEC，
+# 服务端每 15s（WatchdogSec/2，下限 2s）上报 WATCHDOG=1（src/gpm/server/sdwatch.py），
+# 卡死（如线程池被拖满、事件循环阻塞）超过 30s 会被 systemd 判定并按 Restart=always 拉起。
+
+[Unit]
+Description=gpm globe-probe server (ping/curl/mtr synthetic monitoring)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+# User/Group/路径按部署环境修改（config.example.yaml 复制为 config.yaml）
+User=gpm
+Group=gpm
+WorkingDirectory=/opt/globe-probe
+Environment=PYTHONPATH=/opt/globe-probe/src
+Environment=GPM_CONFIG=/opt/globe-probe/config.yaml
+ExecStart=/usr/bin/python3 -m gpm --config /opt/globe-probe/config.yaml server
+# 崩溃/看门狗超时后自动拉起
+Restart=always
+RestartSec=5
+# 启动完成（收到 READY=1）的最长等待
+TimeoutStartSec=60
+TimeoutStopSec=30
+# 让 uvicorn 能收到 SIGINT 优雅退出
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

@@ -74,7 +74,14 @@ def parse_ping(output: str, sent_expected: int) -> dict:
     }
 
 
-def ping_cmd(ip: str, count: int, timeout: float) -> list[str]:
+def ping_cmd(ip: str, count: int, timeout: float, ip_version: str = "auto") -> list[str]:
+    """ping 命令拼装。ip_version ∈ auto|4|6；显式指定时传 -4/-6（双平台都支持），
+    auto 维持各平台默认（不传 flag，由系统按目标地址族选择）。"""
+    fam = []
+    if ip_version == "4":
+        fam = ["-4"]
+    elif ip_version == "6":
+        fam = ["-6"]
     if IS_WINDOWS:
-        return ["ping", "-n", str(count), "-w", str(int(timeout * 1000)), ip]
-    return ["ping", "-c", str(count), "-W", str(max(1, int(timeout))), ip]
+        return ["ping", *fam, "-n", str(count), "-w", str(int(timeout * 1000)), ip]
+    return ["ping", *fam, "-c", str(count), "-W", str(max(1, int(timeout))), ip]

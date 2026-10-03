@@ -213,17 +213,19 @@ def is_mutating(method: str, path: str) -> bool:
 
 
 def record(storage, *, method: str, path: str, status: int, who: str, ip: str, ts: int,
-           detail: str = "") -> dict:
+           detail: str = "", action: str = "") -> dict:
     """写一条审计记录并返回写入的行（dict）。
 
     动作 / 目标类型来自 describe，目标 id 来自 target_id；
+    传 action 时用调用方给定的动作（如 update_task 里的「启用任务/停用任务」，
+    describe 从 PUT 路径只能翻出笼统的「修改任务」），目标类型仍走 describe；
     实际落库交给 storage.audit_add，本函数不写 SQL。
     """
-    action, target = describe(method, path)
+    derived, target = describe(method, path)
     tid = target_id(path)
-    row_id = storage.audit_add(ts, who, action, target, target_id=tid,
+    row_id = storage.audit_add(ts, who, action or derived, target, target_id=tid,
                                status=status, ip=ip, detail=detail)
-    return {"id": row_id, "ts": ts, "who": who, "action": action, "target": target,
+    return {"id": row_id, "ts": ts, "who": who, "action": action or derived, "target": target,
             "target_id": tid, "status": status, "ip": ip, "detail": detail}
 
 

@@ -156,8 +156,8 @@ def parse_spec(spec) -> dict:
             server, port = _host_port_from_url(url)
             return {"kind": "doh", "server": server, "url": url, "port": port}
         server = str(spec.get("server") or "").strip()
-        port = spec.get("port")
-        port = _parse_port(str(port)) if port else _DEFAULT_PORT[kind]
+        raw_port = spec.get("port")
+        port = _parse_port(str(raw_port)) if raw_port else _DEFAULT_PORT[kind]
         return {"kind": kind, "server": server, "url": None, "port": port}
 
     raw = "" if spec is None else str(spec).strip()
@@ -275,15 +275,17 @@ def _parse_response(msg: bytes, qid: Optional[int]) -> list[tuple[int, int, str]
         off += rdlen
         if rtype == 1 and rdlen == 4:
             out.append((1, ttl, socket.inet_ntoa(rdata)))
+        elif rtype == 28 and rdlen == 16:
+            out.append((28, ttl, socket.inet_ntop(socket.AF_INET6, rdata)))
         elif rtype == 5:
             cname, _ = _read_name(msg, off - rdlen)
             out.append((5, ttl, cname))
     return out
 
 
-def _build_query(host: str, qid: bytes) -> bytes:
+def _build_query(host: str, qid: bytes, qtype: int = 1) -> bytes:
     return (qid + struct.pack(">HHHHH", 0x0100, 1, 0, 0, 0)
-            + _encode_name(host) + struct.pack(">HH", 1, 1))
+            + _encode_name(host) + struct.pack(">HH", qtype, 1))
 
 
 # ---------------------------------------------------------------- DoT 帧（RFC7858）
@@ -336,9 +338,9 @@ def _dot_exchange(sock, query: bytes, timeout: float = 2.0) -> bytes:
 
 # ---------------------------------------------------------------- 各传输实现
 
-def _udp_query(host: str, server: str, timeout: float) -> bytes:
+def _udp_query(host: str, server: str, timeout: float, rrtype: int = 1) -> bytes:
     qid = os.urandom(2)
-    q = _build_query(host, qid)
+    q = _build_query(host, qid, rrtype)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(timeout)
     try:
@@ -355,9 +357,9 @@ def _udp_query(host: str, server: str, timeout: float) -> bytes:
     return msg
 
 
-def _tcp_query(host: str, server: str, timeout: float) -> bytes:
+def _tcp_query(host: str, server: str, timeout: float, rrtype: int = 1) -> bytes:
     qid = os.urandom(2)
-    q = _build_query(host, qid)
+    q = _build_query(host, qid, rrtype)
     try:
         s = socket.create_connection((server, 53), timeout=timeout)
         s.settimeout(timeout)
@@ -374,10 +376,11 @@ def _tcp_query(host: str, server: str, timeout: float) -> bytes:
     return buf
 
 
-def _dot_query(host: str, server: str, timeout: float = 2.0, port: int = 853) -> bytes:
+def _dot_query(host: str, server: str, timeout: float = 2.0, port: int = 853,
+               rrtype: int = 1) -> bytes:
     """RFC7858：TLS 连 server:port（默认 853），长度前缀帧 + DNS 报文。"""
     qid = os.urandom(2)
-    q = _build_query(host, qid)
+    q = _build_query(host, qid, rrtype)
     try:
         sock = socket.create_connection((server, port), timeout=timeout)
     except (socket.timeout, TimeoutError) as e:
@@ -424,15 +427,25 @@ def _dot_query(host: str, server: str, timeout: float = 2.0, port: int = 853) ->
     return raw
 
 
-def build_doh_url(url: str, host: str) -> str:
-    """RFC8484 GET 组 URL：{host} 占位符替换；无占位符则补 name=&type=A。"""
+def build_doh_url(url: str, host: str, rrtype: int = 1) -> str:
+    """RFC8484 GET 组 URL：{host} 占位符替换；无占位符则补 name=&type=A。
+
+    rrtype≠1（如 28=AAAA）时改写/追加 type 参数（含占位符 URL 里写死的 type=1/A）。
+    """
     host = (host or "").rstrip(".")
     if "{host}" in url:
-        return url.replace("{host}", urllib.parse.quote(host, safe=""))
-    if re.search(r"[?&]name=", url):
-        return url
-    sep = "&" if "?" in url else "?"
-    return f"{url}{sep}name={urllib.parse.quote(host, safe='')}&type=A"
+        out = url.replace("{host}", urllib.parse.quote(host, safe=""))
+    elif re.search(r"[?&]name=", url):
+        out = url
+    else:
+        sep = "&" if "?" in url else "?"
+        out = f"{url}{sep}name={urllib.parse.quote(host, safe='')}&type=A"
+    if rrtype != 1:
+        if re.search(r"[?&]type=", out):
+            out = re.sub(r"([?&])type=[^&]*", lambda m: m.group(1) + f"type={rrtype}", out)
+        else:
+            out += f"&type={rrtype}"
+    return out
 
 
 def _http_get(url: str, timeout: float) -> bytes:
@@ -464,9 +477,9 @@ def _doh_query(host: str, server: str, timeout: float) -> bytes:
     return _http_get(build_doh_url(ep, host), timeout)
 
 
-def _doh_request(url: str, host: str, timeout: float) -> dict:
+def _doh_request(url: str, host: str, timeout: float, rrtype: int = 1) -> dict:
     """GET DoH JSON 并解析为 dict；非 2xx / 非 JSON 均给出明确 DnsError。"""
-    body = _http_get(build_doh_url(url, host), timeout)
+    body = _http_get(build_doh_url(url, host, rrtype), timeout)
     try:
         data = json.loads(body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as e:
@@ -490,14 +503,19 @@ def _extract_answers(msg_or_json: bytes | dict) -> list[tuple[int, int, str]]:
 
 
 def _collect_a(answers: list[tuple[int, int, str]]) -> tuple[list[str], int]:
+    return _collect_ips(answers, 1)
+
+
+def _collect_ips(answers: list[tuple[int, int, str]], rtype: int) -> tuple[list[str], int]:
+    """收集指定 rtype 的记录值（1=A / 28=AAAA），无地址时回看 CNAME 的 TTL。"""
     ips, min_ttl = [], 300
-    for rtype, ttl, val in answers:
-        if rtype == 1:
+    for t, ttl, val in answers:
+        if t == rtype:
             ips.append(val)
             min_ttl = min(min_ttl, ttl)
     if not ips:
-        for rtype, ttl, val in answers:
-            if rtype == 5:
+        for t, ttl, _val in answers:
+            if t == 5:
                 min_ttl = min(min_ttl, ttl)
                 break
     return ips, min_ttl
@@ -523,58 +541,86 @@ class DnsCache:
         if len(self._d) >= self.max_items:
             self._d.clear()  # 简单防膨胀
         eff = min(max(ttl_s, self.ttl), self.max_ttl)
-        self._d[(key, server)] = (ips, time.time() + eff, ms, transport)
+        # 第 5 位存原始 DNS TTL（resolve_detail 用；前 4 位为历史结构，测试按位访问）
+        self._d[(key, server)] = (ips, time.time() + eff, ms, transport, ttl_s)
 
 
 # ---------------------------------------------------------------- 解析入口
 
-def _wire_transport(host: str, server: str, transport: str, timeout: float) -> tuple[list[str], int]:
+_RR_NAME = {1: "A", 28: "AAAA"}
+
+
+def _query_rr(fetch, host: str, server: str, timeout: float, rrtype: int) -> bytes:
+    """A 查询保持旧调用形态 (host, server, timeout)（兼容既有打桩/单测）；
+    其它 rrtype（AAAA）给传输函数传第 4 个位置参数。"""
+    if rrtype == 1:
+        return fetch(host, server, timeout)
+    return fetch(host, server, timeout, rrtype)
+
+
+def _wire_transport(host: str, server: str, transport: str, timeout: float,
+                    rrtype: int = 1) -> tuple[list[str], int]:
     """UDP/TCP 单传输查询 + 一跳 CNAME 追溯。"""
     fetch = _udp_query if transport == "udp" else _tcp_query
-    answers = _extract_answers(fetch(host, server, timeout))
-    ips, min_ttl = _collect_a(answers)
+    answers = _extract_answers(_query_rr(fetch, host, server, timeout, rrtype))
+    ips, min_ttl = _collect_ips(answers, rrtype)
     if not ips:
         for rtype, _ttl, val in answers:
             if rtype == 5:
-                ips, min_ttl = _collect_a(_extract_answers(fetch(val, server, timeout)))
+                ips, min_ttl = _collect_ips(
+                    _extract_answers(_query_rr(fetch, val, server, timeout, rrtype)), rrtype)
                 break
     if not ips:
-        raise DnsError("dns_servfail", f"{server}({transport}) 对 {host} 无 A 记录")
+        raise DnsError("dns_servfail",
+                       f"{server}({transport}) 对 {host} 无 {_RR_NAME.get(rrtype, str(rrtype))} 记录")
     return ips, min_ttl
 
 
-def _dot_transport(host: str, server: str, port: int, timeout: float) -> tuple[list[str], int]:
-    answers = _extract_answers(_dot_query(host, server, timeout, port=port))
-    ips, min_ttl = _collect_a(answers)
+def _dot_transport(host: str, server: str, port: int, timeout: float,
+                   rrtype: int = 1) -> tuple[list[str], int]:
+    if rrtype == 1:  # A：保持旧调用形态（兼容既有打桩/单测）
+        query = lambda h: _dot_query(h, server, timeout, port=port)  # noqa: E731
+    else:
+        query = lambda h: _dot_query(h, server, timeout, port=port, rrtype=rrtype)  # noqa: E731
+    answers = _extract_answers(query(host))
+    ips, min_ttl = _collect_ips(answers, rrtype)
     if not ips:
         for rtype, _ttl, val in answers:
             if rtype == 5:
-                ips, min_ttl = _collect_a(_extract_answers(_dot_query(val, server, timeout, port=port)))
+                ips, min_ttl = _collect_ips(_extract_answers(query(val)), rrtype)
                 break
     if not ips:
-        raise DnsError("dns_servfail", f"{server}:{port}(dot) 对 {host} 无 A 记录")
+        raise DnsError("dns_servfail",
+                       f"{server}:{port}(dot) 对 {host} 无 {_RR_NAME.get(rrtype, str(rrtype))} 记录")
     return ips, min_ttl
 
 
-def _resolve_doh(host: str, url: str, timeout: float) -> tuple[list[str], int]:
-    data = _doh_request(url, host, timeout)
-    ips, min_ttl = _collect_a(_extract_answers(data))
+def _resolve_doh(host: str, url: str, timeout: float,
+                 rrtype: int = 1) -> tuple[list[str], int]:
+    if rrtype == 1:  # A：保持旧调用形态（兼容既有打桩/单测）
+        data = _doh_request(url, host, timeout)
+    else:
+        data = _doh_request(url, host, timeout, rrtype)
+    ips, min_ttl = _collect_ips(_extract_answers(data), rrtype)
     if not ips:
-        raise DnsError("dns_servfail", f"{url} (doh) 对 {host} 无 A 记录")
+        raise DnsError("dns_servfail",
+                       f"{url} (doh) 对 {host} 无 {_RR_NAME.get(rrtype, str(rrtype))} 记录")
     return ips, min_ttl
 
 
-def _resolve_auto(host: str, sp: dict, timeout: float) -> tuple[list[str], int, str]:
+def _resolve_auto(host: str, sp: dict, timeout: float,
+                  rrtype: int = 1) -> tuple[list[str], int, str]:
     """默认线路：UDP → TCP → DoH（有端点时）。"""
     errors: list[DnsError] = []
     for transport in ("udp", "tcp"):
         try:
             ips, ttl = _wire_transport(
                 host, sp["server"], transport,
-                timeout if transport == "udp" else max(timeout, 3.0))
+                timeout if transport == "udp" else max(timeout, 3.0), rrtype)
             # fake-ip 检测（RFC2544 基准段，代理 TUN 劫持 DNS 的标志）：
-            # 该结果无法代表指定 DNS 服务器的真实线路 → 有 DoH 端点时升级到 DoH
-            if sp["url"] and all(is_fake_ip(ip) for ip in ips):
+            # 该结果无法代表指定 DNS 服务器的真实线路 → 有 DoH 端点时升级到 DoH。
+            # 只对 A 记录生效：fake-ip 是 A 应答劫持，AAAA 不返回 198.18/19 段
+            if rrtype == 1 and sp["url"] and all(is_fake_ip(ip) for ip in ips):
                 errors.append(DnsError("dns_servfail", f"{transport} 返回 fake-ip({ips[0]})"))
                 continue
             return ips, ttl, transport
@@ -582,55 +628,84 @@ def _resolve_auto(host: str, sp: dict, timeout: float) -> tuple[list[str], int, 
             errors.append(e)
     if sp["url"]:
         try:
-            ips, ttl = _resolve_doh(host, sp["url"], max(timeout, 6.0))
+            if rrtype == 1:  # A：保持旧调用形态（兼容既有打桩/单测）
+                ips, ttl = _resolve_doh(host, sp["url"], max(timeout, 6.0))
+            else:
+                ips, ttl = _resolve_doh(host, sp["url"], max(timeout, 6.0), rrtype)
             return ips, ttl, f"doh:{sp['server']}"
         except DnsError as e:
             errors.append(e)
     raise errors[-1] if errors else DnsError("dns_servfail", f"{sp['server']} 解析失败")
 
 
-def _resolve_forced(host: str, sp: dict, timeout: float) -> tuple[list[str], int, str]:
+def _resolve_forced(host: str, sp: dict, timeout: float,
+                    rrtype: int = 1) -> tuple[list[str], int, str]:
     """显式线路：只走指定传输，不回退（排障时行为可预期）。"""
     kind = sp["kind"]
     if kind == "udp":
-        ips, ttl = _wire_transport(host, sp["server"], "udp", timeout)
+        ips, ttl = _wire_transport(host, sp["server"], "udp", timeout, rrtype)
         return ips, ttl, "udp"
     if kind == "tcp":
-        ips, ttl = _wire_transport(host, sp["server"], "tcp", max(timeout, 3.0))
+        ips, ttl = _wire_transport(host, sp["server"], "tcp", max(timeout, 3.0), rrtype)
         return ips, ttl, "tcp"
     if kind == "dot":
-        ips, ttl = _dot_transport(host, sp["server"], sp["port"], max(timeout, 3.0))
+        if rrtype == 1:  # A：保持旧调用形态（兼容既有打桩/单测）
+            ips, ttl = _dot_transport(host, sp["server"], sp["port"], max(timeout, 3.0))
+        else:
+            ips, ttl = _dot_transport(host, sp["server"], sp["port"], max(timeout, 3.0), rrtype)
         return ips, ttl, "dot"
-    ips, ttl = _resolve_doh(host, sp["url"], max(timeout, 3.0))
+    if rrtype == 1:  # A：保持旧调用形态（兼容既有打桩/单测）
+        ips, ttl = _resolve_doh(host, sp["url"], max(timeout, 3.0))
+    else:
+        ips, ttl = _resolve_doh(host, sp["url"], max(timeout, 3.0), rrtype)
     return ips, ttl, "doh"
 
 
-def resolve(host: str, spec, timeout: float = 2.0,
-            cache: Optional[DnsCache] = None) -> tuple[list[str], float, str]:
-    """一等地解析任意线路写法。返回 (ips, 耗时ms, transport 标签)。
+def _resolve_cached(host: str, spec, timeout: float, cache: Optional[DnsCache],
+                    rrtype: int) -> tuple[list[str], float, str, Optional[int]]:
+    """缓存查找 + 一次真实解析。返回 (ips, 耗时ms, transport 标签, ttl秒)。
 
-    标签：'udp' / 'tcp' / 'dot' / 'doh'（显式线路）；
-    auto 模式下走 DoH 兜底时为 'doh:<server>'，便于 UI 如实展示用了哪条线。
+    ttl：真实解析时为 DNS 应答 TTL；命中缓存时为剩余有效秒数（如实标注）。
     """
     h = (host or "").rstrip(".").lower()
     try:
         sp = parse_spec(spec)
     except ValueError as e:
         raise DnsError("dns_formerr", f"非法 DNS 线路 {spec!r}: {e}")
-    key = _spec_key(sp)
+    key = _spec_key(sp) if rrtype == 1 else f"{_spec_key(sp)}#{rrtype}"
     if cache is not None:
         hit = cache.get(h, key)
         if hit:
-            return hit[0], hit[2], hit[3]
+            ttl_left = max(0, int(hit[1] - time.time()))
+            return hit[0], hit[2], hit[3], ttl_left
     t0 = time.monotonic()
     if sp["kind"] == "auto":
-        ips, ttl, label = _resolve_auto(h, sp, timeout)
+        ips, ttl, label = _resolve_auto(h, sp, timeout, rrtype)
     else:
-        ips, ttl, label = _resolve_forced(h, sp, timeout)
+        ips, ttl, label = _resolve_forced(h, sp, timeout, rrtype)
     ms = (time.monotonic() - t0) * 1000
     if cache is not None:
         cache.put(h, key, ips, ttl, ms, label)
+    return ips, ms, label, ttl
+
+
+def resolve(host: str, spec, timeout: float = 2.0,
+            cache: Optional[DnsCache] = None, rrtype: int = 1) -> tuple[list[str], float, str]:
+    """一等地解析任意线路写法。返回 (ips, 耗时ms, transport 标签)。
+
+    标签：'udp' / 'tcp' / 'dot' / 'doh'（显式线路）；
+    auto 模式下走 DoH 兜底时为 'doh:<server>'，便于 UI 如实展示用了哪条线。
+    rrtype：1=A（默认）；28=AAAA（ip_version=6 的任务用），缓存键按 rrtype 区分。
+    """
+    ips, ms, label, _ttl = _resolve_cached(host, spec, timeout, cache, rrtype)
     return ips, ms, label
+
+
+def resolve_detail(host: str, spec, timeout: float = 2.0,
+                   cache: Optional[DnsCache] = None,
+                   rrtype: int = 1) -> tuple[list[str], float, str, Optional[int]]:
+    """同 resolve，额外返回 DNS TTL（dnsmon 逐线路展示用）。"""
+    return _resolve_cached(host, spec, timeout, cache, rrtype)
 
 
 def resolve_a(host: str, server: str, timeout: float = 2.0,
@@ -640,3 +715,10 @@ def resolve_a(host: str, server: str, timeout: float = 2.0,
     server 既可以是裸 IP（auto：UDP → TCP → DoH），也可以是 doh:/dot:/udp:/tcp: 线路写法。
     """
     return resolve(host, server, timeout=timeout, cache=cache)
+
+
+def resolve_aaaa(host: str, server: str, timeout: float = 2.0,
+                 cache: Optional[DnsCache] = None) -> tuple[list[str], float, str]:
+    """AAAA 记录解析（ip_version=6 的任务）。传输与回退链路同 resolve_a：
+    UDP → TCP → DoH（auto 线路时），fake-ip 升级只对 A 生效，此处不参与。"""
+    return resolve(host, server, timeout=timeout, cache=cache, rrtype=28)

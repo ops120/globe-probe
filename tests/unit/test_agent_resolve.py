@@ -55,3 +55,16 @@ def test_literal_ip_and_dns_line_paths(monkeypatch):
     monkeypatch.setattr(A, "resolve_a", lambda h, srv, timeout=2.0, cache=None: (["1.2.3.4"], 5.0, "udp"))
     ip, ms, label = A.resolve_for({"target": "example.com"}, "223.5.5.5", cache, 2.0)
     assert (ip, ms, label) == ("1.2.3.4", 5.0, "223.5.5.5")
+
+
+def test_url_hostname_strips_port():
+    """curl 预解析必须剥掉 URL 端口：getaddrinfo("127.0.0.1:8622") 会直接失败
+    （浏览器验收实测发现的缺陷，影响一切「URL 带端口且 target 为空」的 curl 任务）。"""
+    f = A._url_hostname
+    assert f("http://127.0.0.1:8622/api/health") == "127.0.0.1"
+    assert f("https://www.baidu.com:443/") == "www.baidu.com"
+    assert f("http://example.com/x") == "example.com"
+    assert f("example.com:8080") == "example.com"
+    assert f("[::1]:8080/x") == "::1"
+    assert f("::1") == "::1"                      # 裸 v6 字面量（多冒号）不误切
+    assert f("192.168.31.1") == "192.168.31.1"

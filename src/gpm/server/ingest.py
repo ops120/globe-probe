@@ -27,7 +27,8 @@ class Ingest:
             truncated = len(data.results) - self.batch_max
             data.results = data.results[:self.batch_max]
         ts_now = now()
-        rows, rejected = [], []
+        rows: list = []
+        rejected: list = []
         for r in data.results:
             skew = abs(r.ts - ts_now)
             if skew > self.clock_skew:
@@ -49,10 +50,11 @@ class Ingest:
             if k in seen:
                 continue
             seen.add(k)
-            self.m.on_result(row["task_id"], data.node_id, row["dns"], row["url"],
-                             r.status, r.ts, r.error_class)
+            self.m.on_result(str(row["task_id"]), data.node_id, str(row["dns"]),
+                             str(row["url"]), r.status, r.ts, r.error_class)
         if rows:
-            self.dirty_since = max(self.dirty_since, max(r["ts"] for r in rows))
+            self.dirty_since = max(self.dirty_since,
+                                   max(int(str(r["ts"])) for r in rows))
         self.accepted_total += inserted
         self.duplicates_total += dups
         self.rejected_total += len(rejected)

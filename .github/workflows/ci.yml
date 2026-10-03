@@ -21,11 +21,71 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-      - name: Lint (ruff 基础检查)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Frontend syntax (node --check，零构建也要守语法门)
+        run: for f in src/gpm/webui/static/gpm-*.js; do node --check "$f"; done
+      - name: Lint (ruff，版本 pin 防规则漂移)
         run: |
-          pip install ruff
+          pip install ruff==0.16.9
           ruff check src/ --select E9,F63,F7,F82 --ignore E402
       - name: Tests
         run: python -m pytest tests/ -v
       - name: Doctor（真实工具链自检）
         run: gpm doctor || true   # CI 环境无 mtr，容忍该项
+
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" mypy==2.3.1
+      - name: Type check（零禁用项，见 pyproject [tool.mypy]）
+        run: mypy src/gpm
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Tests with coverage（fail_under 见 pyproject [tool.coverage.report]）
+        run: python -m pytest tests/ --cov=gpm --cov-report=term-missing
+
+  ui-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" playwright
+      - name: Install chromium + mtr（mtr-tiny 自带 cap_net_raw，非 root 可跑真 mtr）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mtr-tiny
+          playwright install --with-deps chromium
+      # ui_ci.py 自带完整编排：起一次性实例（双节点）→ 造任务/渠道/事件 →
+      # 补种 6h 历史 → 跑 ui_acceptance.py 全量断言 → 清理进程与临时目录
+      - name: Seeded instance + browser acceptance
+        run: python scripts/ui_ci.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-acceptance-screenshots
+          path: artifacts/ui-ci/
+          retention-days: 7

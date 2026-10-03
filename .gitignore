@@ -27,3 +27,4 @@ e2e-data/
 .pytest_cache/
 .env
 config.yaml
+.coverage

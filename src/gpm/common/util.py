@@ -70,7 +70,45 @@ def validate_target(target: str) -> bool:
     m = _IPV4_RE.match(target)
     if m and all(0 <= int(g) <= 255 for g in m.groups()):
         return True
-    return ":" in target and re.match(r"^[0-9a-fA-F:.]{2,45}$", target) is not None
+    if ":" not in target:
+        return False
+    if target.startswith("[") and target.endswith("]"):   # [v6 字面量] 括号形式
+        target = target[1:-1]
+    return re.match(r"^[0-9a-fA-F:.]{2,45}$", target) is not None
+
+
+def validate_host_port(target: str) -> bool:
+    """TCP 任务目标：host:port / [v6]:port / 裸 host（端口走 params.port）。
+
+    host 部分复用 validate_target（域名 / IPv4 / IPv6 含括号形式）；port 1~65535。
+    """
+    if not target or any(c in _BAD_CHARS for c in target):
+        return False
+    host, port = target, ""
+    if target.startswith("["):                     # [v6]:port
+        host, sep, rest = target.partition("]")
+        host = host[1:]
+        if sep:
+            port = rest.lstrip(":")
+    elif target.count(":") == 1:                   # host:port（IPv6 裸串多冒号不在此列）
+        host, _, port = target.partition(":")
+    else:
+        host = target                              # 裸 host / 裸 v6（端口由 params.port 提供）
+    if not host or not validate_target(host):
+        return False
+    if not port:
+        return True                                # 允许裸 host，端口在 params.port
+    return port.isdigit() and 0 < int(port) <= 65535
+
+
+def validate_domain(domain: str) -> bool:
+    """DNS 任务目标：宽松域名/IP 校验（字母数字点连字符，长度限制；也放行 IP）。"""
+    if not domain or len(domain) > 253 or any(c in _BAD_CHARS for c in domain):
+        return False
+    if validate_target(domain):
+        return True
+    # 宽松域名：本地/内网自定义域（单标签、多级子域、下划线），只挡注入与空白
+    return re.match(r"^[A-Za-z0-9_]([A-Za-z0-9_.-]{0,251}[A-Za-z0-9_])?\.?$", domain) is not None
 
 
 def validate_dns_spec(spec: str) -> bool:

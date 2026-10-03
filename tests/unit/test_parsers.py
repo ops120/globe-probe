@@ -251,6 +251,17 @@ TRACERT_ZH = """
 跟踪完成。
 """
 
+# zh-CN 系统毫秒列写作「毫秒」（GBK 解码后），2026-10-03 真机捕获 —— 曾因只认 ms 而整条解析失败
+TRACERT_ZH_MIAO = """
+通过最多 20 个跃点跟踪到 127.0.0.1 的路由
+
+  1    <1 毫秒   <1 毫秒   <1 毫秒 127.0.0.1
+  2    10 毫秒    11 毫秒    10 毫秒 8.8.8.8
+  3     *        *        *     请求超时。
+
+跟踪完成。
+"""
+
 TRACERT_OK = """
 Tracing route to 106.39.171.134 over a maximum of 30 hops
 
@@ -287,6 +298,16 @@ def test_parse_tracert_zh_and_ok():
 def test_parse_tracert_garbage():
     assert _parse_tracert("") == []
     assert _parse_tracert("Tracing route to 8.8.8.8 over a maximum of 30 hops\n\nTrace complete.\n") == []
+
+
+def test_parse_tracert_zh_miao():
+    """中文 Windows 输出「毫秒」而非 ms，两种写法都必须能解析（回归：127.0.0.1 曾整条 parse_error）。"""
+    hops = _parse_tracert(TRACERT_ZH_MIAO)
+    assert [h["hop"] for h in hops] == [1, 2, 3]
+    assert hops[0]["host"] == "127.0.0.1" and hops[0]["avg"] == 1.0 and hops[0]["loss_pct"] == 0
+    assert hops[1]["avg"] == round((10 + 11 + 10) / 3, 3)
+    assert hops[2]["host"] == "???" and hops[2]["loss_pct"] == 100.0
+    assert judge_path(hops[:2]) == ("ok", "")
 
 
 def test_run_mtr_uses_tracert_on_windows(monkeypatch):

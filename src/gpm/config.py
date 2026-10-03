@@ -20,6 +20,12 @@ DEFAULTS = {
         "retention_5m_days": 180,
         "retention_1h_days": 730,
         "retention_hb_days": 7,
+        "retention_alerts_days": 30,   # 告警历史保留
+        "retention_audit_days": 30,    # 操作审计保留
+        "retention_outbox_days": 7,    # 通知重投记录（done/failed）保留
+        "retention_incidents_days": 180,  # 已关闭事件保留
+        "thread_pool_tokens": 40,     # AnyIO 线程池上限（防线程爆发 MemoryError）
+        "tasks_cache_seconds": 15,    # /api/tasks 列表缓存秒数（0=禁用）；config_version 变更立即失效，?fresh=1 绕过
         "alert_eval_interval": 30,    # 告警规则评估周期（秒）
         "notify_retry_interval": 60,  # 通知失败重投的扫描周期（秒）
         "digest_check_interval": 300, # 巡检报告定时推送的检查周期（秒）
@@ -37,8 +43,9 @@ DEFAULTS = {
         "offline_buffer_max": 5000,   # 本地缓冲条数上限
     },
     "probe": {
-        "min_interval_seconds": 10,   # ping/curl 间隔下限
+        "min_interval_seconds": 10,   # ping/curl/tcp 间隔下限
         "min_mtr_interval_seconds": 60,
+        "min_dns_interval_seconds": 30,  # dns 监控间隔下限（多线路对比开销更大）
         "ping_count": 4,
         "ping_timeout": 2.0,
         "curl_timeout": 10.0,

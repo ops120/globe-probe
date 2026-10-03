@@ -1,0 +1,26 @@
+# deploy/gpm-server-watchdog.service -- gpm-server 的兜底看门狗单元（Linux）。
+#
+# 与 gpm-server.service 的 Type=notify 看门狗互补：那个只处理「进程活着但卡死」，
+# 这个处理「进程没了 / systemd 没接管 / 裸进程部署」等一切 health 打不通的情况。
+# 建议以 root 运行（restart 需要权限）：
+#   sudo cp deploy/gpm-server-watchdog.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now gpm-server-watchdog
+
+[Unit]
+Description=gpm globe-probe server health watchdog (curl /api/health, restart on 3 consecutive failures)
+After=network-online.target gpm-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HEALTH_URL=http://127.0.0.1:8620/api/health
+Environment=FAIL_THRESHOLD=3
+Environment=INTERVAL=30
+Environment=CURL_TIMEOUT=5
+Environment=RESTART_CMD=/usr/bin/systemctl restart gpm-server
+ExecStart=/opt/globe-probe/deploy/gpm-server-watchdog.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

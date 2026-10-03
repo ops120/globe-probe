@@ -5,16 +5,39 @@ import csv
 import io
 import json
 import logging
+import threading
+import time
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from ..common.models import NodeUpdate, TaskCreate, TaskUpdate
-from ..common.util import new_id, now, sha256, validate_target
+from ..common.models import NodeUpdate, TaskCreate, TaskUpdate, validate_params
+from ..common.util import new_id, now, sha256, validate_domain, validate_host_port, \
+    validate_target
 from . import alerting, geo
 from .storage import BUCKET_SECONDS
 
 log = logging.getLogger("gpm.web")
+
+
+def _interval_floor(probe: dict, task_type: str) -> int:
+    """按任务类型的间隔下限：mtr 60s、dns 30s、其余（ping/curl/tcp）10s。"""
+    if task_type == "mtr":
+        return probe.get("min_mtr_interval_seconds", 60)
+    if task_type == "dns":
+        return probe.get("min_dns_interval_seconds", 30)
+    return probe.get("min_interval_seconds", 10)
+
+
+def _target_valid(task_type: str, target: str) -> bool:
+    """类型相关目标校验：curl 看 urls（target 任意/空）；tcp 要 host:port；dns 要域名/IP。"""
+    if task_type == "curl":
+        return True
+    if task_type == "tcp":
+        return validate_host_port(target or "")
+    if task_type == "dns":
+        return validate_domain(target or "")
+    return validate_target(target or "")
 
 
 def setup_router(app_state) -> APIRouter:
@@ -28,8 +51,18 @@ def setup_router(app_state) -> APIRouter:
             raise HTTPException(403, "需要 X-Admin-Token")
 
     # ---------- 任务 ----------
-    @router.get("/tasks")
-    def list_tasks():
+    # /api/tasks 进程内 TTL 缓存（欠账-4）：该接口逐任务算 streams + 24h 可用率（逐流 SQL），
+    # 实测 1.7~2.3s。缓存 key=config_version：任务增删改/节点分配/分组变化都会
+    # _bump_config_version() → 下一次请求立即重算；TTL 内重复请求直接返回缓存的同一
+    # JSON 结构。?fresh=1 绕过缓存（测试/排障用）。
+    # 口径说明：缓存的 avail_24h / streams / current_status 是「计算时刻」的值，
+    # 命中缓存期间最多陈旧 tasks_cache_seconds 秒（期间新产生的探测数据不实时反映，
+    # 15s 内的口径漂移对运维展示可接受；config_version 变更不受 TTL 影响立即失效）。
+    tasks_cache_seconds = max(0, int(cfg.server.get("tasks_cache_seconds", 15) or 0))
+    _tasks_cache: dict = {"ver": None, "at": 0.0, "data": None}
+    _tasks_lock = threading.Lock()
+
+    def _compute_tasks() -> list:
         tasks = s.list_tasks()
         out = []
         for t in tasks:
@@ -63,13 +96,26 @@ def setup_router(app_state) -> APIRouter:
             out.append(d)
         return out
 
+    @router.get("/tasks")
+    def list_tasks(fresh: int = 0):
+        if tasks_cache_seconds <= 0 or fresh:
+            return _compute_tasks()          # 关闭开关 / 显式绕过：行为与旧版一致
+        ver = s.config_version()             # 内存缓存读取（无 DB/锁）
+        t0 = time.monotonic()
+        with _tasks_lock:
+            c = _tasks_cache
+            if c["data"] is not None and c["ver"] == ver and t0 - c["at"] < tasks_cache_seconds:
+                return c["data"]
+        data = _compute_tasks()              # 计算放锁外：并发未命中最多多算几次，结果一致
+        with _tasks_lock:
+            _tasks_cache.update(ver=ver, at=time.monotonic(), data=data)
+        return data
+
     @router.post("/tasks")
     def create_task(body: TaskCreate, x_admin_token: str | None = Header(default=None)):
         check_write(x_admin_token)
         probe = cfg.probe
-        lo = probe.get("min_mtr_interval_seconds", 60) if body.type == "mtr" \
-            else probe.get("min_interval_seconds", 10)
-        interval = max(body.interval_seconds, lo)
+        interval = max(body.interval_seconds, _interval_floor(probe, body.type))
         tid = new_id("t")
         try:
             t = s.create_task(tid, body.name, body.type, body.target, body.urls, body.params,
@@ -81,7 +127,8 @@ def setup_router(app_state) -> APIRouter:
         return t
 
     @router.put("/tasks/{tid}")
-    def update_task(tid: str, body: dict, x_admin_token: str | None = Header(default=None)):
+    def update_task(tid: str, body: dict, request: Request,
+                    x_admin_token: str | None = Header(default=None)):
         check_write(x_admin_token)
         try:
             fields = TaskUpdate(**body).model_dump(exclude_unset=True)
@@ -91,22 +138,43 @@ def setup_router(app_state) -> APIRouter:
         if not task:
             raise HTTPException(404, "任务不存在")
         probe = cfg.probe
-        # 目标校验按任务类型：curl 以 urls 为准（target 可为空），ping/mtr 必须是合法目标
-        if "target" in fields and task["type"] != "curl" \
-                and not validate_target(fields["target"] or ""):
+        ttype = task["type"]
+        # 目标校验按任务类型：curl 以 urls 为准（target 可为空），tcp 要 host:port，
+        # dns 要合法域名/IP，ping/mtr 必须是合法目标
+        if "target" in fields and not _target_valid(ttype, fields["target"] or ""):
             raise HTTPException(422, f"非法目标: {fields['target']!r}")
+        if "params" in fields:
+            try:
+                validate_params(ttype, fields["params"] or {})
+            except ValueError as e:
+                raise HTTPException(422, str(e))
         if isinstance(fields.get("interval_seconds"), int):
-            lo = probe.get("min_mtr_interval_seconds", 60) if task["type"] == "mtr" \
-                else probe.get("min_interval_seconds", 10)
-            fields["interval_seconds"] = max(fields["interval_seconds"], lo)
+            fields["interval_seconds"] = max(fields["interval_seconds"],
+                                             _interval_floor(probe, ttype))
         if "enabled" in fields:
             fields["enabled"] = 1 if fields["enabled"] else 0
         try:
-            return s.update_task(tid, fields, now())
+            updated = s.update_task(tid, fields, now())
         except KeyError:
             raise HTTPException(404, "任务不存在")
         except ValueError as e:
             raise HTTPException(422, str(e))
+        # 启停是运维最关心的变更：在中间件的「修改任务」之外显式记一条中文动作。
+        # 中间件的通用记录保留不动，这里只对「enabled 真实发生变化」的请求补记。
+        if "enabled" in fields and task["enabled"] != fields["enabled"]:
+            try:
+                from . import audit
+                act = "启用任务" if fields["enabled"] else "停用任务"
+                who = "admin" if x_admin_token else "本机"
+                audit.record(s, method=request.method, path=request.url.path,
+                             status=200, who=who,
+                             ip=request.client.host if request.client else "",
+                             ts=now(), detail=f"{task['name']}: enabled "
+                                              f"{task['enabled']} -> {fields['enabled']}",
+                             action=act)
+            except Exception as e:  # noqa: BLE001 - 审计失败绝不影响业务
+                log.debug("启停审计跳过: %s", e)
+        return updated
 
     @router.delete("/tasks/{tid}")
     def delete_task(tid: str, x_admin_token: str | None = Header(default=None)):
@@ -249,9 +317,9 @@ def setup_router(app_state) -> APIRouter:
                     cells.append({"ts": b, "st": st, "rtt": None})
                 b += step
             label = nodes.get(nid, nid) + (f" · {dns}" if dns else "") + (f" · {url}" if url else "")
-            st = streams.get((nid, dns, url)) or {}
-            skip = (st.get("latest_error") or st.get("latest_error_class") or "探测被跳过") \
-                if st.get("latest_status") == "skipped" else ""
+            stk = streams.get((nid, dns, url)) or {}
+            skip = (stk.get("latest_error") or stk.get("latest_error_class") or "探测被跳过") \
+                if stk.get("latest_status") == "skipped" else ""
             out_rows.append({"node_id": nid, "label": label, "dns": dns, "url": url,
                              "cells": cells, "skipped": skip})
         return {"from": t_from, "to": t_to, "step": step, "rows": out_rows}
@@ -266,8 +334,15 @@ def setup_router(app_state) -> APIRouter:
         if granularity == "raw":
             if not node_id:
                 raise HTTPException(400, "raw 粒度必须指定 node_id")
+            if metric == "lines":
+                # dns 任务逐线路明细：storage 走「完整 metrics」分支（无 v 列），
+                # 前端 renderDnsLines 取最新一轮的 metrics.lines 渲染逐线路表
+                rows = s.raw_series(task_id, node_id, dns, url, "lines", t_from, t_to)
+                out = [{"ts": r["ts"], "status": r["status"], "error_class": r["error_class"],
+                        "metrics": r["metrics"]} for r in rows]
+                return {"from": t_from, "to": t_to, "points": out}
             if metric not in ("rtt", "total", "loss"):
-                raise HTTPException(400, "raw 仅支持 rtt/total/loss")
+                raise HTTPException(400, "raw 仅支持 rtt/total/loss/lines")
             rows = s.raw_series(task_id, node_id, dns, url, metric, t_from, t_to)
             out = [{"ts": r["ts"], "v": r["v"], "status": r["status"],
                     "error_class": r["error_class"],
@@ -370,6 +445,68 @@ def setup_router(app_state) -> APIRouter:
         out.sort(key=lambda x: x["ts"], reverse=True)
         return out[:limit] if limit and limit > 0 else out
 
+    @router.get("/query/mtr_trend")
+    def query_mtr_trend(task_id: str, hours: int = 24, node_id: str = "", dns: str = "",
+                        url: str = ""):
+        """逐跳趋势：窗口内的原始 mtr/tracert 结果按跳号聚合（最多扫 500 条原始行）。
+
+        返回 hops=[{hop, seen(出现次数), loss_avg(平均Loss%), rtt_avg(平均RTT),
+        host(最后主机), asn}] + window 说明；按跳号升序。
+        """
+        hours = max(1, min(int(hours or 24), 168))
+        t_to = now()
+        t_from = t_to - hours * 3600
+        sql = ("SELECT ts, node_id, dns, url, metrics_json FROM probe_results "
+               "WHERE task_id=? AND type='mtr' AND ts>=? AND ts<=?")
+        args: list = [task_id, t_from, t_to]
+        if node_id:
+            sql += " AND node_id=?"
+            args.append(node_id)
+        if dns:
+            sql += " AND dns=?"
+            args.append(dns)
+        if url:
+            sql += " AND url=?"
+            args.append(url)
+        sql += " ORDER BY ts DESC LIMIT 500"
+        with s.lock:
+            rows = s.db.execute(sql, args).fetchall()
+        agg: dict = {}
+        for r in rows:
+            try:
+                hops = json.loads(r["metrics_json"] or "{}").get("hops") or []
+            except ValueError:
+                continue
+            for h in hops:
+                try:
+                    hn = int(h.get("hop"))
+                except (TypeError, ValueError):
+                    continue
+                a = agg.setdefault(hn, {"seen": 0, "loss_sum": 0.0, "rtt_sum": 0.0,
+                                        "rtt_n": 0, "host": "", "asn": None, "ts": 0})
+                a["seen"] += 1
+                a["loss_sum"] += float(h.get("loss_pct") or 0)
+                # 平均 RTT 取 hops[].avg；全超时跳的 0 值不计入均值
+                avg_rtt = float(h.get("avg") or 0)
+                if avg_rtt > 0:
+                    a["rtt_sum"] += avg_rtt
+                    a["rtt_n"] += 1
+                # 行按 ts 倒序：第一次遇到某跳号即为最近一轮的 host/asn
+                if a["ts"] < r["ts"]:
+                    a["ts"] = r["ts"]
+                    a["host"] = str(h.get("host") or "???")
+                    a["asn"] = h.get("asn")
+        hops_out = [{
+            "hop": hn, "seen": a["seen"],
+            "loss_avg": round(a["loss_sum"] / a["seen"], 1),
+            "rtt_avg": round(a["rtt_sum"] / a["rtt_n"], 1) if a["rtt_n"] else None,
+            "host": a["host"] or "???", "asn": a["asn"],
+        } for hn, a in sorted(agg.items())]
+        return {"task_id": task_id,
+                "window": {"hours": hours, "from": t_from, "to": t_to,
+                           "results": len(rows), "limit": 500},
+                "hops": hops_out}
+
     @router.get("/query/incidents")
     def query_incidents(limit: int = 30, open_only: bool = False):
         return s.list_incidents(limit, open_only)
@@ -395,7 +532,9 @@ def setup_router(app_state) -> APIRouter:
 
         with s.lock:
             hmin = s.db.execute("SELECT MIN(ts) mn FROM probe_results").fetchone()["mn"] or 0
-        history_hours = round((t_now - hmin) / 3600, 1) if hmin else 0
+        # 保留 2 位：刚上线几分钟的平台 round 到 1 位会变成 0.0，前端把 0 当「无历史」
+        # → 「自动切前一时段」永不触发、原因文案走错分支（CI 实例实测发现的 bug）
+        history_hours = round((t_now - hmin) / 3600, 2) if hmin else 0
 
         def hourly(start: int, span: int) -> dict:
             end = start + span
@@ -591,7 +730,7 @@ def setup_router(app_state) -> APIRouter:
     @router.put("/tokens/{tid}")
     def update_token(tid: str, body: dict, x_admin_token: str | None = Header(default=None)):
         check_write(x_admin_token)
-        fields = {}
+        fields: dict = {}
         if "name" in body:
             nm = str(body.get("name") or "").strip()
             if not nm:

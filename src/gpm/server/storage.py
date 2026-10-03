@@ -520,7 +520,7 @@ class Storage:
         with self.lock:
             self.db.execute("DELETE FROM aggregates WHERE bucket=? AND ts>=? AND ts<?",
                             (bucket, b_from, b_to))
-            ins = []
+            ins: list[tuple] = []
             if bucket == "1m":
                 sql = (
                     "SELECT ts/60*60 AS b, task_id, node_id, dns, url, status,"
@@ -559,7 +559,7 @@ class Storage:
                        " rtt_p95, rtt_max, loss_rate, http_code_json FROM aggregates"
                        " WHERE bucket=? AND ts>=? AND ts<?")
                 rows = self.db.execute(sql, (step, step, prev, b_from, b_to)).fetchall()
-                groups: dict = {}
+                groups = {}
                 for r in rows:
                     key = (r["b"], r["task_id"], r["node_id"], r["dns"] or "", r["url"] or "")
                     groups.setdefault(key, []).append(r)
@@ -572,7 +572,7 @@ class Storage:
                     p95s = [float(r["rtt_p95"]) for r in items if r["rtt_p95"] is not None]
                     maxs = [float(r["rtt_max"]) for r in items if r["rtt_max"] is not None]
                     losses = [float(r["loss_rate"]) for r in items if r["loss_rate"] is not None]
-                    codes: dict = {}
+                    codes = {}
                     for r in items:
                         for c, v in json.loads(r["http_code_json"] or "{}").items():
                             codes[c] = codes.get(c, 0) + v
@@ -645,7 +645,7 @@ class Storage:
                 " VALUES(?,?,?,?,?,?)",
                 (task_id, node_id, dns, url, started_at, json.dumps(reason, ensure_ascii=False)))
             self.db.commit()
-            return cur.lastrowid
+            return int(cur.lastrowid or 0)
 
     def incident_close(self, inc_id: int, ended_at: int):
         with self.lock:
@@ -874,7 +874,7 @@ class Storage:
                 " VALUES('',?,'','',?,'node',?)",
                 (node_id, ts, json.dumps(reason, ensure_ascii=False)))
             self.db.commit()
-            return cur.lastrowid
+            return int(cur.lastrowid or 0)
 
     def node_incident_close(self, node_id: str, ts: int) -> int:
         with self.lock:
@@ -1125,7 +1125,7 @@ class Storage:
                  json.dumps(target, ensure_ascii=False), 1 if delivered else 0,
                  n_channels, n_ok, detail[:300]))
             self.db.commit()
-            return cur.lastrowid
+            return int(cur.lastrowid or 0)
 
     def alert_last(self, rule_id: str, key: str) -> dict | None:
         with self.lock:
@@ -1199,13 +1199,14 @@ class Storage:
                 " VALUES(?,?,?,?,?,?,?,?)",
                 (ts, who, action, target, target_id, status, ip, detail[:400]))
             self.db.commit()
-            return cur.lastrowid
+            return int(cur.lastrowid or 0)
 
     def audit_list(self, limit: int = 100, action: str = "", target: str = "",
                    since: int = 0) -> list[dict]:
         with self.lock:
             sql = "SELECT * FROM audit_log"
-            where, args = [], []
+            where: list[str] = []
+            args: list = []
             if action:
                 where.append("action=?")
                 args.append(action)
@@ -1238,7 +1239,7 @@ class Storage:
                 " VALUES(?,?,?,?,?,?,?)",
                 (ts, alert_id, channel_id, title, text, next_retry_at, err[:200]))
             self.db.commit()
-            return cur.lastrowid
+            return int(cur.lastrowid or 0)
 
     def outbox_get(self, oid: int) -> dict | None:
         with self.lock:
@@ -1309,15 +1310,42 @@ class Storage:
             return cur.rowcount > 0
 
     # ---------- 保留策略 ----------
-    def retention(self, raw_days: int, a1m: int, a5m: int, a1h: int, hb_days: int, ts: int):
+    def retention(self, raw_days: int, a1m: int, a5m: int, a1h: int, hb_days: int, ts: int,
+                  alerts_days: int = 30, audit_days: int = 30,
+                  outbox_days: int = 7, incidents_days: int = 180) -> dict:
+        """按天数清理过期数据，返回各表删除行数（供日志/测试断言）。
+
+        新增的 alerts/audit_log/notify_outbox/incidents 清理带默认值，
+        旧的六参调用完全兼容；days<=0 表示该表不清理。
+        """
         with self.lock:
             day = 86400
+            out: dict[str, int] = {}
             self.db.execute("DELETE FROM probe_results WHERE ts < ?", (ts - raw_days * day,))
             self.db.execute("DELETE FROM aggregates WHERE bucket='1m' AND ts < ?", (ts - a1m * day,))
             self.db.execute("DELETE FROM aggregates WHERE bucket='5m' AND ts < ?", (ts - a5m * day,))
             self.db.execute("DELETE FROM aggregates WHERE bucket='1h' AND ts < ?", (ts - a1h * day,))
             self.db.execute("DELETE FROM node_heartbeats WHERE ts < ?", (ts - hb_days * day,))
+            if alerts_days > 0:
+                cur = self.db.execute("DELETE FROM alerts WHERE ts < ?", (ts - alerts_days * day,))
+                out["alerts"] = cur.rowcount
+            if audit_days > 0:
+                cur = self.db.execute("DELETE FROM audit_log WHERE ts < ?", (ts - audit_days * day,))
+                out["audit_log"] = cur.rowcount
+            if outbox_days > 0:
+                # 只清已终态（done/failed）的记录：done_at 为空时退回按入队时间 ts 判定
+                cur = self.db.execute(
+                    "DELETE FROM notify_outbox WHERE status IN ('done','failed')"
+                    " AND COALESCE(NULLIF(done_at,0), ts) < ?", (ts - outbox_days * day,))
+                out["notify_outbox"] = cur.rowcount
+            if incidents_days > 0:
+                # 只清已关闭（ended_at 非空）且恢复时间过期的事件，未关闭的绝不动
+                cur = self.db.execute(
+                    "DELETE FROM incidents WHERE ended_at IS NOT NULL AND ended_at < ?",
+                    (ts - incidents_days * day,))
+                out["incidents"] = cur.rowcount
             self.db.commit()
+            return out
 
     def stats_counts(self) -> dict:
         with self.lock:
