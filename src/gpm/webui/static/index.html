@@ -102,6 +102,28 @@ table.tbl{width:100%;border-collapse:collapse}
 .btn.ghost{background:var(--bg-4);color:var(--nav)}
 .btn.danger{background:rgba(229,72,77,.12);color:var(--fail-fg)}
 .btn.sm{padding:3px 10px;font-size:11px;border-radius:5px}
+/* 告警与报表二级子导航（值班总览/报表/事件与告警/通知配置/操作审计）：双主题全走 CSS 变量 */
+.subtabs{display:flex;gap:6px;flex-wrap:wrap;background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:6px;margin-bottom:14px}
+.subtabs button{background:none;border:none;color:var(--nav);font-size:13px;padding:7px 14px;border-radius:6px;cursor:pointer;font-family:inherit}
+.subtabs button:hover{background:var(--bg-3);color:var(--fg-strong)}
+.subtabs button.active{background:var(--btn);color:var(--accent-2)}
+/* 值班总览：每条故障一张卡（非表格） */
+.oncall-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:12px}
+.oncall-card{border:1px solid var(--bd);border-left:3px solid var(--fail);border-radius:8px;background:var(--panel);padding:12px 14px}
+.oncall-card.acked{border-left-color:var(--muted)}
+.oc-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.oc-title{color:var(--fg-strong);font-size:14px;font-weight:600}
+.oc-target{color:var(--muted);font-size:12px;word-break:break-all}
+.oc-meta{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:12px;color:var(--fg-2);margin-bottom:6px}
+.oc-meta b{color:var(--muted);font-weight:400}
+.oc-advice{font-size:12px;color:var(--note-fg);background:var(--accent-bg);border:1px solid var(--accent-bd);border-radius:6px;padding:6px 10px;margin:6px 0 8px;line-height:1.6}
+.oc-ops{display:flex;gap:8px;justify-content:flex-end}
+.oncall-empty{color:var(--faint);font-size:13px;text-align:center;padding:26px 0;line-height:2}
+/* 事件详情弹窗新折叠块（同期变更 / DNS 答案变更 / 范围矩阵 / 离线前资源） */
+details.ev-x{border:1px solid var(--bd);border-radius:8px;padding:8px 12px;margin-top:10px;background:var(--bg-2)}
+details.ev-x>summary{cursor:pointer;color:var(--fg-strong2);font-size:13px;font-weight:600;user-select:none}
+details.ev-x>summary::marker{color:var(--muted)}
+details.ev-x table{margin-top:8px}
 select,input[type=text]{background:var(--input-bg);border:1px solid var(--input-bd);color:var(--fg);border-radius:6px;padding:6px 10px;font-size:12px;font-family:inherit;outline:none}
 .chip{display:inline-block;padding:3px 10px;border-radius:12px;background:var(--bg-3);color:var(--muted);font-size:11px;cursor:pointer;border:1px solid transparent;user-select:none;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chip.active{background:var(--accent-bg);color:var(--accent-2);border-color:var(--accent-bd)}
@@ -357,93 +379,126 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
       </section>
 
       <section class="page hidden" id="page-alerts">
-        <div class="panel">
-          <div class="panel-head">SLA 报表 <span class="sub" id="sla-sub"></span>
-            <span style="flex:1"></span>
-            <div class="seg" id="sla-range">
-              <button data-h="24" class="active">最近24小时</button>
-              <button data-h="168">最近7天</button>
-              <button data-h="720">最近30天</button>
+        <!-- 二级子导航：一个菜单塞 SLA/事件/渠道/规则/窗口/重投/审计太挤，按职责拆五组。
+             所有既有元素 ID 不变（验收脚本依赖），切子页只用 .hidden（复用现有模式）。 -->
+        <div class="subtabs" id="al-subtabs">
+          <button data-sub="oncall" class="active">值班总览</button>
+          <button data-sub="report">报表</button>
+          <button data-sub="events">事件与告警</button>
+          <button data-sub="notify">通知配置</button>
+          <button data-sub="audit">操作审计</button>
+        </div>
+
+        <div class="subpage" data-subpage="oncall">
+          <div class="panel">
+            <div class="panel-head">值班总览 <span class="sub" id="oncall-sub">进行中的故障 · 层面 / 影响范围 / 处置建议</span>
+              <span style="flex:1"></span>
+              <button class="btn sm ghost" id="oncall-refresh">刷新</button></div>
+            <div id="oncall-body"><div style="color:var(--faint);font-size:12px">加载中…</div></div>
+          </div>
+        </div>
+
+        <div class="subpage hidden" data-subpage="report">
+          <div class="panel">
+            <div class="panel-head">SLA 报表 <span class="sub" id="sla-sub"></span>
+              <span style="flex:1"></span>
+              <div class="seg" id="sla-range">
+                <button data-h="24" class="active">最近24小时</button>
+                <button data-h="168">最近7天</button>
+                <button data-h="720">最近30天</button>
+              </div>
+              <button class="btn sm ghost" id="sla-export">导出 CSV</button>
             </div>
-            <button class="btn sm ghost" id="sla-export">导出 CSV</button>
-          </div>
-          <div class="cards" id="sla-cards"></div>
-          <div class="grid-2">
-            <div><div class="sub" style="margin:6px 0">按任务</div><table class="tbl" id="sla-tasks"></table></div>
-            <div><div class="sub" style="margin:6px 0">按节点</div><table class="tbl" id="sla-nodes"></table></div>
-          </div>
-          <div class="panel-head" style="margin-top:10px;border:0;padding-left:0">事件（窗口内）
-            <span class="sub" id="inc-sub"></span>
-            <span style="flex:1"></span>
-            <div class="seg" id="inc-fold">
-              <button data-f="1" class="active">折叠相同目标</button>
-              <button data-f="0">平铺明细</button>
+            <div class="cards" id="sla-cards"></div>
+            <div class="grid-2">
+              <div><div class="sub" style="margin:6px 0">按任务</div><table class="tbl" id="sla-tasks"></table></div>
+              <div><div class="sub" style="margin:6px 0">按节点</div><table class="tbl" id="sla-nodes"></table></div>
             </div>
+            <div id="sla-mttr" style="display:flex;gap:6px 16px;flex-wrap:wrap;font-size:12px;margin-top:10px"></div>
           </div>
-          <table class="tbl" id="sla-incs"></table>
         </div>
-        <div class="panel">
-          <div class="panel-head">通知渠道 <span class="sub">Webhook / 企业微信 / 钉钉 / 飞书 / SMTP；可测试发送</span>
-            <span style="flex:1"></span><button class="btn sm" id="ch-new">+ 新增渠道</button></div>
-          <table class="tbl" id="ch-tbl"></table>
-        </div>
-        <div class="panel">
-          <div class="panel-head">告警规则 <span class="sub">可用率 / 延迟均值·P95 / 丢包率 / 节点离线；含静默期，维护窗口内不评估</span>
-            <span style="flex:1"></span>
-            <button class="btn sm ghost" id="rule-eval">立即评估一轮</button>
-            <button class="btn sm" id="rule-new">+ 新增规则</button></div>
-          <table class="tbl" id="rule-tbl"></table>
-        </div>
-        <div class="panel">
-          <div class="panel-head">维护窗口 <span class="sub">窗口内不评估规则（不告警）</span>
-            <span style="flex:1"></span><button class="btn sm" id="mw-new">+ 新增窗口</button></div>
-          <table class="tbl" id="mw-tbl"></table>
-        </div>
-        <div class="panel">
-          <div class="panel-head">最近告警 <span class="sub" id="al-sub"></span>
-            <span style="flex:1"></span>
-            <div class="seg" id="al-fold">
-              <button data-f="1" class="active">折叠相同目标</button>
-              <button data-f="0">平铺明细</button>
+
+        <div class="subpage hidden" data-subpage="events">
+          <div class="panel">
+            <div class="panel-head">最近告警 <span class="sub" id="al-sub"></span>
+              <span style="flex:1"></span>
+              <div class="seg" id="al-fold">
+                <button data-f="1" class="active">折叠相同目标</button>
+                <button data-f="0">平铺明细</button>
+              </div>
+              <div class="seg" id="al-filter">
+                <button data-s="" class="active">全部</button>
+                <button data-s="firing">未恢复</button>
+                <button data-s="resolved">已恢复</button>
+              </div>
             </div>
-            <div class="seg" id="al-filter">
-              <button data-s="" class="active">全部</button>
-              <button data-s="firing">未恢复</button>
-              <button data-s="resolved">已恢复</button>
+            <table class="tbl" id="al-tbl"></table>
+          </div>
+          <div class="panel">
+            <div class="panel-head">事件（窗口内）
+              <span class="sub" id="inc-sub"></span>
+              <span style="flex:1"></span>
+              <div class="seg" id="inc-fold">
+                <button data-f="1" class="active">折叠相同目标</button>
+                <button data-f="0">平铺明细</button>
+              </div>
             </div>
+            <table class="tbl" id="sla-incs"></table>
           </div>
-          <table class="tbl" id="al-tbl"></table>
         </div>
-        <div class="panel">
-          <div class="panel-head">巡检报告推送 <span class="sub" id="dg-sub"></span>
-            <span style="flex:1"></span>
-            <label class="fcheck" style="margin-right:10px"><input type="checkbox" id="dg-enable"> <span>启用定时推送</span></label>
-            <select id="dg-hours" style="max-width:120px">
-              <option value="1">每 1 小时</option><option value="6">每 6 小时</option>
-              <option value="12">每 12 小时</option><option value="24">每天</option>
-              <option value="168">每周</option>
-            </select>
-            <button class="btn sm" id="dg-push">立即推送</button>
+
+        <div class="subpage hidden" data-subpage="notify">
+          <div class="panel">
+            <div class="panel-head">通知渠道 <span class="sub">Webhook / 企业微信 / 钉钉 / 飞书 / SMTP；可测试发送</span>
+              <span style="flex:1"></span><button class="btn sm" id="ch-new">+ 新增渠道</button></div>
+            <table class="tbl" id="ch-tbl"></table>
           </div>
-          <div id="dg-chans" style="font-size:12px;color:var(--muted);line-height:2.2"></div>
-        </div>
-        <div class="panel">
-          <div class="panel-head">通知重投队列 <span class="sub" id="ob-sub"></span>
-            <span style="flex:1"></span><button class="btn sm ghost" id="ob-refresh">刷新</button></div>
-          <table class="tbl" id="ob-tbl"></table>
-        </div>
-        <div class="panel">
-          <div class="panel-head">操作审计 <span class="sub" id="au-sub"></span>
-            <span style="flex:1"></span>
-            <div class="seg" id="au-filter">
-              <button data-t="" class="active">全部</button>
-              <button data-t="任务">任务</button>
-              <button data-t="节点">节点</button>
-              <button data-t="告警">告警</button>
+          <div class="panel">
+            <div class="panel-head">告警规则 <span class="sub">可用率 / 延迟均值·P95 / 丢包率 / 节点离线；含静默期，维护窗口内不评估</span>
+              <span style="flex:1"></span>
+              <button class="btn sm ghost" id="rule-eval">立即评估一轮</button>
+              <button class="btn sm" id="rule-new">+ 新增规则</button></div>
+            <table class="tbl" id="rule-tbl"></table>
+          </div>
+          <div class="panel">
+            <div class="panel-head">维护窗口 <span class="sub">窗口内不评估规则（不告警）</span>
+              <span style="flex:1"></span><button class="btn sm" id="mw-new">+ 新增窗口</button></div>
+            <table class="tbl" id="mw-tbl"></table>
+          </div>
+          <div class="panel">
+            <div class="panel-head">巡检报告推送 <span class="sub" id="dg-sub"></span>
+              <span style="flex:1"></span>
+              <label class="fcheck" style="margin-right:10px"><input type="checkbox" id="dg-enable"> <span>启用定时推送</span></label>
+              <select id="dg-hours" style="max-width:120px">
+                <option value="1">每 1 小时</option><option value="6">每 6 小时</option>
+                <option value="12">每 12 小时</option><option value="24">每天</option>
+                <option value="168">每周</option>
+              </select>
+              <button class="btn sm" id="dg-push">立即推送</button>
             </div>
-            <button class="btn sm ghost" id="au-export">导出 CSV</button>
+            <div id="dg-chans" style="font-size:12px;color:var(--muted);line-height:2.2"></div>
           </div>
-          <table class="tbl" id="au-tbl"></table>
+          <div class="panel">
+            <div class="panel-head">通知重投队列 <span class="sub" id="ob-sub"></span>
+              <span style="flex:1"></span><button class="btn sm ghost" id="ob-refresh">刷新</button></div>
+            <table class="tbl" id="ob-tbl"></table>
+          </div>
+        </div>
+
+        <div class="subpage hidden" data-subpage="audit">
+          <div class="panel">
+            <div class="panel-head">操作审计 <span class="sub" id="au-sub"></span>
+              <span style="flex:1"></span>
+              <div class="seg" id="au-filter">
+                <button data-t="" class="active">全部</button>
+                <button data-t="任务">任务</button>
+                <button data-t="节点">节点</button>
+                <button data-t="告警">告警</button>
+              </div>
+              <button class="btn sm ghost" id="au-export">导出 CSV</button>
+            </div>
+            <table class="tbl" id="au-tbl"></table>
+          </div>
         </div>
       </section>
 
@@ -512,6 +567,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 <script src="/static/gpm-page-task.js?v=34"></script>
 <script src="/static/gpm-page-compare.js?v=34"></script>
 <script src="/static/gpm-page-geo.js?v=34"></script>
+<script src="/static/gpm-page-oncall.js?v=34"></script>
 <script src="/static/gpm-page-alerts.js?v=34"></script>
 <script src="/static/gpm-page-nodes.js?v=34"></script>
 <script src="/static/gpm-page-tasks.js?v=34"></script>

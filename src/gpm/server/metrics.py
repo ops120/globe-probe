@@ -1,7 +1,10 @@
 """Prometheus 文本格式指标渲染（纯标准库，version=0.0.4）。
 
-- 只读 storage 的公开方法，不新增 SQL；缺失/NULL 数据省略对应样本行，
-  而不是补 0，避免把「采不到」误判成「值为 0」。
+- 只读 storage 的公开方法；缺失/NULL 数据省略对应样本行，而不是补 0，
+  避免把「采不到」误判成「值为 0」。
+- 唯一例外（ONCALL_OPTIMIZATION 第三期 12）：gpm_task_last_success 需要按任务
+  取 status='ok' 的 MAX(ts)，storage 无现成方法 → 本模块内做一条只读 SQL
+  （_last_ok_by_task），依旧不改 storage.py。
 - 指标名与标签是 Grafana 面板与测试的契约，改动需同步文档。
 - 输出体积有上限（约 200 KiB）：超出后按节点/任务名序截断并附注释说明。
 """
@@ -172,6 +175,7 @@ def _prepare_tasks(storage, now_ts: int) -> list[dict]:
         else:
             avail = _fallback_avail(storage, t, now_ts)
         tasks.append({
+            "id": "" if _get(t, "id") is None else str(_get(t, "id")),
             "label": "" if name is None else str(name),
             "type": "" if _get(t, "type") is None else str(_get(t, "type")),
             "enabled": _as_bool_int(_get(t, "enabled")),
@@ -179,6 +183,75 @@ def _prepare_tasks(storage, now_ts: int) -> list[dict]:
             "streams": _as_int(_task_streams(t)),
         })
     return tasks
+
+
+def _last_ok_by_task(storage) -> dict[str, int]:
+    """每任务最近一次 status='ok' 探测的 ts（按 task_id 分组取 MAX(ts)）。
+
+    这是本模块唯一的直接 SQL（见模块注释）；测试替身没有 .db / 表结构不符 /
+    查询失败时返回空 dict → 该族指标整体省略（与「无数据省略样本」一致）。
+    """
+    db = getattr(storage, "db", None)
+    if db is None:
+        return {}
+    sql = ("SELECT task_id, MAX(ts) AS last_ok FROM probe_results"
+           " WHERE status='ok' GROUP BY task_id")
+    try:
+        lock = getattr(storage, "lock", None)
+        if lock is not None:
+            with lock:
+                rows = db.execute(sql).fetchall()
+        else:
+            rows = db.execute(sql).fetchall()
+    except Exception:
+        return {}
+    out: dict[str, int] = {}
+    for r in rows or []:
+        tid = _get(r, "task_id")
+        last = _as_int(_get(r, "last_ok"))
+        if tid is None or last is None:
+            continue
+        out[str(tid)] = last
+    return out
+
+
+def _selfcheck_minutes(storage) -> int:
+    """渠道自检周期（settings.channel_selfcheck_minutes，默认 10；非法/≤0 回落 10）。"""
+    sg = getattr(storage, "setting_get", None)
+    if not callable(sg):
+        return 10
+    try:
+        minutes = int(sg("channel_selfcheck_minutes", "10") or 10)
+    except Exception:
+        return 10
+    return minutes if minutes > 0 else 10
+
+
+def _channel_up_samples(storage, now_ts: int) -> list[str]:
+    """gpm_notify_channel_up 样本行：enabled 且自检在 staleness 内 → 1，否则 0。
+
+    - 依据 notify_channels.last_ok_at 与当前时间差（ staleness = 2×自检周期，
+      容忍一个周期的滞后，避免周期边界抖动）+ enabled；
+    - 渠道从未自检过（last_ok_at=0）→ 不输出该系列（「未知」不是「down」）。
+    """
+    lc = getattr(storage, "list_channels", None)
+    if not callable(lc):
+        return []
+    try:
+        channels = lc() or []
+    except Exception:
+        return []
+    staleness = 2 * _selfcheck_minutes(storage) * 60
+    samples: list[str] = []
+    for c in channels:
+        last_ok = _as_int(_get(c, "last_ok_at")) or 0
+        if last_ok <= 0:
+            continue
+        up = 1 if _as_bool_int(_get(c, "enabled")) and (now_ts - last_ok) <= staleness else 0
+        samples.append(
+            f'gpm_notify_channel_up{{channel_id="{_escape_label(_get(c, "id"))}",'
+            f'name="{_escape_label(_get(c, "name"))}"}} {up}')
+    return samples
 
 
 def _ingest_counters(ingest) -> dict:
@@ -207,7 +280,8 @@ def _ingest_counters(ingest) -> dict:
 # ---------------------------------------------------------------- 渲染
 
 def _render(counts, nodes: list[dict], tasks: list[dict], config_ver,
-            ingest_counters: dict) -> str:
+            ingest_counters: dict, last_ok: dict[str, int],
+            channel_samples: list[str]) -> str:
     out: list[str] = []
 
     def family(name: str, mtype: str, help_text: str, samples: list[str]):
@@ -281,6 +355,25 @@ def _render(counts, nodes: list[dict], tasks: list[dict], config_ver,
     family("gpm_task_enabled", "gauge", "Task enabled status (1=enabled, 0=disabled).",
            enabled_samples)
 
+    # 最近一次成功探测（Prometheus last-success 惯用手法，第三期 12）：
+    # up 之外用 age 一眼识别「活着但在装死」的任务；从未成功的任务省略该系列。
+    ok_samples = []
+    for t in tasks:
+        last = last_ok.get(t["id"])
+        if last is None:
+            continue
+        ok_samples.append(
+            f'gpm_task_last_success_timestamp_seconds{{task_id="{_escape_label(t["id"])}",'
+            f'name="{_escape_label(t["label"])}",type="{_escape_label(t["type"])}"}} {last}')
+    family("gpm_task_last_success_timestamp_seconds", "gauge",
+           "Unix timestamp of the task's most recent successful (status=ok) probe;"
+           " omitted for tasks that never succeeded.",
+           ok_samples)
+    family("gpm_notify_channel_up", "gauge",
+           "1 if the notify channel is enabled and its periodic self-check succeeded"
+           " within 2x the self-check interval; channels never self-checked are omitted.",
+           channel_samples)
+
     for name in sorted(ingest_counters):
         value = _fmt(ingest_counters[name])
         if value is None:
@@ -299,14 +392,18 @@ def render(storage, ingest=None, now_ts: int | None = None) -> str:
     nodes = _prepare_nodes(storage, ts)
     tasks = _prepare_tasks(storage, ts)
     ingest_counters = _ingest_counters(ingest)
+    last_ok = _last_ok_by_task(storage)
+    channel_samples = _channel_up_samples(storage, ts)
 
-    full = _render(counts, nodes, tasks, config_ver, ingest_counters)
+    full = _render(counts, nodes, tasks, config_ver, ingest_counters,
+                   last_ok, channel_samples)
     if len(full.encode("utf-8")) <= MAX_OUTPUT_BYTES:
         return full
 
     # 超限：二分搜索「节点/任务各保留前 k 个」的最大 k（按存储返回顺序，稳定可复现）。
     def build(k: int) -> str:
-        return _render(counts, nodes[:k], tasks[:k], config_ver, ingest_counters)
+        return _render(counts, nodes[:k], tasks[:k], config_ver, ingest_counters,
+                       last_ok, channel_samples)
 
     lo, hi = 0, max(len(nodes), len(tasks))
     best, best_k = build(0), 0

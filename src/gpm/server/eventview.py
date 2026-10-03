@@ -3,8 +3,9 @@
 UI 在事件流里点开一条事件时调用本模块。设计约束：
 
 - 只调用 storage 的公开只读方法（incident_get / list_incidents / agg_read /
-  agg_buckets_existing / list_tasks / list_nodes / get_task），不写 SQL，
-  便于存储层整体替换。
+  agg_buckets_existing / agg_node_cells / list_tasks / list_nodes / get_task /
+  audit_list / dns_answer_changes / node_metrics），不写 SQL，
+  便于存储层整体替换；本模块新增的取数全部走带 LIMIT 的 storage 方法。
 - 唯一会抛出的异常是「事件不存在」的 KeyError；其余取数失败一律退化成缺数据
   （空 series / 空 blast / 计数为 0），避免一条脏数据把详情面板打挂。
 - 返回字段名与 bucket 档位是前端契约，改动需同步 UI 与 tests/unit/test_eventview.py。
@@ -19,10 +20,25 @@ UI 在事件流里点开一条事件时调用本模块。设计约束：
   保证样本数/失败数/可用率不被抽样影响。
 - blast 的行代表两类影响面：与焦点事件**同任务**的事件归入任务行，
   其余**同节点**的事件归入节点行（先任务后节点，不重复计数）。
+
+故障快速定位四块（detail 返回新增的可选键，只加键不改既有键）：
+
+- changes:   [{ts,who,action,detail}] —— audit_log 事件窗口 ±30min 内的写操作，
+             ≤8 条按 ts 倒序；空态返回单条 {"action":"none", detail=说明文字}。
+- dns_changes: [{ts,answers,changed}] —— 同目标域名的 dns 任务近 24h 解析值变更，
+             ≤5 条倒序；空态返回单条 {"ts":0, answers:[], changed:false, note=说明}。
+- scope_matrix: {"nodes":[{node_name,cells:[{ts,st}]}], "verdict":verdict dict} ——
+             目标×节点矩阵（每格 = 该节点在事件窗内该分钟的状态 ok/fail），
+             结论复用 diagnose.verdict；窗口内无数据时 verdict.verdict 给说明文字。
+- dying:     [{ts,cpu,mem}] —— 仅 kind=node 事件携带（probe 事件无此键）：
+             last_heartbeat 前 30 分钟心跳资源（按分钟桶）；空态单条带 note。
 """
 from __future__ import annotations
 
+import urllib.parse
+
 from ..common.util import now
+from . import diagnose as _diagnose
 
 #: 窗口前后各留的余量（秒）：让曲线上能看到事件前后的对照。
 PAD_SECONDS = 600
@@ -36,6 +52,27 @@ BLAST_SCAN_LIMIT = 200
 
 #: kind → 中文标签（UI 直接展示）。
 KIND_LABELS = {"probe": "探测", "node": "节点侧"}
+
+# ---------------- 故障快速定位四块的口径 ----------------
+
+#: 同期变更窗口：事件窗口前后各 30 分钟（audit_log）。
+CHANGES_PAD_SECONDS = 1800
+#: 同期变更最多条数。
+CHANGES_LIMIT = 8
+#: 同期变更一次扫描的审计条数上限（storage.audit_list 的 LIMIT）。
+CHANGES_SCAN_LIMIT = 64
+#: DNS 变更联动窗口（秒）：事件结束前 24 小时。
+DNS_CHANGES_WINDOW = 86400
+#: DNS 变更联动最多条数。
+DNS_CHANGES_LIMIT = 5
+#: 范围矩阵每节点最多格数（等间隔下采样，保留首尾）。
+MATRIX_MAX_CELLS = 60
+#: 范围矩阵节点行数上限（防御异常规模的节点表）。
+MATRIX_MAX_NODES = 32
+#: 临终曲线窗口：last_heartbeat 前 30 分钟。
+DYING_WINDOW_SECONDS = 1800
+#: 临终曲线最多点数（30 分钟 × 每分钟 1 点 = 30，留余量）。
+DYING_MAX_POINTS = 60
 
 
 # ---------------------------------------------------------------- 取值工具
@@ -410,6 +447,184 @@ def blast_radius(storage, inc: dict, t_from: int, t_to: int, limit: int = 10) ->
     return out
 
 
+# ---------------------------------------------------------------- 定位四块
+
+def _empty_changes(note: str) -> list[dict]:
+    return [{"ts": 0, "who": "", "action": "none", "detail": note}]
+
+
+def _empty_dns_changes(note: str) -> list[dict]:
+    return [{"ts": 0, "answers": [], "changed": False, "note": note}]
+
+
+def _empty_dying(note: str) -> list[dict]:
+    return [{"ts": 0, "cpu": None, "mem": None, "note": note}]
+
+
+def _empty_matrix(note: str) -> dict:
+    return {"nodes": [],
+            "verdict": {"mode": "", "failed": 0, "total": 0, "failed_names": [],
+                        "verdict": note, "advice": ""}}
+
+
+def _domain_of(task) -> str:
+    """从任务配置提取目标域名：target 优先，其次 urls 第一条；提取不到返回空。"""
+    if task is None:
+        return ""
+    candidates = [str(_get(task, "target") or "")]
+    urls = _get(task, "urls")
+    if isinstance(urls, list):
+        candidates += [str(u or "") for u in urls]
+    for raw in candidates:
+        v = raw.strip()
+        if not v:
+            continue
+        host = urllib.parse.urlparse(v).hostname if "://" in v else v.split("/")[0]
+        host = str(host or "").split("@")[-1].split(":")[0].strip()
+        if host:
+            return host
+    return ""
+
+
+def _is_ip(host: str) -> bool:
+    """近似判断 host 是不是 IP 字面量（IPv4 点分 / 含冒号的 IPv6）。"""
+    h = (host or "").strip()
+    if ":" in h:
+        return True
+    parts = h.split(".")
+    return (len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts))
+
+
+def _changes(storage, started: int, end: int) -> list[dict]:
+    """同期变更：audit_log 在事件窗口 ±30min 内的写操作，≤8 条按 ts 倒序。"""
+    t_from = int(started) - CHANGES_PAD_SECONDS
+    t_to = int(end) + CHANGES_PAD_SECONDS
+    rows = _call(storage, "audit_list", default=[], limit=CHANGES_SCAN_LIMIT,
+                 since=t_from) or []
+    picked: list[dict] = []
+    for r in rows:
+        ts = _as_int(_get(r, "ts"))
+        if ts is None or ts < t_from or ts > t_to:
+            continue
+        bits = [str(_get(r, "target") or ""), str(_get(r, "target_id") or "")]
+        extra = str(_get(r, "detail") or "").strip()
+        if extra:
+            bits.append(extra)
+        picked.append({"ts": ts,
+                       "who": str(_get(r, "who") or ""),
+                       "action": str(_get(r, "action") or ""),
+                       "detail": " · ".join(b for b in bits if b)})
+    if not picked:
+        return _empty_changes("事件窗口 ±30 分钟内没有操作审计记录")
+    picked.sort(key=lambda x: x["ts"], reverse=True)
+    return picked[:CHANGES_LIMIT]
+
+
+def _dns_changes(storage, inc, task, end: int) -> list[dict]:
+    """DNS 变更联动：同目标域名的 dns 任务在事件结束前 24h 内的解析值变更（≤5 条）。"""
+    if _kind(inc) == "node":
+        return _empty_dns_changes("节点侧事件没有目标域名，不联动 DNS 变更")
+    domain = _domain_of(task)
+    if not domain:
+        return _empty_dns_changes("目标不是域名，无 DNS 解析变更可联动")
+    if _is_ip(domain):
+        return _empty_dns_changes("目标是 IP 地址，不经过域名解析，无 DNS 变更可联动")
+    rows = _call(storage, "dns_answer_changes", domain, int(end) - DNS_CHANGES_WINDOW,
+                 int(end), DNS_CHANGES_LIMIT, default=[]) or []
+    if not rows:
+        return _empty_dns_changes(
+            f"近 24 小时内 {domain} 的 DNS 解析无变更（或没有同域名 dns 任务）")
+    out = []
+    for r in rows[:DNS_CHANGES_LIMIT]:
+        answers = _get(r, "answers")
+        out.append({"ts": _as_int(_get(r, "ts")) or 0,
+                    "answers": [str(a) for a in answers] if isinstance(answers, list) else [],
+                    "changed": True})
+    return out
+
+
+def _scope_matrix(storage, inc, task, t_from: int, t_to: int) -> dict:
+    """范围矩阵：目标×节点在事件窗口内的状态格 + diagnose.verdict 三档结论。
+
+    - 节点行 = 事件所属任务覆盖的节点（nodes 为空视为全部节点，与 blast 同约定），
+      上限 MATRIX_MAX_NODES 行；每行 cells = 该节点窗口内各桶的 ok/fail，
+      超过 MATRIX_MAX_CELLS 格时等间隔下采样（保留首尾）。
+    - verdict 复用 diagnose.verdict：节点状态取「窗内任一格 fail 即 fail」；
+      窗口内完全没有数据时 verdict.verdict 给出说明文字。
+    """
+    task_id = str(_get(inc, "task_id") or "")
+    if not task_id:
+        return _empty_matrix("节点侧事件没有目标任务，无范围矩阵")
+    bucket = pick_bucket(t_from, t_to)
+    rows = _call(storage, "agg_node_cells", bucket, task_id, int(t_from), int(t_to),
+                 default=[]) or []
+    by_node: dict = {}
+    for r in rows:
+        nid = str(_get(r, "node_id") or "")
+        ts = _as_int(_get(r, "ts"))
+        count = _as_int(_get(r, "count")) or 0
+        if not nid or ts is None or count <= 0:
+            continue
+        fail = _as_int(_get(r, "fail"))
+        if fail is None:
+            ok = _as_int(_get(r, "ok"))
+            fail = max(0, count - (ok or 0))
+        by_node.setdefault(nid, []).append({"ts": ts, "st": "fail" if fail > 0 else "ok"})
+    node_names = _names(storage, "list_nodes", "id")
+    nodes_out: list[dict] = []
+    states: list[dict] = []
+    # 任务未覆盖的节点不进矩阵（含只有聚合数据但不在任务节点清单里的）；nodes 空=全部节点
+    candidates = [nid for nid in sorted(by_node, key=lambda x: node_names.get(x, x))
+                  if _task_has_node(task, nid, node_names.get(nid, nid))]
+    for n in _call(storage, "list_nodes", default=[]) or []:
+        nid = str(_get(n, "id") or "")
+        if nid and nid not in candidates and _task_has_node(task, nid, node_names.get(nid, nid)):
+            candidates.append(nid)
+    for nid in candidates[:MATRIX_MAX_NODES]:
+        cells = by_node.get(nid, [])
+        cells.sort(key=lambda c: c["ts"])
+        cells = _downsample(cells, MATRIX_MAX_CELLS)
+        nodes_out.append({"node_name": node_names.get(nid, nid), "cells": cells})
+        if any(c["st"] == "fail" for c in cells):
+            st = "fail"
+        elif any(c["st"] == "ok" for c in cells):
+            st = "ok"
+        else:
+            st = "skipped"
+        states.append({"node_name": node_names.get(nid, nid), "status": st})
+    v = _diagnose.verdict(states)
+    if not v["mode"]:
+        v["verdict"] = "事件窗口内没有该目标的节点探测数据，无法给出范围结论"
+    return {"nodes": nodes_out, "verdict": v}
+
+
+def _dying(storage, inc, started: int):
+    """临终曲线：kind=node 事件取 last_heartbeat 前 30 分钟的 CPU/内存（按分钟桶）。
+
+    probe 事件返回 None（detail 不带 dying 键）；无心跳数据返回带说明的空态单条。
+    """
+    if _kind(inc) != "node":
+        return None
+    node_id = str(_get(inc, "node_id") or "")
+    reason = _get(inc, "reason")
+    hb = _as_int(_get(reason, "last_heartbeat")) if isinstance(reason, dict) else None
+    if not hb:
+        hb = int(started) or 0
+    rows = _call(storage, "node_metrics", node_id, hb - DYING_WINDOW_SECONDS, hb, 60,
+                 default=[]) or []
+    pts = []
+    for r in rows:
+        ts = _as_int(_get(r, "ts"))
+        if ts is None:
+            continue
+        pts.append({"ts": ts, "cpu": _as_float(_get(r, "cpu")),
+                    "mem": _as_float(_get(r, "mem"))})
+    if not pts:
+        return _empty_dying("离线前 30 分钟内没有该节点的心跳资源数据")
+    pts.sort(key=lambda p: p["ts"])
+    return pts[:DYING_MAX_POINTS]
+
+
 # ---------------------------------------------------------------- 详情
 
 def detail(storage, iid: int, ts: int | None = None, max_points: int = 120) -> dict:
@@ -445,6 +660,7 @@ def detail(storage, iid: int, ts: int | None = None, max_points: int = 120) -> d
     node_names = _names(storage, "list_nodes", "id")
     node_name = node_names.get(node_id, node_id) if node_id else ""
     kind_label = KIND_LABELS.get(_kind(inc), KIND_LABELS["probe"])
+    task = _call(storage, "get_task", task_id, default=None) if task_id else None
 
     points = _points_for(storage, inc, t_from, t_to)
     incident = {
@@ -458,7 +674,7 @@ def detail(storage, iid: int, ts: int | None = None, max_points: int = 120) -> d
         "duration_ms": max(0, end - started) * 1000,
         "ongoing": ended is None,
     }
-    return {
+    out = {
         "incident": incident,
         "stats": _stats(points, inc),
         "timeline": _timeline(inc, task_name, node_name),
@@ -466,3 +682,24 @@ def detail(storage, iid: int, ts: int | None = None, max_points: int = 120) -> d
         "series": _downsample(points, max_points),
         "window": {"from": t_from, "to": t_to, "bucket": bucket},
     }
+
+    # ---- 故障快速定位四块（只加键，不改既有键；任何取数失败退化为空态说明）----
+    try:
+        out["changes"] = _changes(storage, started, end)
+    except Exception:  # noqa: BLE001
+        out["changes"] = _empty_changes("同期变更数据读取失败")
+    try:
+        out["dns_changes"] = _dns_changes(storage, inc, task, end)
+    except Exception:  # noqa: BLE001
+        out["dns_changes"] = _empty_dns_changes("DNS 变更数据读取失败")
+    try:
+        out["scope_matrix"] = _scope_matrix(storage, inc, task, started, end)
+    except Exception:  # noqa: BLE001
+        out["scope_matrix"] = _empty_matrix("范围矩阵数据读取失败")
+    try:
+        dying = _dying(storage, inc, started)
+    except Exception:  # noqa: BLE001
+        dying = _empty_dying("节点心跳资源数据读取失败")
+    if dying is not None:
+        out["dying"] = dying            # probe 事件无此键（契约约定）
+    return out

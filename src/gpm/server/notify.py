@@ -11,8 +11,15 @@
   validate(channel) -> str | None          非法配置返回中文错误说明，不抛异常
   describe(channel) -> str                 人类可读短标签，非法配置也不抛异常
   render_payload(channel, title, text)     -> dict | str（send 内部也用它）
+  render_markdown(title, text) -> str      纯文本 → markdown 变体（供单测/复用）
   send(channel, title, text, timeout=8.0)  -> tuple[bool, str]  吞掉所有异常
 
+markdown 渲染分支（ONCALL_OPTIMIZATION 第一期）：企微/钉钉/飞书三类 IM 渠道发送
+markdown 变体（段落标签【X】加粗、裸链接转可点），webhook/smtp 保持纯文本：
+  - wecom / dingtalk：msgtype=markdown（与历史一致），内容经 render_markdown 渲染；
+  - feishu：官方自定义机器人**没有** msg_type=markdown（仅 text/post/interactive），
+    故默认发 interactive 卡片（header=标题 + markdown 元素）；渠道配置
+    {"markdown": false} 可整体回退纯文本（三类 IM 均生效，msgtype=text）。
 统一约定：不打印日志（由调用方决定）；HTTP 超时统一走 timeout 参数；
 HTTP 失败摘要为 "HTTP <状态码>: <响应体前 200 字符>"；
 网络异常摘要为 "<异常类名>: <消息前 120 字符>"。
@@ -23,6 +30,7 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 import smtplib
 import time
 import urllib.error
@@ -39,6 +47,11 @@ _ERR_LIMIT = 120
 _USER_AGENT = "gpm-notify/1.0"
 _JSON_CT = "application/json; charset=utf-8"
 _TEXT_CT = "text/plain; charset=utf-8"
+
+# markdown 变体：整行就是一个 http(s) 链接 → 转可点链接
+_MD_URL_RE = re.compile(r"^https?://\S+$")
+# markdown 变体：行首「【标签】」→ 加粗（配合 alerting 的固定段落）
+_MD_LABEL_RE = re.compile(r"^(【[^】]{1,32}】)")
 
 
 # ------------------------------------------------------------------ 小工具
@@ -229,16 +242,45 @@ def render_url(channel: dict) -> str:
 
 # ------------------------------------------------------------------ 载荷
 
+def _md_body(text: str) -> str:
+    """纯文本 → markdown 正文：段落标签加粗、（标签后的）裸链接转可点，其余原样保留。"""
+    out = []
+    for line in _s(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = line.strip()
+        if _MD_URL_RE.match(stripped):
+            out.append(f"[点击查看]({stripped})")
+            continue
+        m = _MD_LABEL_RE.match(line)
+        if m:
+            label, rest = m.group(1), line[m.end():]
+            rest_s = rest.strip()
+            if _MD_URL_RE.match(rest_s):
+                out.append(f"**{label}** [点击查看]({rest_s})")
+                continue
+            out.append(f"**{label}**{rest}")
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def render_markdown(title: str, text: str) -> str:
+    """(title, text) → markdown 变体：标题作一级标题，正文按段落渲染。"""
+    return f"### {_s(title).strip()}\n{_md_body(text)}"
+
+
 def render_payload(channel: dict, title: str, text: str):
     """公开的载荷构造函数（便于单测断言各平台报文体）。
 
     - webhook json: {"title","text","source":"gpm","ts"}；text: "title\\ntext"
-    - wecom:   {"msgtype":"markdown","markdown":{"content":"### title\\ntext"}}
+    - wecom:   {"msgtype":"markdown","markdown":{"content":"### title\\nmd正文"}}
+              （md正文 = 段落标签加粗、链接可点；渠道配置 markdown=false → msgtype=text）
     - dingtalk:{"msgtype":"markdown","markdown":{"title","text"}}；
               配了 secret 时额外回传 timestamp/sign（官方要求走 URL，
-              send() 发送前会剥离这两个字段）
-    - feishu:  {"msg_type":"text","content":{"text":"title\\ntext"}}
-    - smtp:    邮件要素摘要 {"subject","body","mail_from","mail_to"}
+              send() 发送前会剥离这两个字段）；markdown=false → msgtype=text
+    - feishu:  默认 {"msg_type":"interactive","card":{header + markdown 元素}}
+              （官方自定义机器人没有 msg_type=markdown）；markdown=false →
+              {"msg_type":"text","content":{"text":"title\\ntext"}}
+    - smtp:    邮件要素摘要 {"subject","body","mail_from","mail_to"}（纯文本）
     """
     t = _type_of(channel)
     channel = channel if isinstance(channel, dict) else {}
@@ -250,10 +292,17 @@ def render_payload(channel: dict, title: str, text: str):
         return {"title": title_s, "text": text_s, "source": "gpm", "ts": int(time.time())}
 
     if t == "wecom":
-        return {"msgtype": "markdown", "markdown": {"content": f"### {title_s}\n{text_s}"}}
+        if _as_bool(channel.get("markdown"), True):
+            return {"msgtype": "markdown",
+                    "markdown": {"content": render_markdown(title_s, text_s)}}
+        return {"msgtype": "text", "text": {"content": f"{title_s}\n{text_s}"}}
 
     if t == "dingtalk":
-        payload = {"msgtype": "markdown", "markdown": {"title": title_s, "text": text_s}}
+        if _as_bool(channel.get("markdown"), True):
+            payload = {"msgtype": "markdown",
+                       "markdown": {"title": title_s, "text": _md_body(text_s)}}
+        else:
+            payload = {"msgtype": "text", "text": {"content": f"{title_s}\n{text_s}"}}
         secret = _s(channel.get("secret")).strip()
         if secret:
             ts, sign = _dingtalk_sign(secret)
@@ -262,6 +311,18 @@ def render_payload(channel: dict, title: str, text: str):
         return payload
 
     if t == "feishu":
+        if _as_bool(channel.get("markdown"), True):
+            return {
+                "msg_type": "interactive",
+                "card": {
+                    "config": {"update_multi": True},
+                    "header": {
+                        "title": {"tag": "plain_text", "content": title_s},
+                        "template": "blue",
+                    },
+                    "elements": [{"tag": "markdown", "content": _md_body(text_s)}],
+                },
+            }
         return {"msg_type": "text", "content": {"text": f"{title_s}\n{text_s}"}}
 
     if t == "smtp":

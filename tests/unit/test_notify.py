@@ -278,8 +278,44 @@ def test_render_url_dingtalk_signature_query():
 
 
 def test_render_payload_feishu_structure():
+    # 默认走 markdown 变体：飞书官方没有 msg_type=markdown，载荷为 interactive 卡片
     payload = notify.render_payload(FEISHU, "标题", "正文")
-    assert payload == {"msg_type": "text", "content": {"text": "标题\n正文"}}
+    assert payload["msg_type"] == "interactive"
+    assert payload["card"]["header"]["title"] == {"tag": "plain_text", "content": "标题"}
+    assert payload["card"]["elements"] == [{"tag": "markdown", "content": "正文"}]
+    # 渠道配置 markdown=false → 回退纯文本（历史行为）
+    legacy = notify.render_payload(dict(FEISHU, markdown=False), "标题", "正文")
+    assert legacy == {"msg_type": "text", "content": {"text": "标题\n正文"}}
+
+
+def test_render_payload_markdown_variants():
+    """企微/钉钉/飞书发 markdown 变体：段落标签加粗、裸链接可点；webhook/smtp 纯文本。"""
+    text = "【范围】全节点失败（3/3 节点）\n- 规则：可用率\n【链接】https://gpm.example.com/index.html?task=t1&ts=1"
+    wecom = notify.render_payload(WECOM, "告警", text)
+    assert wecom["msgtype"] == "markdown"
+    content = wecom["markdown"]["content"]
+    assert content.startswith("### 告警\n")
+    assert "**【范围】**" in content and "**【链接】**" in content
+    assert "[点击查看](https://gpm.example.com/index.html?task=t1&ts=1)" in content
+    assert "- 规则：可用率" in content                        # 普通行原样保留
+
+    ding = notify.render_payload(DINGTALK, "告警", text)
+    assert ding["msgtype"] == "markdown" and ding["markdown"]["title"] == "告警"
+    assert "**【范围】**" in ding["markdown"]["text"]
+
+    feishu = notify.render_payload(FEISHU, "告警", text)
+    assert feishu["msg_type"] == "interactive"
+    assert "**【范围】**" in feishu["card"]["elements"][0]["content"]
+
+    # markdown=false 回退：企微/钉钉 msgtype=text
+    assert notify.render_payload(dict(WECOM, markdown=False), "标题", "正文") == \
+        {"msgtype": "text", "text": {"content": "标题\n正文"}}
+    # webhook / smtp 保持纯文本
+    assert notify.render_payload(WEBHOOK_TEXT, "标题", "【范围】x") == "标题\n【范围】x"
+    assert notify.render_payload(SMTP, "标题", "【范围】x")["body"] == "【范围】x"
+
+    md = notify.render_markdown("标题", "正文\n【持续】已持续 1 分钟")
+    assert md == "### 标题\n正文\n**【持续】**已持续 1 分钟"
 
 
 def test_render_payload_smtp_summary():
@@ -393,7 +429,15 @@ def test_send_feishu_success_and_failure(http):
     http.reply(b'{"code":0,"msg":"success"}')
     ok, info = notify.send(FEISHU, "标题", "正文")
     assert ok is True and "code=0" in info
-    assert http.json_body() == {"msg_type": "text", "content": {"text": "标题\n正文"}}
+    body = http.json_body()
+    assert body["msg_type"] == "interactive"
+    assert body["card"]["elements"] == [{"tag": "markdown", "content": "正文"}]
+
+    # markdown=false 回退纯文本载荷（第 2 次调用）
+    http.reply(b'{"code":0,"msg":"success"}')
+    ok, info = notify.send(dict(FEISHU, markdown=False), "标题", "正文")
+    assert ok is True
+    assert http.json_body(idx=1) == {"msg_type": "text", "content": {"text": "标题\n正文"}}
 
     http.reply(b'{"code":9499,"msg":"Bad Request"}')
     ok, info = notify.send(FEISHU, "标题", "正文")

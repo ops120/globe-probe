@@ -15,6 +15,7 @@ from ..common.models import NodeUpdate, TaskCreate, TaskUpdate, validate_params
 from ..common.util import new_id, now, sha256, validate_domain, validate_host_port, \
     validate_target
 from . import alerting, geo
+from .diagnose import classify, verdict
 from .storage import BUCKET_SECONDS
 
 log = logging.getLogger("gpm.web")
@@ -199,6 +200,71 @@ def setup_router(app_state) -> APIRouter:
                 "series": [{"node_id": n["id"], "node_name": n["name"],
                             "points": s.node_metrics(n["id"], t_from, t_to, bucket)}
                            for n in want]}
+
+    # ---------- 节点能力矩阵（ONCALL_OPTIMIZATION.md 第三期 11）----------
+    @router.get("/nodes/capabilities")
+    def nodes_capabilities(hours: int = 24):
+        """回答「这个任务为什么这个节点没数据」：从近 N 小时探测记录与心跳推断能力。
+
+        推断口径（无记录=未知，绝不把「没看到」说成「不支持」）：
+        - mtr / tracert：type='mtr' 行 metrics_json 的 mode=mtr/tracert 出现过 → true；
+          窗口内**最新**的能力信号是 error_class=tool_missing → false（之后又有成功
+          记录则覆盖为 true）；窗口内无路径探测记录 → null。
+        - psutil：心跳 cpu/mem 有值 → true；有心跳但 cpu/mem 全空 → false；无心跳 → null。
+        - ipv6：窗口内出现过 IPv6 解析结果（resolved_ip 含冒号）→ true；否则 null
+          （没有 v6 样本可能只是没分到 v6 目标，不下 false 结论）。
+        - os：节点注册上报的 system.os。
+        """
+        hours = max(1, min(int(hours or 24), 24 * 30))
+        t0 = now() - hours * 3600
+        # 各节点最新一条「能力信号」：tracert/mtr 出现过 或 工具缺失（按 ts 升序走，
+        # 后到的信号覆盖先到的 → 即「最新信号优先」）
+        with s.lock:
+            rows = s.db.execute(
+                "SELECT node_id, ts, error_class, metrics_json FROM probe_results"
+                " WHERE type='mtr' AND ts>=? ORDER BY ts", (t0,)).fetchall()
+        last_sig: dict[str, str] = {}
+        for r in rows:
+            if (r["error_class"] or "") == "tool_missing":
+                last_sig[r["node_id"]] = "tool_missing"
+                continue
+            try:
+                mode = str(json.loads(r["metrics_json"] or "{}").get("mode") or "")
+            except ValueError:
+                mode = ""
+            if mode in ("mtr", "tracert"):
+                last_sig[r["node_id"]] = mode
+        # IPv6 实证：窗口内解析出过 IPv6 地址（IPv4 字面量不含冒号）
+        with s.lock:
+            v6 = {r["node_id"] for r in s.db.execute(
+                "SELECT DISTINCT node_id FROM probe_results"
+                " WHERE ts>=? AND resolved_ip LIKE '%:%'", (t0,)).fetchall()}
+
+        def _cap(sig: str, wanted: str) -> bool | None:
+            if sig == "tool_missing":
+                return False            # 最新信号是工具缺失 → 该节点路径探测不可用
+            return True if sig == wanted else None
+
+        out = []
+        for n in s.list_nodes():
+            hb_seen = bool(n.get("last_heartbeat"))
+            if n.get("cpu") is not None or n.get("mem") is not None:
+                psutil_cap: bool | None = True
+            elif hb_seen:
+                psutil_cap = False     # 心跳里如实上报了「采不到」
+            else:
+                psutil_cap = None      # 没心跳，无从判断
+            system = n.get("system") or {}
+            sig = last_sig.get(n["id"], "")
+            out.append({
+                "node_id": n["id"], "name": n.get("name") or n["id"],
+                "os": system.get("os") or None,
+                "mtr": _cap(sig, "mtr"),
+                "tracert": _cap(sig, "tracert"),
+                "psutil": psutil_cap,
+                "ipv6": True if n["id"] in v6 else None,
+            })
+        return out
 
     @router.get("/nodes/{nid}")
     def node_detail(nid: str):
@@ -510,6 +576,63 @@ def setup_router(app_state) -> APIRouter:
     @router.get("/query/incidents")
     def query_incidents(limit: int = 30, open_only: bool = False):
         return s.list_incidents(limit, open_only)
+
+    # ---------- 值班页一屏（ONCALL_OPTIMIZATION.md 第二期 5）----------
+    @router.get("/oncall")
+    def oncall(limit: int = 50):
+        """当前 open incidents 的值班视图：一行回答「坏在哪层/坏多大/坏了多久」。
+
+        逐条组装：分层初判（diagnose.classify）+ 范围判定（diagnose.verdict，states 取
+        「该任务各节点最近一轮探测状态」，≤10 分钟窗，口径与 /api/tasks 的
+        current_status 一致——用 result_streams 的最新一条，过期样本视为无数据）+
+        对应流最近一次探测 + 确认状态。数据全部来自 storage 现有方法。
+        """
+        t_now = now()
+        window = 600                       # 「最近一轮」窗口：10 分钟
+        nodes = {n["id"]: n for n in s.list_nodes()}
+        tasks = {t["id"]: t for t in s.list_tasks()}
+        rank = {"fail": 2, "skipped": 1, "ok": 0}   # 同一轮内多条流：最差状态代表节点
+        items = []
+        for inc in s.list_incidents(max(1, min(limit, 200)), open_only=True):
+            tid = str(inc.get("task_id") or "")
+            nid = str(inc.get("node_id") or "")
+            task = tasks.get(tid) or {}
+            node = nodes.get(nid) or {}
+            reason = inc.get("reason") or {}
+            error_class = str(reason.get("error_class") or "")
+            layer, advice = classify(error_class)
+            # 范围判定输入：该任务各节点最近一轮（≤10 分钟窗）探测状态。
+            # 同节点多条流（多 URL/多线路）取时间戳最新的一轮，轮内按最差状态合并
+            # （一个 URL 挂即该节点本轮有失败，与事件的产生口径一致）。
+            per_node: dict[str, tuple[int, str]] = {}   # node_id -> (轮 ts, status)
+            for st in s.result_streams(tid):
+                st_ts = int(st.get("latest_ts") or 0)
+                status = str(st.get("latest_status") or "unknown")
+                if st_ts < t_now - window:
+                    continue
+                cur = per_node.get(st["node_id"])
+                if cur is None or st_ts > cur[0] or (
+                        st_ts == cur[0] and rank.get(status, -1) > rank.get(cur[1], -1)):
+                    per_node[st["node_id"]] = (st_ts, status)
+            states = [{"node_id": k, "node_name": (nodes.get(k) or {}).get("name") or k,
+                       "status": v[1]} for k, v in per_node.items()]
+            last = s.latest_per_stream(tid, nid, inc.get("dns") or "",
+                                       inc.get("url") or "", 1)
+            items.append({
+                "incident_id": inc["id"], "task_id": tid,
+                "task_name": task.get("name") or tid,
+                "type": task.get("type") or "", "node_id": nid,
+                "node_name": node.get("name") or nid,
+                "dns": inc.get("dns") or "", "url": inc.get("url") or "",
+                "error_class": error_class, "layer": layer, "advice": advice,
+                "scope": verdict(states),
+                "started_at": inc.get("started_at"),
+                "duration_s": max(0, t_now - int(inc.get("started_at") or t_now)),
+                "last_status": last[0]["status"] if last else None,
+                "last_ts": last[0]["ts"] if last else 0,
+                "acked": bool(inc.get("acked_at")),
+            })
+        return {"ts": t_now, "items": items}
 
     @router.get("/compare")
     def compare(task_id: str, mode: str = "yesterday", metric: str = "rtt",
@@ -853,7 +976,8 @@ def setup_router(app_state) -> APIRouter:
             except (TypeError, ValueError):
                 raise HTTPException(422, "阈值必须是数字")
         for key, lo, hi in (("window_seconds", 60, 30 * 86400),
-                            ("silence_seconds", 0, 7 * 86400)):
+                            ("silence_seconds", 0, 7 * 86400),
+                            ("escalate_minutes", 0, 1440)):
             if body.get(key) is not None:
                 try:
                     v = int(body[key])

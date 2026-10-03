@@ -97,9 +97,40 @@ $('#btn-export').addEventListener('click', () => {
 window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
 setInterval(pollHealth, 10000);
 
+/* ---------- 深链：/index.html?task=<task_id>&ts=<ts> ----------
+ * 值班总览「去处理」与外部链接共用 openTaskAt：导航到任务页、把时间窗覆盖到 ts、
+ * 打开该时刻的单次详情弹窗（复用现有 openDetail 路径）。进页面后清掉 query，幂等可刷新。
+ */
+async function openTaskAt(taskId, ts) {
+  if (!state.tasks || !state.tasks.length) state.tasks = await api('/api/tasks');
+  const t = state.tasks.find(x => String(x.id) === String(taskId));
+  if (!t) { toast('深链指向的任务不存在: ' + taskId); return false; }
+  state.task = t.id;
+  state.dns = ''; state.url = ''; state.node = '';
+  if (ts) {
+    // 时间窗覆盖到 ts：选能盖住它的最小标准窗，并同步顶部 seg 按钮高亮
+    const age = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    state.range = age <= 3600 ? 3600 : age <= 86400 ? 86400 : 604800;
+    $$('#task-range button').forEach(b => b.classList.toggle('active', +b.dataset.r === state.range));
+  }
+  await show('task');
+  if (ts && typeof openDetail === 'function') {
+    const c = curTask();
+    if (c) openDetail(c, ts, '');   // 未指定节点 → openDetail 自选首个流；无原始记录时按既有逻辑放大窗口
+  }
+  return true;
+}
+function applyDeepLink() {
+  const q = new URLSearchParams(location.search);
+  const taskId = q.get('task'), ts = Number(q.get('ts')) || 0;
+  if (!taskId) return Promise.resolve(false);
+  history.replaceState(null, '', location.pathname);   // 清掉 query：刷新/回退不会重复处理
+  return openTaskAt(taskId, ts).catch(e => { toast('深链打开失败: ' + (e.message || e)); return false; });
+}
+
 /* 初始化 */
 (async () => {
   await pollHealth();
-  await show('overview');
+  if (!(await applyDeepLink())) await show('overview');
   setInterval(() => { if (state.page === 'overview') renderOverview().catch(() => { }); }, 30000);
 })();

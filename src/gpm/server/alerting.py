@@ -6,10 +6,22 @@
 - 同一「规则 + 目标」在 firing 期间不重复打扰：静默期（silence_seconds）内只发一次，
   到期后按需再提醒；条件消失 → 发「已恢复」并把历史里的 firing 标记关闭
 - 派发失败只记录到渠道 last_error / 告警 detail，绝不影响主流程
+
+告警即诊断（ONCALL_OPTIMIZATION.md 第一期）：
+- firing / remind 通知在原有行之后追加固定段落：【范围】（各节点最近一轮 → diagnose.verdict）、
+  【初判】（最近一次失败 error_class → diagnose.classify）、【持续】（本轮未恢复时长）、
+  【证据】（该目标最近一次失败的关键证据）、【链接】（public_url 深链）；
+  数据缺失的段落整体省略，恢复（resolved）通知保持原有格式（向后兼容）。
+- 升级链：规则配 escalate_minutes（0=关，≤1440）后，firing 超过该时长仍未确认 →
+  以【升级】前缀重新通知同一渠道，两次升级间隔不小于 escalate_minutes；
+  上次升级时间持久化在升级行 alerts.detail（"escalated_at=<ts>"），重启不丢；
+  仍存在未确认的关联事件才继续升级，事件全部确认或已随恢复关闭即停止；恢复后不再升级。
 """
 from __future__ import annotations
 
 import logging
+
+from . import diagnose as _diagnose
 
 try:  # 通知模块由独立模块提供；缺失时降级为「仅记录、不发送」
     from . import notify as _notify
@@ -27,6 +39,12 @@ METRICS = {
     "node_offline": ("节点离线", "eq", "", False),
 }
 OPS = {"lt": "<", "gt": ">", "eq": "=", "ne": "!="}
+
+# 范围判定的「最近一轮」窗口（秒）：契约要求 ≤60s，storage 侧同样钳制
+SCOPE_WINDOW_SECONDS = 60
+# 升级链阈值上限（分钟）
+ESCALATE_MAX_MINUTES = 1440
+
 
 
 def _r1(v):
@@ -121,6 +139,161 @@ def _fmt(rule: dict, label: str, value, stats: dict, ts: int, kind: str) -> tupl
 def _time_text(ts: int) -> str:
     import time
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+# ---------------------------------------------------------------- 告警即诊断
+
+def _safe_call(storage, name: str, *args, default=None, **kw):
+    """只读调用的容错边界：storage 方法缺失或抛错时返回 default（与 eventview 同约定）。"""
+    fn = getattr(storage, name, None)
+    if not callable(fn):
+        return default
+    try:
+        return fn(*args, **kw)
+    except Exception:  # noqa: BLE001 - 诊断段落缺失绝不影响告警主流程
+        return default
+
+
+def _escalate_minutes(rule: dict) -> int:
+    try:
+        v = int((rule or {}).get("escalate_minutes") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(v, ESCALATE_MAX_MINUTES))
+
+
+def _scope_line(storage, task_id: str, ts: int) -> str:
+    """【范围】段落：各节点最近一轮探测状态 → diagnose.verdict 三档结论。
+
+    契约：verdict.verdict + "（f/n 节点）"；partial/single_node 追加失败节点名
+    （最多 4 个）便于直接定位。无失败样本（mode 为空）时整段省略。
+    """
+    if not task_id:
+        return ""
+    states = _safe_call(storage, "task_nodes_latest_status", task_id, ts,
+                        SCOPE_WINDOW_SECONDS, default=[]) or []
+    v = _diagnose.verdict([{"node_name": str(s.get("node_name") or s.get("node_id") or ""),
+                            "status": s.get("status")} for s in states])
+    if not v["mode"]:
+        return ""
+    line = "【范围】" + v["verdict"] + "（" + str(v["failed"]) + "/" + str(v["total"]) + " 节点）"
+    if v["mode"] in ("partial", "single_node") and v["failed_names"]:
+        line += "：" + "、".join(str(x) for x in v["failed_names"][:4])
+    return line
+
+
+def _stage_text(m: dict | None) -> str:
+    """关键证据的阶段耗时摘要：curl 给阶段耗时，mtr 给末跳丢包。"""
+    segs = []
+    for key, label in (("dns_time", "DNS"), ("connect_time", "连接"), ("tls_time", "TLS"),
+                       ("ttfb", "首字节"), ("total_time", "总耗时")):
+        v = (m or {}).get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            segs.append(label + " " + str(round(float(v))) + "ms")
+    if not segs:
+        hops = (m or {}).get("hops")
+        if isinstance(hops, list) and hops and isinstance(hops[-1], dict):
+            last = hops[-1]
+            segs.append("mtr 末跳 " + str(last.get("host") or "?")
+                        + " 丢包 " + str(last.get("loss_pct") or 0) + "%")
+    return " / ".join(segs)
+
+
+def _evidence_line(storage, task_id: str, ts: int, node_names: dict, ev: dict | None) -> str:
+    """【证据】段落：该目标最近一次失败探测的时间 / 节点 / 错误 / 阶段耗时。"""
+    if not ev:
+        return ""
+    nid = str(ev.get("node_id") or "")
+    parts = [_time_text(int(ev.get("ts") or ts))]
+    who = node_names.get(nid, nid)
+    if who:
+        parts.append("节点 " + str(who))
+    ip = str(ev.get("resolved_ip") or "").strip()
+    if ip:
+        parts.append("解析 " + ip)
+    head = str(ev.get("error") or "").strip() or str(ev.get("error_class") or "").strip() or "失败"
+    line = "【证据】" + " · ".join(parts) + " · " + head
+    stage = _stage_text(ev.get("metrics") if isinstance(ev.get("metrics"), dict) else {})
+    if stage:
+        line += "（" + stage + "）"
+    return line
+
+
+def _init_line(ev: dict | None) -> str:
+    """【初判】段落：最近一次失败的 error_class → diagnose.classify（层面 — 建议）。"""
+    if not ev:
+        return ""
+    layer, advice = _diagnose.classify(str(ev.get("error_class") or ""))
+    return "【初判】" + layer + " — " + advice
+
+
+def _duration_text(t0: int, stats: dict, ts: int) -> str:
+    """【持续】段落：本轮未恢复起点至今的分钟数 + 窗口内失败样本数。"""
+    if t0 <= 0 or ts < t0:
+        return ""
+    fails = stats.get("fail") if isinstance(stats, dict) else None
+    tail = ""
+    try:
+        if fails is not None:
+            tail = "（" + str(max(0, int(fails))) + " 次失败）"
+    except (TypeError, ValueError):
+        tail = ""
+    seconds = int(ts - t0)
+    if seconds < 60:
+        return "【持续】已持续不足 1 分钟" + tail
+    return "【持续】已持续 " + str(seconds // 60) + " 分钟" + tail
+
+
+def _link_line(storage, task_id: str, ts_start: int) -> str:
+    """【链接】段落：public_url 未配置（默认空）时整段省略。"""
+    if not task_id:
+        return ""
+    base = str(_safe_call(storage, "setting_get", "public_url", "", default="") or "").strip()
+    if not base:
+        return ""
+    return ("【链接】" + base.rstrip("/") + "/index.html?task=" + str(task_id)
+            + "&ts=" + str(int(ts_start or 0)))
+
+
+def _incident_started_at(storage, metric: str, key: str) -> int:
+    """首个关联未恢复事件的开始时间（首轮 firing 时 alerts 行还没落库的兜底）。
+
+    metric=node_offline 按 node_id 关联，其余按 task_id 关联；没有则返回 0。
+    """
+    incidents = _safe_call(storage, "list_incidents", default=[], limit=100, open_only=True)
+    if not isinstance(incidents, list):
+        return 0
+    field = "node_id" if metric == "node_offline" else "task_id"
+    starts = [int(i.get("started_at") or 0) for i in incidents
+              if str(i.get(field) or "") == str(key)]
+    return min([x for x in starts if x > 0], default=0)
+
+
+def _diagnosis_lines(storage, rule: dict, key: str, label: str, stats: dict, ts: int,
+                     node_names: dict) -> list[str]:
+    """通知的固定诊断段落（firing / remind / escalate 共用；resolved 不调用）。
+
+    顺序固定：【范围】【初判】【持续】【证据】【链接】；node_offline 告警没有
+    目标任务，范围/初判/证据/链接天然缺数据而省略，只保留【持续】。
+    持续时长的起点：本轮告警 episode 起点（最近一次 resolved 后首条 firing），
+    首轮 firing 时 alerts 行未落库 → 退回关联未恢复事件的 started_at。
+    """
+    t_id = "" if rule.get("metric") == "node_offline" else str(key)
+    t0 = int(_safe_call(storage, "alert_episode_start", rule["id"], key, default=0) or 0)
+    if t0 <= 0:
+        t0 = _incident_started_at(storage, str(rule.get("metric") or ""), key)
+    ev = None
+    if t_id:
+        ev = _safe_call(storage, "task_last_failure", t_id, ts, default=None)
+    lines: list[str] = []
+    for line in (_scope_line(storage, t_id, ts),
+                 _init_line(ev),
+                 _duration_text(t0, stats, ts),
+                 _evidence_line(storage, t_id, ts, node_names, ev),
+                 _link_line(storage, t_id, t0 or ts)):
+        if line:
+            lines.append(line)
+    return lines
 
 
 def flatten(channel: dict) -> dict:
@@ -238,6 +411,7 @@ def evaluate(storage, ts: int = 0) -> list[dict]:
     chans = {c["id"]: c for c in storage.list_channels() if c["enabled"]}
     tasks = {t["id"]: t for t in storage.list_tasks()}
     nodes = {n["id"]: n for n in storage.list_nodes()}
+    node_names = {nid: str(n.get("name") or nid) for nid, n in nodes.items()}
     changes: list[dict] = []
 
     for rule in rules:
@@ -278,6 +452,14 @@ def evaluate(storage, ts: int = 0) -> list[dict]:
                 kind = "resolved"
 
             title, text = _fmt(rule, label, value, stats, ts, kind)
+            if kind != "resolved":
+                # 告警即诊断：firing/remind 追加固定段落；resolved 保持原样（向后兼容）
+                try:
+                    extra = _diagnosis_lines(storage, rule, key, label, stats, ts, node_names)
+                except Exception:  # noqa: BLE001 - 诊断段落绝不影响告警主流程
+                    extra = []
+                if extra:
+                    text = text + "\n" + "\n".join(extra)
             target = {"task_id": t_id, "node_id": n_id, "label": label,
                       "value": _scaled(metric, value),
                       "threshold": _scaled(metric, rule["threshold"]),
@@ -328,6 +510,110 @@ def evaluate(storage, ts: int = 0) -> list[dict]:
         for ch, msg in failed:
             storage.outbox_add(ts, 0, ch["id"], send_title, send_text,
                                ts + RETRY_BACKOFF[0], err=msg)
+
+    # ---- 升级链：firing 超过 escalate_minutes 未确认 → 【升级】重新通知 ----
+    try:
+        out.extend(_escalations(storage, rules, chans, tasks, nodes, node_names, ts))
+    except Exception as e:  # noqa: BLE001 - 升级链绝不影响评估主流程
+        log.warning("升级链扫描失败: %s: %s", type(e).__name__, e)
+    return out
+
+
+def _open_incidents(storage) -> list[dict]:
+    """未恢复事件列表（升级链判断 ack 状态用；只读、带 LIMIT）。"""
+    out = _safe_call(storage, "list_incidents", default=[], limit=100, open_only=True)
+    return out if isinstance(out, list) else []
+
+
+def _has_unacked_incident(rule_metric: str, key: str, incidents: list[dict]) -> bool:
+    """升级继续条件：存在该告警关联的、仍未确认（acked_at=0）的未恢复事件。
+
+    - metric=node_offline：按 node_id 关联；其余指标按 task_id 关联；
+    - 关联事件全部已确认 → 停止升级（人已处理）；
+    - 没有关联的未恢复事件（已随恢复关闭，或阈值型告警未开单）→ 停止升级：
+      升级链的停止条件是「人已确认」或「条件恢复」，恢复中的窗口滞后不再打扰。
+    """
+    if not incidents:
+        return False
+    field = "node_id" if rule_metric == "node_offline" else "task_id"
+    related = [i for i in incidents if str(i.get(field) or "") == str(key)]
+    return any(int(i.get("acked_at") or 0) <= 0 for i in related)
+
+
+def _escalations(storage, rules: list[dict], chans: dict, tasks: dict, nodes: dict,
+                 node_names: dict, ts: int) -> list[dict]:
+    """升级链扫描（evaluate 每轮调用）：到期未确认的 firing 告警重新通知。
+
+    触发条件（全部满足）：
+    - 规则配置 escalate_minutes > 0；
+    - 该规则+目标仍处于 firing（最新一条 alerts 行是 firing）；
+    - 本轮 firing 持续时长（本轮起点 = 最近一次 resolved 之后的首条 firing）≥ 阈值；
+    - 距上次升级 ≥ escalate_minutes（间隔不小于阈值；上次升级时间持久化在升级行
+      alerts.detail 的 "escalated_at=<ts>"，重启不丢）；
+    - 仍存在未确认的关联未恢复事件（全部已确认或已随恢复关闭 → 停止升级）。
+
+    升级行本身 status='firing'（保持 alert_open/alert_last 的「最新行」语义），
+    title 以【升级】为前缀，通知走同一规则的同一批渠道。
+    """
+    out: list[dict] = []
+    incidents: list[dict] | None = None
+    for rule in rules:
+        em = _escalate_minutes(rule)
+        if em <= 0:
+            continue
+        metric = rule["metric"]
+        keys = _safe_call(storage, "alert_open_keys", rule["id"], default=[]) or []
+        for key in keys:
+            t0 = int(_safe_call(storage, "alert_episode_start", rule["id"], key, default=0) or 0)
+            if t0 <= 0 or (ts - t0) < em * 60:
+                continue                     # 未到升级阈值
+            last = int(_safe_call(storage, "alert_last_escalated", rule["id"], key, default=0) or 0)
+            if last and (ts - last) < em * 60:
+                continue                     # 间隔不小于 escalate_minutes
+            if incidents is None:
+                incidents = _open_incidents(storage)
+            if not _has_unacked_incident(metric, key, incidents):
+                continue                     # 全部已确认 / 无未恢复事件 → 不再升级
+            if metric == "node_offline":
+                label = node_names.get(key, key)
+                stats: dict = {}
+                value: float | None = 0.0 if nodes.get(key, {}).get("status") == "online" else 1.0
+                mname, munit = "节点离线", ""
+                title = "【升级】节点 " + label + " 离线已持续 " + str((ts - t0) // 60) + " 分钟未确认"
+            else:
+                label = str(tasks.get(key, {}).get("name") or key)
+                stats = window_stats(storage, key, rule["window_seconds"], ts)
+                value = stats.get(metric)
+                mname, _d, munit, _agg = METRICS.get(metric, (metric, "gt", "", True))
+                title = "【升级】" + label + " " + mname + " 已持续 " + str((ts - t0) // 60) + " 分钟未确认"
+            shown = _scaled(metric, value)
+            body = [
+                "- 规则：" + rule["name"] + "（" + mname + "）",
+                "- 目标：" + label,
+                "- 当前值：" + (str(shown) + munit if shown is not None else "无数据"),
+                "- 时间：" + _time_text(ts),
+            ]
+            try:
+                extra = _diagnosis_lines(storage, rule, key, label, stats, ts, node_names)
+            except Exception:  # noqa: BLE001
+                extra = []
+            text = "\n".join(body + extra)
+            channels = [chans[c] for c in rule["channel_ids"] if c in chans]
+            delivered, n_ch, n_ok, err, failed = _dispatch(storage, channels, title, text, ts)
+            target = {"task_id": "" if metric == "node_offline" else key,
+                      "node_id": key if metric == "node_offline" else "",
+                      "label": label, "value": _scaled(metric, value),
+                      "threshold": _scaled(metric, rule["threshold"]),
+                      "escalated": True}
+            aid = storage.alert_add(ts, rule, key, "firing", title, text, target,
+                                    delivered, n_ch, n_ok, "escalated_at=" + str(ts))
+            for ch, msg in failed:
+                storage.outbox_add(ts, aid, ch["id"], title, text,
+                                   ts + RETRY_BACKOFF[0], err=msg)
+            out.append({"id": aid, "kind": "escalate", "rule": rule["name"], "metric": metric,
+                        "key": key, "label": label, "title": title, "delivered": delivered,
+                        "channels": n_ch, "ok": n_ok, "error": err, "grouped": 1})
+            log.info("告警升级: %s（渠道 %d/%d 成功）", title, n_ok, n_ch)
     return out
 
 

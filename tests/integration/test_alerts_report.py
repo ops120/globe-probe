@@ -380,3 +380,243 @@ def test_sla_incident_groups_folding(tmp_path):
     assert other["count"] == 1 and other["flapping"] is False
     # 折叠不影响整体统计（total/open/downtime 仍按每条事件算）
     assert inc["open"] == 2
+
+
+# ---------------- 故障快速定位：告警即诊断 ----------------
+
+def test_alert_notification_diagnosis_template(tmp_path, monkeypatch):
+    """firing 通知带固定段落【范围】【初判】【持续】【证据】【链接】；public_url 空 → 无链接行。"""
+    client, cfg, s = make_client(tmp_path)
+    n1, tok1 = register(client, cfg, "tpl-bj")
+    n2, tok2 = register(client, cfg, "tpl-sh")
+    tid = client.post("/api/tasks", json={
+        "name": "tpl-curl", "type": "ping", "target": "1.1.1.1"}).json()["id"]
+    ch = client.post("/api/alerts/channels", json={
+        "name": "tpl-ch", "type": "webhook", "config": {"url": "https://example.com/h"}}).json()
+    calls: list = []
+    import gpm.server.notify as notify_mod
+    monkeypatch.setattr(notify_mod, "send",
+                        lambda channel, title, text, timeout=8.0:
+                        (calls.append((title, text)) or (True, "ok")))
+    client.post("/api/alerts/rules", json={
+        "name": "tpl-规则", "metric": "avail", "op": "lt", "threshold": 0.9,
+        "window_seconds": 60, "silence_seconds": 3600, "channel_ids": [ch["id"]],
+        "task_id": tid})
+    s.setting_set("public_url", "https://gpm.example.com/")
+
+    now_min = int(time.time()) // 60 * 60
+    fail_min = now_min - 60
+    add_results(client, n1, tok1, ping_rows(tid, fail_min, 6, ok=False))
+    add_results(client, n2, tok2, ping_rows(tid, fail_min, 6, ok=False))
+    reagg(s, fail_min - 300, now_min + 60)
+
+    ev = alerting.evaluate(s, now_min)
+    assert len(ev) == 1 and ev[0]["kind"] == "firing", ev
+    title, text = calls[0]
+    assert "【告警】" in title
+    # 【范围】：两节点最近一轮全失败 → 全节点失败（2/2 节点）
+    assert "【范围】全节点失败" in text and "（2/2 节点）" in text, text
+    # 【初判】：error_class=timeout → 网络层 + 建议
+    assert "【初判】网络层 — " in text, text
+    # 【持续】：episode 起点回退到事件 started_at（第 3 次失败 fail_min+20）→ 不足 1 分钟
+    assert "【持续】已持续不足 1 分钟（12 次失败）" in text, text
+    # 【证据】：最近一次失败的时间与错误类
+    assert "【证据】" in text and "timeout" in text, text
+    # 【链接】：public_url 已配置 → 深链行（结尾斜杠被去掉）
+    assert f"【链接】https://gpm.example.com/index.html?task={tid}&ts=" in text, text
+
+    # 恢复通知保持向后兼容：不带诊断段落
+    add_results(client, n1, tok1, ping_rows(tid, now_min, 6, ok=True, step=5))
+    add_results(client, n2, tok2, ping_rows(tid, now_min, 6, ok=True, step=5))
+    reagg(s, now_min - 300, now_min + 120)
+    calls.clear()
+    ev2 = alerting.evaluate(s, now_min + 60)
+    assert len(ev2) == 1 and ev2[0]["kind"] == "resolved", ev2
+    assert "已恢复" in calls[0][0]
+    for tag in ("【范围】", "【初判】", "【持续】", "【证据】", "【链接】"):
+        assert tag not in calls[0][1], (tag, calls[0][1])
+
+
+def test_alert_notification_link_omitted_without_public_url(tmp_path, monkeypatch):
+    """public_url 未配置（默认空）→ 通知里没有【链接】段落，其余段落不受影响。"""
+    client, cfg, s = make_client(tmp_path)
+    nid, token = register(client, cfg, "nolink-node")
+    tid = client.post("/api/tasks", json={
+        "name": "nolink-ping", "type": "ping", "target": "1.1.1.1"}).json()["id"]
+    ch = client.post("/api/alerts/channels", json={
+        "name": "nolink-ch", "type": "webhook", "config": {"url": "https://example.com/h"}}).json()
+    calls: list = []
+    import gpm.server.notify as notify_mod
+    monkeypatch.setattr(notify_mod, "send",
+                        lambda channel, title, text, timeout=8.0:
+                        (calls.append((title, text)) or (True, "ok")))
+    client.post("/api/alerts/rules", json={
+        "name": "nolink-规则", "metric": "avail", "op": "lt", "threshold": 0.9,
+        "window_seconds": 60, "silence_seconds": 3600, "channel_ids": [ch["id"]],
+        "task_id": tid})
+    assert s.setting_get("public_url", "") == ""
+
+    now_min = int(time.time()) // 60 * 60
+    add_results(client, nid, token, ping_rows(tid, now_min - 60, 6, ok=False))
+    reagg(s, now_min - 300, now_min + 60)
+    ev = alerting.evaluate(s, now_min)
+    assert ev and ev[0]["kind"] == "firing"
+    text = calls[0][1]
+    assert "【链接】" not in text
+    # 单节点场景：1/1 失败归「部分节点失败」档并带节点名
+    assert "【范围】部分节点失败" in text and "（1/1 节点）：nolink-node" in text, text
+    assert "【初判】网络层" in text, text
+
+
+# ---------------- 故障快速定位：升级链 ----------------
+
+def _escalation_setup(tmp_path, monkeypatch, escalate_minutes):
+    client, cfg, s = make_client(tmp_path)
+    nid, token = register(client, cfg, "esc-node")
+    tid = client.post("/api/tasks", json={
+        "name": "esc-ping", "type": "ping", "target": "1.1.1.1"}).json()["id"]
+    ch = client.post("/api/alerts/channels", json={
+        "name": "esc-ch", "type": "webhook", "config": {"url": "https://example.com/h"}}).json()
+    calls: list = []
+    import gpm.server.notify as notify_mod
+    monkeypatch.setattr(notify_mod, "send",
+                        lambda channel, title, text, timeout=8.0:
+                        (calls.append((title, text)) or (True, "ok")))
+    rule = client.post("/api/alerts/rules", json={
+        "name": "esc-规则", "metric": "avail", "op": "lt", "threshold": 0.9,
+        # 窗口拉长到 1 小时：让 avail 持续低于阈值，告警在升级周期内保持 firing
+        "window_seconds": 3600, "silence_seconds": 3600, "channel_ids": [ch["id"]],
+        "task_id": tid}).json()
+    # API 层（api_web）暂不透传 escalate_minutes → 直接在存储层设置（归属本模块的契约）
+    s.update_rule(rule["id"], {"escalate_minutes": escalate_minutes}, int(time.time()))
+    now_min = int(time.time()) // 60 * 60
+    add_results(client, nid, token, ping_rows(tid, now_min - 60, 6, ok=False))
+    reagg(s, now_min - 300, now_min + 60)
+    return client, s, calls, tid, nid, token, now_min
+
+
+def test_alert_escalation_chain_time_progression(tmp_path, monkeypatch):
+    """升级链：未到阈值不升 → 到阈值升一次 → 间隔不小于阈值 → ack 后不再升级 → 恢复不升级。"""
+    client, s, calls, tid, nid, token, t0 = _escalation_setup(tmp_path, monkeypatch, 10)
+
+    ev = alerting.evaluate(s, t0)                       # 首轮 firing
+    assert [e["kind"] for e in ev] == ["firing"]
+    assert all(e["kind"] != "escalate" for e in ev)
+
+    assert alerting.evaluate(s, t0 + 540) == []         # 未到 10 分钟：不升级（静默期内也无提醒）
+    ev1 = alerting.evaluate(s, t0 + 600)                # 恰好到阈值 → 升级一次
+    assert [e["kind"] for e in ev1] == ["escalate"], ev1
+    assert ev1[0]["title"].startswith("【升级】") and "10 分钟" in ev1[0]["title"]
+    # 升级通知带【持续】（episode 起点 + 窗口失败数）；探测已停 → 60s 内无新一轮 → 【范围】省略
+    assert "【持续】已持续 10 分钟（6 次失败）" in calls[-1][1], calls[-1][1]
+    assert "【范围】" not in calls[-1][1]
+    row = s.alert_recent(limit=5)[0]
+    assert row["status"] == "firing" and row["detail"].startswith("escalated_at=")
+
+    assert alerting.evaluate(s, t0 + 900) == []         # 距上次升级 5 分钟 < 阈值：不升级
+    ev2 = alerting.evaluate(s, t0 + 1200)               # 再过 10 分钟 → 第二次升级
+    assert [e["kind"] for e in ev2] == ["escalate"]
+    assert s.alert_last_escalated(next(r["id"] for r in s.list_rules()), tid) == t0 + 1200
+
+    # 确认关联事件 → 不再升级（哪怕告警窗口仍显示异常）
+    inc = next(i for i in s.list_incidents(limit=50, open_only=True) if i["task_id"] == tid)
+    assert s.incident_ack(inc["id"], t0 + 1250, "oncall", "处理中")
+    assert alerting.evaluate(s, t0 + 2400) == []
+
+    # 恢复：事件随 ok 结果关闭 → 无未恢复事件，升级停止；告警窗口滞后期间无动作
+    add_results(client, nid, token, ping_rows(tid, t0 + 2400, 60, ok=True, step=5))
+    reagg(s, t0 + 2100, t0 + 2900)
+    assert alerting.evaluate(s, t0 + 2460) == []
+    # 窗口滞后结束（成功率回到阈值以上）→ resolved；之后不再有任何升级
+    ev3 = alerting.evaluate(s, t0 + 3200)
+    assert [e["kind"] for e in ev3] == ["resolved"], ev3
+    assert alerting.evaluate(s, t0 + 3600) == []        # 已恢复：不再升级
+
+
+def test_alert_escalation_disabled_when_zero(tmp_path, monkeypatch):
+    """escalate_minutes=0（默认）→ 永不升级（哪怕持续 2 小时未确认）。"""
+    client, s, calls, tid, nid, token, t0 = _escalation_setup(tmp_path, monkeypatch, 0)
+    ev = alerting.evaluate(s, t0)
+    assert [e["kind"] for e in ev] == ["firing"]
+    kinds = [e["kind"] for e in alerting.evaluate(s, t0 + 600)]      # 已过「典型阈值」时段
+    assert "escalate" not in kinds and all(k in ("remind", "resolved") for k in kinds), kinds
+    kinds2 = [e["kind"] for e in alerting.evaluate(s, t0 + 7200)]
+    assert "escalate" not in kinds2
+    assert not [c for c in calls if c[0].startswith("【升级】")]
+
+
+def test_alert_escalation_node_offline(tmp_path, monkeypatch):
+    """节点离线告警也走升级链：ack 节点事件后停止。"""
+    client, cfg, s = make_client(tmp_path)
+    nid, _tok = register(client, cfg, "esc-off-node")
+    ch = client.post("/api/alerts/channels", json={
+        "name": "esc-off-ch", "type": "webhook",
+        "config": {"url": "https://example.com/h"}}).json()
+    calls: list = []
+    import gpm.server.notify as notify_mod
+    monkeypatch.setattr(notify_mod, "send",
+                        lambda channel, title, text, timeout=8.0:
+                        (calls.append((title, text)) or (True, "ok")))
+    rule = client.post("/api/alerts/rules", json={
+        "name": "esc-off-规则", "metric": "node_offline", "op": "eq", "threshold": 1,
+        "silence_seconds": 3600, "channel_ids": [ch["id"]], "node_id": nid}).json()
+    s.update_rule(rule["id"], {"escalate_minutes": 5}, int(time.time()))
+    now = int(time.time())
+    # 用与线上一致的路径触发离线：心跳过期 → sweep_offline 标记离线并开「节点离线」事件
+    s.db.execute("UPDATE nodes SET last_heartbeat=? WHERE id=?", (now - 9999, nid))
+    s.db.commit()
+    assert s.sweep_offline(60, now) == 1
+
+    ev = alerting.evaluate(s, now)
+    assert [e["kind"] for e in ev] == ["firing"]
+    assert alerting.evaluate(s, now + 240) == []        # 未到 5 分钟
+    ev1 = alerting.evaluate(s, now + 300)
+    assert [e["kind"] for e in ev1] == ["escalate"], ev1
+    assert "【升级】节点" in ev1[0]["title"]
+    node_inc = next(i for i in s.list_incidents(limit=10, open_only=True)
+                    if i["kind"] == "node" and i["node_id"] == nid)
+    s.incident_ack(node_inc["id"], now + 310, "oncall")
+    assert alerting.evaluate(s, now + 700) == []        # 已确认：不再升级
+
+
+# ---------------- 故障快速定位：MTTR 分段 ----------------
+
+def test_sla_mtta_mttr_segments(tmp_path):
+    """mtta（触发→首次 ack）/ mttr（ack→恢复）只统计已关闭且已 ack 的探测事件。"""
+    from gpm.server import report
+    client, cfg, s = make_client(tmp_path)
+    register(client, cfg, "mttr-node")
+    t0 = int(time.time()) - 7200
+    # 样本1：ack 60s，ack→恢复 300s
+    i1 = s.incident_open("t1", "n1", "", "", t0, {"error_class": "timeout"})
+    s.incident_ack(i1, t0 + 60, "ops")
+    s.incident_close(i1, t0 + 360)
+    # 样本2：ack 120s，ack→恢复 300s
+    i2 = s.incident_open("t1", "n1", "", "", t0 + 600, {"error_class": "timeout"})
+    s.incident_ack(i2, t0 + 720, "ops")
+    s.incident_close(i2, t0 + 1020)
+    # 已恢复但未 ack → 不计入
+    i3 = s.incident_open("t1", "n1", "", "", t0 + 1200, {"error_class": "timeout"})
+    s.incident_close(i3, t0 + 1300)
+    # 进行中且已 ack → 不计入（未恢复）
+    i4 = s.incident_open("t1", "n1", "", "", t0 + 1400, {"error_class": "timeout"})
+    s.incident_ack(i4, t0 + 1450, "ops")
+    # 节点侧事件即使已 ack 已恢复也不计入（硬红线：节点离线 != 目标故障）
+    i5 = s.incident_open("", "n1", "", "", t0 + 1500, {"event": "offline"})
+    s.incident_ack(i5, t0 + 1520, "ops")
+    s.node_incident_close("n1", t0 + 1600)
+
+    d = report.sla(s, t0 - 60, t0 + 1800)
+    assert d["mtta"] == {"p50_s": 90.0, "mean_s": 90.0}, d["mtta"]
+    assert d["mttr"] == {"p50_s": 300.0, "mean_s": 300.0}, d["mttr"]
+    assert d["mtta_note"] == "" and d["mttr_note"] == ""
+    assert d["incidents"]["mttr_seconds"] is not None   # 旧的「触发→恢复」口径保留
+    # 报表 API 透出
+    r = client.get(f"/api/report/sla?t_from={t0 - 60}&t_to={t0 + 1800}").json()
+    assert r["mtta"]["p50_s"] == 90.0 and "mtta_note" in r and "mttr_note" in r
+
+    # 样本不足（窗口内没有已确认且已恢复的事件）→ None + note
+    d2 = report.sla(s, t0 + 50000, t0 + 60000)
+    assert d2["mtta"] == {"p50_s": None, "mean_s": None}
+    assert d2["mttr"] == {"p50_s": None, "mean_s": None}
+    assert "MTTA 无法计算" in d2["mtta_note"] and "无法计算" in d2["mttr_note"]

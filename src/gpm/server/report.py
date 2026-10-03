@@ -17,6 +17,9 @@
 4. rtt_avg / loss_rate 按 count 加权平均（各流探测次数不同的近似口径，与 storage 侧
    AVG 的约定一致）；rtt_p95 取各桶最大值；avail 按 SUM(ok)/SUM(count) 重算。
 5. 已恢复/进行中的判定：ended_at 为空即「进行中」，其时长算到窗口末尾。
+6. MTTR 分段：mtta（触发→首次 ack）/ mttr（ack→恢复），只统计 kind='probe' 且
+   已关闭且已 ack 的事件；样本不足（0 条）时值为 None 并在 mtta_note/mttr_note
+   给出中文说明；顶层 incidents.mttr_seconds 为旧的「触发→恢复」均值，保持不变。
 
 已知限制：
 - list_incidents() 已支持 t_from/t_to（时间过滤下推到 SQL）；
@@ -196,6 +199,8 @@ def _collect_incidents(storage, t_from: int, t_to: int,
             "url": str(_get(i, "url", "") or ""),
             "dns": str(_get(i, "dns", "") or ""),
             "reopen_count": _int(_get(i, "reopen_count", 0) or 0),
+            "acked_at": _int(_get(i, "acked_at", 0) or 0),
+            "acked_by": str(_get(i, "acked_by", "") or ""),
         })
     items.sort(key=lambda x: x["started_at"], reverse=True)
     return items
@@ -268,6 +273,36 @@ def _group_incidents(items: list[dict]) -> list[dict]:
 
 # ---------------------------------------------------------------- 对外接口
 
+def _p50(values) -> float | None:
+    """中位数（偶数个样本取中间两数均值），保留 1 位小数；空样本返回 None。"""
+    xs = sorted(float(v) for v in (values or []))
+    n = len(xs)
+    if not n:
+        return None
+    mid = xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2.0
+    return round(mid, 1)
+
+
+def _mtt_segments(probe_items: list[dict]) -> tuple[dict, str, dict, str]:
+    """MTTR 分段（ONCALL_OPTIMIZATION P1）：触发→首次确认 / 确认→恢复。
+
+    口径：只统计 kind='probe' 且「已关闭（ended_at 非空）且已 ack（acked_at>0）」
+    的事件；MTTA = acked_at - started_at，MTTR = ended_at - acked_at（负值钳为 0）。
+    样本不足（0 条）时分段值为 None，并附中文 note 说明原因。
+    """
+    acked = [x for x in probe_items
+             if x["ended_at"] is not None and _int(x.get("acked_at", 0)) > 0]
+    mtta_vals = [max(0.0, float(_int(x.get("acked_at", 0)) - x["started_at"])) for x in acked]
+    mttr_vals = [max(0.0, float(x["ended_at"] - _int(x.get("acked_at", 0)))) for x in acked]
+    mtta = {"p50_s": _p50(mtta_vals),
+            "mean_s": round(sum(mtta_vals) / len(mtta_vals), 1) if mtta_vals else None}
+    mttr = {"p50_s": _p50(mttr_vals),
+            "mean_s": round(sum(mttr_vals) / len(mttr_vals), 1) if mttr_vals else None}
+    mtta_note = "" if mtta_vals else "窗口内没有「已确认且已恢复」的探测事件，MTTA 无法计算"
+    mttr_note = "" if mttr_vals else "窗口内没有「已确认且已恢复」的探测事件，确认→恢复段无法计算"
+    return mtta, mtta_note, mttr, mttr_note
+
+
 def sla(storage, t_from: int, t_to: int, task_id: str = "", node_id: str = "") -> dict:
     """区间 SLA：整体 / 按任务 / 按节点可用率 + 事件统计。
 
@@ -338,6 +373,7 @@ def sla(storage, t_from: int, t_to: int, task_id: str = "", node_id: str = "") -
     mttr = (round(sum(x["duration_ms"] for x in recovered) / len(recovered) / 1000.0, 1)
             if recovered else None)
     mtbf = round(span / len(probe), 1) if probe else None
+    mtta_seg, mtta_note, mttr_seg, mttr_note = _mtt_segments(probe)
 
     return {
         "window": {"from": t_from, "to": t_to, "hours": span / 3600.0},
@@ -345,6 +381,11 @@ def sla(storage, t_from: int, t_to: int, task_id: str = "", node_id: str = "") -
         "overall": overall,
         "tasks": task_rows,
         "nodes": node_rows,
+        # MTTR 分段：触发→确认（MTTA）/ 确认→恢复（MTTR），仅统计已关闭且已 ack 的事件
+        "mtta": mtta_seg,
+        "mtta_note": mtta_note,
+        "mttr": mttr_seg,
+        "mttr_note": mttr_note,
         "incidents": {
             "total": len(items),
             "open": sum(1 for x in items if x["ended_at"] is None),

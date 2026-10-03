@@ -3,6 +3,7 @@ import math
 import re
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -346,3 +347,88 @@ def test_fmt_nan_and_infinity():
     assert metrics._fmt(float("-inf")) == "-Inf"
     assert metrics._fmt(None) is None
     assert math.isnan(float("nan"))  # 显式引用 math，避免 lint 误报
+
+
+# ---------------------------------------------------------------- 值班页指标（第三期 12 / 10）
+
+class DbStorage(FakeStorage):
+    """带真实 sqlite（probe_results 表）的替身：last_success 指标走只读 SQL。"""
+
+    def __init__(self, rows=(), **kw):
+        super().__init__(**kw)
+        self.lock = threading.Lock()
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("CREATE TABLE probe_results(ts INTEGER, task_id TEXT, status TEXT)")
+        self.db.executemany("INSERT INTO probe_results VALUES(?,?,?)", rows)
+
+
+class ChannelStorage(FakeStorage):
+    """带 list_channels / setting_get 的替身：notify_channel_up 指标。"""
+
+    def __init__(self, channels=(), minutes="10", **kw):
+        super().__init__(**kw)
+        self._channels = list(channels)
+        self._minutes = minutes
+
+    def list_channels(self):
+        return [dict(c) for c in self._channels]
+
+    def setting_get(self, key, default=""):
+        return self._minutes if key == "channel_selfcheck_minutes" else default
+
+
+def test_task_last_success_metric_takes_most_recent_ok():
+    s = DbStorage(rows=[(NOW - 100, "t1", "ok"), (NOW - 50, "t1", "fail"),
+                        (NOW - 10, "t1", "ok"), (NOW - 5, "t2", "fail")],
+                  tasks=[_task(), _task(id="t2", name="curl-bad", type="curl")])
+    text = metrics.render(s, now_ts=NOW)
+    assert ('gpm_task_last_success_timestamp_seconds'
+            '{task_id="t1",name="ping-223",type="ping"} '
+            f"{NOW - 10}") in text
+    assert 'task_id="t2"' not in text, "无成功样本的任务不输出该系列"
+
+
+def test_task_last_success_omitted_without_db_or_table():
+    text = metrics.render(FakeStorage(tasks=[_task()]), now_ts=NOW)
+    assert "gpm_task_last_success_timestamp_seconds" not in text
+
+    class NoTableStorage(DbStorage):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.db.execute("DROP TABLE probe_results")
+
+    text2 = metrics.render(NoTableStorage(tasks=[_task()]), now_ts=NOW)
+    assert "gpm_task_last_success_timestamp_seconds" not in text2
+    assert "gpm_up 1" in text2, "SQL 失败不影响其余指标"
+
+
+def test_notify_channel_up_metric_states():
+    chs = [{"id": "ch1", "name": "企微", "enabled": 1, "last_ok_at": NOW - 300},
+           {"id": "ch2", "name": "钉钉", "enabled": 1, "last_ok_at": NOW - 1500},
+           {"id": "ch3", "name": "停用渠道", "enabled": 0, "last_ok_at": NOW - 60},
+           {"id": "ch4", "name": "从未自检", "enabled": 1, "last_ok_at": 0}]
+    text = metrics.render(ChannelStorage(channels=chs), now_ts=NOW)
+    assert 'gpm_notify_channel_up{channel_id="ch1",name="企微"} 1' in text
+    assert 'gpm_notify_channel_up{channel_id="ch2",name="钉钉"} 0' in text
+    assert 'gpm_notify_channel_up{channel_id="ch3",name="停用渠道"} 0' in text
+    assert "ch4" not in text, "从未自检过的渠道不输出该系列（未知≠down）"
+    # 没有 list_channels 的 storage → 整族省略
+    assert "gpm_notify_channel_up" not in metrics.render(FakeStorage(), now_ts=NOW)
+
+
+def test_notify_channel_up_staleness_follows_selfcheck_minutes():
+    ch = [{"id": "c", "name": "n", "enabled": 1, "last_ok_at": NOW - 1500}]
+    # 默认周期 10 分钟 → staleness 20 分钟：1500s 前的自检已过期
+    assert 'gpm_notify_channel_up{channel_id="c",name="n"} 0' in \
+        metrics.render(ChannelStorage(channels=ch, minutes="10"), now_ts=NOW)
+    # 周期 30 分钟 → staleness 1 小时：1500s 内自检过 → up
+    assert 'gpm_notify_channel_up{channel_id="c",name="n"} 1' in \
+        metrics.render(ChannelStorage(channels=ch, minutes="30"), now_ts=NOW)
+
+
+def test_notify_channel_up_label_escaping():
+    s = ChannelStorage(channels=[{"id": 'c"1', "name": "a\\b", "enabled": 1,
+                                  "last_ok_at": NOW - 60}])
+    text = metrics.render(s, now_ts=NOW)
+    assert 'gpm_notify_channel_up{channel_id="c\\"1",name="a\\\\b"} 1' in text

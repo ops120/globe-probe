@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -88,6 +89,22 @@ def wait_text(page, selector, contains=(), absent=(), timeout=12000, step=300):
 def wait_modal(page):
     page.wait_for_selector("#modal-mask:not(.hidden)", timeout=8000)
     page.wait_for_timeout(250)
+
+
+def wait_oncall(page, timeout=15000, step=300):
+    """等值班总览渲染出三种终态之一（降级说明 / 空态 / 卡片），返回 #oncall-body 文本。
+
+    渲染是异步的（先请求 /api/oncall 再画卡），固定 sleep 会偶发假失败。
+    """
+    waited = 0
+    while waited < timeout:
+        txt = page.text_content("#oncall-body") or ""
+        if ("服务端暂不支持" in txt or "当前没有进行中的故障" in txt
+                or page.locator("#oncall-body .oncall-card").count() >= 1):
+            return txt
+        page.wait_for_timeout(step)
+        waited += step
+    return page.text_content("#oncall-body") or ""
 
 
 def close_modal(page):
@@ -167,8 +184,9 @@ def main() -> int:
         page.on("console", lambda m: console_errors.append(f"{m.type}: {m.text}")
                 if m.type == "error" else None)
         page.on("pageerror", lambda e: console_errors.append(f"pageerror: {e}"))
-        # /api/detail 在「该时刻无探测记录」时按设计返回 404（详情弹窗按需查询），
-        # 其余 4xx/5xx 一律计入失败
+        # /api/detail 在「该时刻无探测记录」时按设计返回 404（详情弹窗按需查询）；
+        # /api/oncall 是新服务端才有的可选接口，前端探测到 404 时值班总览走优雅降级
+        # （「服务端暂不支持」）——两者都属于设计内 404，不算失败；其余 4xx/5xx 一律计入失败
         page.on("response", lambda r: http_all.append(f"{r.status} {r.url}")
                 if r.status >= 400 else None)
         # 记录全部写请求：验收必须是非破坏性的，任何写操作都要能追溯到哪一步
@@ -176,7 +194,8 @@ def main() -> int:
         page.on("request", lambda r: writes.append(f"{r.method} {r.url}")
                 if r.method in ("POST", "PUT", "PATCH", "DELETE") else None)
         page.on("response", lambda r: http_failures.append(f"{r.status} {r.url}")
-                if r.status >= 400 and not (r.status == 404 and "/api/detail" in r.url) else None)
+                if r.status >= 400 and not (r.status == 404
+                                            and ("/api/detail" in r.url or "/api/oncall" in r.url)) else None)
 
         def shot(name):
             f = out / f"{name}.png"
@@ -291,37 +310,104 @@ def main() -> int:
         t1 = (page.text_content("#cmp-title") or "").strip()
         ck.ok("可用率" in t1, f"标题随指标变化（{t1[:40]}）")
         ck.ok(page.locator("#chart-cmp canvas").count() >= 1, "对比图已渲染")
-        # 历史不足 24h：应自动切到「前一时段」并画出两条真实曲线（修复前三种模式都只有一条）
+        # 历史不足 24h：应自动切到「前一时段」并画出两条真实曲线（修复前三种模式都只有一条）。
+        # 长期运行的实例（history ≥24h，如线上 8620）按设计**不会**触发自动切换——按数据口径分支
+        hist = page.evaluate(
+            """async () => (await (await fetch('/api/compare?task_id=' + state.task
+                + '&mode=yesterday&metric=avail')).json()).history_hours""")
         d = page.evaluate("""() => {
             const inst = echarts.getInstanceByDom(document.getElementById('chart-cmp'));
             const s = inst ? (inst.getOption().series || []) : [];
             return { names: s.map(x => x.name),
                      counts: s.map(x => (x.data || []).filter(v => v != null).length) };
         }""")
-        ck.ok(len(d["names"]) == 2, f"自动切到「前一时段」并给出两条曲线（{d['names']}）")
-        ck.ok(all(c > 0 for c in d["counts"]), f"两条曲线都有数据点（{d['counts']}）")
-        ck.ok("已自动切到" in t1, "标题说明为什么自动切换")
+        if hist is not None and hist < 24:
+            ck.ok(len(d["names"]) == 2, f"自动切到「前一时段」并给出两条曲线（{d['names']}）")
+            ck.ok(all(c > 0 for c in d["counts"]), f"两条曲线都有数据点（{d['counts']}）")
+            ck.ok("已自动切到" in t1, "标题说明为什么自动切换")
+        else:
+            ck.ok(len(d["names"]) == 2, f"对比图画出两条曲线（{d['names']}）")
+            ck.ok(any(c > 0 for c in d["counts"]),
+                  f"至少一条曲线有数据点（{d['counts']}；空的那条对应接口 has_today/has_other=false 的口径）")
+            ck.ok(True, f"（实例历史 {hist}h ≥24h，按设计不触发「自动切前一时段」，"
+                        "跳过自动切换说明断言）")
         shot("compare-avail")
-        # 手动选「昨日」时应被尊重，并说明为何没有对比线
+        # 手动选「昨日」时应被尊重：历史 <24h 时说明为何没有对比线；≥24h 时直接出昨日曲线
         page.click('#cmp-mode button[data-m="yesterday"]')
         page.wait_for_timeout(1600)
         t2 = (page.text_content("#cmp-title") or "").strip()
-        ck.ok("不足 24 小时" in t2 and "昨日同期尚未产生数据" in t2,
-              f"手动选昨日时说明原因（{t2[-40:]}）")
+        if hist is not None and hist < 24:
+            ck.ok("不足 24 小时" in t2 and "昨日同期尚未产生数据" in t2,
+                  f"手动选昨日时说明原因（{t2[-40:]}）")
+        else:
+            ck.ok("昨日" in t2,
+                  f"手动选昨日时模式被尊重（history {hist}h ≥24h，无需缺数据说明；{t2[-40:]}）")
         page.click('#cmp-mode button[data-m="prev"]')
         page.click('#cmp-metric button[data-k="rtt"]')
         page.wait_for_timeout(1200)
 
-        # ---- 告警与报表（P0 告警闭环 + SLA 报表）----
-        print("→ 告警与报表")
+        # ---- 告警与报表：二级菜单（值班总览/报表/事件与告警/通知配置/操作审计）----
+        print("→ 告警与报表（二级菜单）")
         page.click('nav a[data-page="alerts"]')
         wait_page(page, "alerts")
         page.wait_for_timeout(1500)
+        # 子导航条：五个子 tab，默认落在「值班总览」
+        ck.ok(page.locator("#al-subtabs button[data-sub]").count() == 5,
+              "告警页子导航条有 5 个子 tab（值班总览/报表/事件与告警/通知配置/操作审计）")
+        ck.ok("active" in (page.locator('#al-subtabs button[data-sub="oncall"]')
+                           .get_attribute("class") or ""), "默认落在「值班总览」子页")
+        # —— 值班总览（两分支：旧后端无 /api/oncall → 优雅降级；新后端 → 卡片或空态）——
+        page.click('#al-subtabs button[data-sub="oncall"]')
+        on_txt = wait_oncall(page)
+        if "服务端暂不支持" in on_txt:
+            ck.ok(True, "值班总览：旧后端无 /api/oncall → 「服务端暂不支持」降级说明出现（不算失败）")
+        elif "当前没有进行中的故障" in on_txt:
+            ck.ok(True, "值班总览：无进行中故障 → 空态说明出现")
+        elif page.locator("#oncall-body .oncall-card").count() >= 1:
+            on_cards = page.locator("#oncall-body .oncall-card").count()
+            on_body = page.text_content("#oncall-body") or ""
+            ck.ok("层面" in on_body and "范围" in on_body,
+                  f"值班卡片含层面/范围标注（{on_cards} 张卡）")
+            ck.ok(page.locator("#oncall-body button", has_text="去处理").count() >= 1,
+                  "值班卡片有「去处理」入口")
+            ck.ok(page.locator("#oncall-body button", has_text="确认").count() >= 1,
+                  "值班卡片有确认入口")
+        else:
+            ck.ok(False, f"值班总览未渲染出预期内容（{on_txt[:80]}）")
+        shot("alerts-oncall")
+
+        # —— 报表子页：SLA 四卡 + 按任务/按节点 + MTTA/MTTR 分段行 ——
+        page.click('#al-subtabs button[data-sub="report"]')
+        page.wait_for_timeout(900)
         ck.ok(wait_count(page, "#sla-cards .card", 4) == 4, "SLA 报表四张指标卡已渲染")
         sla_txt = page.text_content("#sla-cards") or ""
         ck.ok(("可用率" in sla_txt) and ("事件" in sla_txt), "SLA 卡片含可用率与事件")
         ck.ok(wait_count(page, "#sla-tasks tbody tr") >= 1, "SLA 按任务表有数据行")
         ck.ok(wait_count(page, "#sla-nodes tbody tr") >= 1, "SLA 按节点表有数据行")
+        mttr_txt = (page.text_content("#sla-mttr") or "").strip()
+        mttr_probe = page.evaluate("""async () => {
+            const to = Math.floor(Date.now() / 1000);
+            const d = await (await fetch('/api/report/sla?t_from=' + (to - 86400) + '&t_to=' + to)).json();
+            const seg = s => !!(s && (s.p50_s != null || s.mean_s != null));
+            return { mtta: seg(d.mtta), mttr: seg(d.mttr) };
+        }""")
+        if mttr_probe and (mttr_probe["mtta"] or mttr_probe["mttr"]):
+            ck.ok("MTTA" in mttr_txt and "MTTR" in mttr_txt and "p50" in mttr_txt,
+                  "SLA 新增 MTTA/MTTR 分段行并显示 p50/均值")
+        else:
+            ck.ok("暂未提供" in mttr_txt or "—" in mttr_txt,
+                  f"服务端未提供 MTTA/MTTR → 分段行显示说明（{mttr_txt[:56]}）")
+        shot("alerts")
+
+        # —— 事件与告警子页：告警历史 ——
+        page.click('#al-subtabs button[data-sub="events"]')
+        page.wait_for_timeout(900)
+        ck.ok(wait_count(page, "#al-tbl tbody tr") >= 1, "告警历史有记录")
+        ck.ok("告警" in (page.text_content("#al-tbl") or ""), "告警历史显示标题")
+
+        # —— 通知配置子页：渠道 / 规则 / 维护窗口 / 巡检推送 / 重投队列 ——
+        page.click('#al-subtabs button[data-sub="notify"]')
+        page.wait_for_timeout(900)
         ck.ok(page.locator("#ch-new").count() == 1 and page.locator("#rule-new").count() == 1,
               "渠道/规则有新建入口")
         ck.ok(page.locator("#mw-new").count() == 1, "维护窗口有新建入口")
@@ -331,20 +417,44 @@ def main() -> int:
         ck.ok("可用率" in rule_txt and "静默" in rule_txt, "规则表显示条件与表头")
         mw_txt = page.text_content("#mw-tbl") or ""
         ck.ok(("维护窗口" in mw_txt) or ("没有维护窗口" in mw_txt), "维护窗口表已渲染")
-        ck.ok(wait_count(page, "#al-tbl tbody tr") >= 1, "告警历史有记录")
-        ck.ok("告警" in (page.text_content("#al-tbl") or ""), "告警历史显示标题")
-        shot("alerts")
-
-        # P0/P1 收口：巡检推送 / 重投队列 / 操作审计 / 事件详情弹窗
         ck.ok(page.locator("#dg-enable").count() == 1 and page.locator("#dg-push").count() == 1,
               "巡检报告推送有开关与「立即推送」")
         ck.ok(wait_count(page, "#ob-tbl tbody tr") >= 1, "通知重投队列表已渲染")
         ob_sub = page.text_content("#ob-sub") or ""
         ck.ok(("待重投" in ob_sub) and ("已送达" in ob_sub), "重投队列显示计数")
+        shot("alerts-ops")
+
+        # —— 操作审计子页：审计表 + 筛选/CSV ——
+        page.click('#al-subtabs button[data-sub="audit"]')
+        page.wait_for_timeout(900)
         ck.ok(wait_count(page, "#au-tbl tbody tr") >= 1, "操作审计表有记录")
         au_txt = page.text_content("#au-tbl") or ""
         ck.ok(("任务" in au_txt) or ("告警" in au_txt) or ("节点" in au_txt), "审计表显示中文动作")
-        shot("alerts-ops")
+        shot("alerts-audit")
+
+        # —— 回到事件与告警子页：事件详情弹窗（含新增诊断块）——
+        page.click('#al-subtabs button[data-sub="events"]')
+        page.wait_for_timeout(600)
+        # 事件详情新增块的两分支判定：先看该事件响应里有没有新键（旧后端/旧数据没有 → 空态说明）
+        # 注意折叠视图第一行是「分组行」（onclick=toggleEvGroup），要找含 eventModal 的行
+        ev_new = None
+        row_onclick = page.evaluate(
+            """() => ([...document.querySelectorAll('#sla-incs tbody tr[onclick]')]
+                .map(tr => tr.getAttribute('onclick'))
+                .find(o => o && o.includes('eventModal'))) || ''""")
+        m_iid = re.search(r"eventModal\((\d+)\)", row_onclick)
+        if m_iid:
+            ev_new = page.evaluate("""async (iid) => {
+                const d = await (await fetch('/api/event/' + iid)).json();
+                // 新版服务端空态约定：changes/dns_changes/dying 返回「单条占位行」（action=none
+                // 或带 note），scope_matrix 返回 nodes=[] + verdict.verdict=说明 —— 都不算真实数据
+                const realCh = (d.changes || []).filter(c => c.action !== 'none').length;
+                const realDns = (d.dns_changes || []).filter(c => (c.answers || []).length).length;
+                const sm = d.scope_matrix || {};
+                const realMx = (sm.nodes || []).filter(n => (n.cells || []).length).length;
+                const realDy = (d.dying || []).filter(p => p.cpu != null || p.mem != null).length;
+                return { changes: realCh, dns: realDns, matrix: realMx ? 1 : 0, dying: realDy };
+            }""", m_iid.group(1))
         # 折叠视图下点的是「分组行」（展开/收起），要开详情弹窗先切到平铺
         page.click('#inc-fold button[data-f="0"]')
         page.wait_for_timeout(900)
@@ -354,6 +464,29 @@ def main() -> int:
         ck.ok("时间线" in ev_txt and "影响范围" in ev_txt, "事件详情含时间线与影响范围")
         ck.ok(page.locator("#ev-chart canvas").count() >= 1, "事件详情有指标曲线")
         ck.ok(page.locator("#ev-ack").count() == 1, "事件详情有「确认并保存备注」入口")
+        ck.ok(all(page.locator("#ev-x-" + b).count() == 1 for b in ("changes", "dnsc", "scope")),
+              "事件详情含 同期变更 / DNS 答案变更 / 范围矩阵 三个新折叠块")
+        if ev_new and (ev_new["changes"] or ev_new["dns"] or ev_new["matrix"]):
+            parts = []
+            if ev_new["changes"]:
+                parts.append(page.locator("#ev-x-changes table tbody tr").count() >= 1)
+            if ev_new["dns"]:
+                parts.append(page.locator("#ev-x-dnsc table tbody tr").count() >= 1)
+            if ev_new["matrix"]:
+                parts.append(page.locator("#ev-x-scope table").count() >= 1)
+            ck.ok(bool(parts) and all(parts), f"事件详情新块渲染出数据（{ev_new}）")
+        else:
+            # 旧后端（键缺失）→ 前端自己的空态说明；新后端（占位行）→ 服务端下发的说明文字。
+            # 两者都渲染成 .ev-x-note 空态说明，都算「优雅降级」
+            ck.ok(page.locator("#modal-body .ev-x-note").count() >= 1,
+                  "事件详情新块：无新键/仅空态占位 → 空态说明出现（不算失败）")
+        if ev_new and ev_new["dying"]:
+            ck.ok(page.locator("#ev-x-dying").count() == 1
+                  and page.locator("#ev-dying canvas").count() >= 1,
+                  "离线事件含「离线前资源」迷你图")
+        else:
+            ck.ok(page.locator("#ev-x-dying").count() == 0,
+                  "无离线资源数据 → 「离线前资源」块缺省隐藏")
         shot("event-detail")
         close_modal(page)
 
@@ -385,6 +518,58 @@ def main() -> int:
             shot("incidents-expanded")
         else:
             ck.ok(True, "（本窗口没有多次事件的分组，跳过展开断言）")
+
+        # ---- 深链：/index.html?task=<id>&ts=<ts>（值班卡片「去处理」同一条路径）----
+        # 导航到该任务页 + 时间窗覆盖到 ts + 打开该时刻的单次详情弹窗；进页面后 query 被清理（幂等）
+        print("→ 深链 task+ts")
+        dl = page.evaluate("""async () => {
+            const ts = await (await fetch('/api/tasks')).json();
+            for (const t of ts.filter(x => x.enabled)) {
+                const streams = await (await fetch('/api/query/streams?task_id=' + t.id)).json();
+                // 单次详情弹窗按 openDetail 的自选逻辑取首个流，所以用 streams[0] 的 ok 记录才能精确命中；
+                // 且要求最近 30 分钟内有 ok 记录（原始明细仅短窗保留，太久的 ts 会查不到）
+                const s0 = streams[0];
+                if (s0 && s0.latest_ts && s0.latest_status === 'ok'
+                    && s0.latest_ts * 1000 >= Date.now() - 1800000) {
+                    return { id: t.id, name: t.name, ts: s0.latest_ts };
+                }
+            }
+            return null;
+        }""")
+        if not dl:
+            ck.ok(True, "（无「首个流有 ok 记录」的启用任务，跳过深链断言）")
+        else:
+            # 契约深链格式是 /index.html?task=..&ts=..；boot 只解析 location.search，
+            # 旧版服务端静态层只路由 /（/index.html 404）时退回 /?task=..，两者等价
+            idx_ok = True
+            try:
+                with urllib.request.urlopen(args.base + "/index.html", timeout=10) as r:
+                    idx_ok = r.status < 400
+            except Exception:  # noqa: BLE001 - 404/不可达都退回根路径
+                idx_ok = False
+            dl_path = "/index.html" if idx_ok else "/"
+            print(f"   深链目标：{dl['name']} ts={dl['ts']}（路径 {dl_path}）")
+            page.goto(args.base + dl_path + "?task=" + str(dl["id"]) + "&ts=" + str(dl["ts"]),
+                      wait_until="networkidle")
+            page.wait_for_selector("#page-task:not(.hidden)", timeout=15000)
+            ck.ok(page.evaluate("() => state.task") == dl["id"],
+                  f"深链导航到指定任务页（{dl['name']}）")
+            now_s = int(time.time())
+            rng = page.evaluate("() => state.range")
+            ck.ok(rng >= now_s - dl["ts"],
+                  f"时间窗覆盖到 ts（range={rng}s ≥ 距今 {now_s - dl['ts']}s）")
+            ck.ok("task=" not in page.url, "深链 query 已被清理（幂等，可刷新）")
+            try:
+                page.wait_for_selector("#modal-mask:not(.hidden)", timeout=10000)
+                modal_txt = page.text_content("#modal-body") or ""
+                ck.ok("单次探测详情" in modal_txt, "深链打开该时刻的单次详情弹窗")
+            except Exception:  # noqa: BLE001
+                ck.ok(False, "深链未打开单次详情弹窗")
+            shot("deeplink-task-ts")
+            try:
+                close_modal(page)
+            except Exception:  # noqa: BLE001
+                pass
 
         # 提示条可读性（曾出现白天主题「深底深字」）
         for th in ("dark", "light"):
@@ -594,8 +779,13 @@ def main() -> int:
         for label in ("本机 IP", "出口 IP", "操作系统", "上线时间", "首次注册"):
             ck.ok(label in body, f"节点详情含「{label}」")
         ck.ok("资源时序" in body, "节点详情含资源时序（CPU/内存）区")
-        page.wait_for_timeout(1200)
-        ck.ok(page.locator("#chart-nodemet canvas").count() >= 1, "资源时序图已渲染")
+        # 节点上报过 CPU/内存 → 画资源时序图；从未上报（agent 缺 psutil）→ 显示空态说明，两者都算渲染正确
+        try:
+            page.wait_for_selector("#chart-nodemet canvas", timeout=6000)
+            ck.ok(True, "资源时序图已渲染")
+        except Exception:  # noqa: BLE001 - 超时后确认是否为「无数据空态」
+            ck.ok("暂未上报" in (page.text_content("#modal-body") or ""),
+                  "资源时序区已渲染（该节点无 CPU/内存上报 → 空态说明）")
         shot("node-detail-modal")
         close_modal(page)
 
@@ -625,6 +815,11 @@ def main() -> int:
         page.click('nav a[data-page="tasks"]')
         wait_page(page, "tasks")
         curl_row = page.locator("#task-mgr-tbl tbody tr", has_text="curl-baidu-multi").first
+        try:   # 表格渲染是异步的，等目标行出现再断言（避免固定 sleep 偶发假失败）
+            page.wait_for_selector("#task-mgr-tbl tbody tr:has-text('curl-baidu-multi')",
+                                   timeout=8000)
+        except Exception:  # noqa: BLE001
+            pass
         ck.ok(curl_row.count() > 0, "任务表存在 curl 任务行")
         curl_row.locator("button:has-text('编辑')").click()
         wait_modal(page)
@@ -992,13 +1187,16 @@ def main() -> int:
             for x in http_all[-6:]:
                 print("    " + x)
         # 详情弹窗对「整点格没有原始行」的格子会按需探测更大的窗口（可能 404 后再放大），
-        # 这是设计行为；只有当**全部** 4xx 都属于这类按需查询时，才忽略对应的控制台噪声。
-        only_detail_404 = bool(http_all) and all(
-            x.startswith("404 ") and "/api/detail" in x for x in http_all)
+        # 值班总览对旧版服务端探测 /api/oncall 也会 404 —— 两者都是设计行为；
+        # 只有当**全部** 4xx 都属于这类按需/可选端点时，才忽略对应的控制台噪声。
+        def _designed_404(x: str) -> bool:
+            return x.startswith("404 ") and ("/api/detail" in x or "/api/oncall" in x)
+
+        only_designed_404 = bool(http_all) and all(_designed_404(x) for x in http_all)
         kept = [e for e in console_errors
-                if not (only_detail_404 and "Failed to load resource" in e)]
-        if only_detail_404 and kept != console_errors:
-            print(f"  （已忽略 {len(console_errors) - len(kept)} 条详情端点的按需 404 噪声）")
+                if not (only_designed_404 and "Failed to load resource" in e)]
+        if only_designed_404 and kept != console_errors:
+            print(f"  （已忽略 {len(console_errors) - len(kept)} 条设计内 404 端点的按需噪声）")
         ck.ok(not kept, f"浏览器控制台无报错（{len(kept)} 条）")
         ck.ok(not http_failures, f"无 4xx/5xx 响应（{len(http_failures)} 条）")
 

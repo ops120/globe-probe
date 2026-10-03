@@ -76,11 +76,14 @@ CREATE TABLE IF NOT EXISTS notify_channels(
   last_ok_at INTEGER DEFAULT 0, last_error TEXT DEFAULT '');
 
 -- 告警规则（可用率/延迟/丢包/节点离线；支持静默期与维护窗口豁免）
+-- escalate_minutes：升级链阈值（分钟）。0=关闭；firing 超过该时长仍未确认 → 以【升级】前缀
+-- 重新通知同一渠道，两次升级间隔不小于该时长（≤1440，见 storage.create_rule/update_rule 的钳制）。
 CREATE TABLE IF NOT EXISTS alert_rules(
   id TEXT PRIMARY KEY, name TEXT UNIQUE, metric TEXT, op TEXT, threshold REAL,
   window_seconds INTEGER DEFAULT 300, task_id TEXT DEFAULT '', node_id TEXT DEFAULT '',
   group_id TEXT DEFAULT '', severity TEXT DEFAULT 'warning',
   channel_ids_json TEXT DEFAULT '[]', silence_seconds INTEGER DEFAULT 1800,
+  escalate_minutes INTEGER DEFAULT 0,
   enabled INTEGER DEFAULT 1, created_at INTEGER);
 
 -- 维护窗口：窗口内不评估规则，也不计入可用率（SLA 侧按事件剔除）
@@ -164,6 +167,9 @@ class Storage:
                              ("token_id", "TEXT DEFAULT ''")):
                 if col not in ncols:
                     self.db.execute(f"ALTER TABLE nodes ADD COLUMN {col} {ddl}")
+            acols = [r[1] for r in self.db.execute("PRAGMA table_info(alert_rules)")]
+            if "escalate_minutes" not in acols:
+                self.db.execute("ALTER TABLE alert_rules ADD COLUMN escalate_minutes INTEGER DEFAULT 0")
             self.db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','1')")
             self.db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('config_version','1')")
             self.db.commit()
@@ -513,6 +519,70 @@ class Storage:
                 out.append(d)
             return out
 
+    def task_nodes_latest_status(self, task_id: str, ts: int,
+                                 window_seconds: int = 60, limit: int = 64) -> list[dict]:
+        """范围判定（ONCALL_OPTIMIZATION 第一期）：该任务各节点「最近一轮」探测状态。
+
+        一条 SQL 按 node_id 分组取每节点 latest 一行；status/error_class 等
+        裸列依赖 SQLite 对「唯一 MAX() 聚合」的语义：取值来自命中 MAX(ts) 的那一行。
+        窗口钳制在 10~60 秒（契约：≤60s，旧于该窗口的样本视为「无最近一轮」）；
+        带 LIMIT 防御异常规模的节点数。返回 [{node_id, node_name, status,
+        error_class, error, ts}]，按 node_id 排序。
+        """
+        win = max(10, min(int(window_seconds or 60), 60))
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT pr.node_id AS node_id, n.name AS node_name, pr.status AS status,"
+                " pr.error_class AS error_class, pr.error AS error, MAX(pr.ts) AS ts"
+                " FROM probe_results pr LEFT JOIN nodes n ON n.id = pr.node_id"
+                " WHERE pr.task_id=? AND pr.ts>? AND pr.ts<=?"
+                " GROUP BY pr.node_id ORDER BY pr.node_id LIMIT ?",
+                (task_id, int(ts) - win, int(ts), max(1, int(limit)))).fetchall()
+            return [dict(r) for r in rows]
+
+    def task_last_failure(self, task_id: str, ts: int) -> dict | None:
+        """该目标最近一次失败探测（通知【证据】段的数据源）。
+
+        按 task_id+ts 走 ix_res_task_ts 索引，LIMIT 1；无失败记录返回 None。
+        """
+        with self.lock:
+            r = self.db.execute(
+                "SELECT ts,node_id,type,dns,url,status,error_class,error,dns_server,"
+                "resolved_ip,dns_time_ms,metrics_json FROM probe_results"
+                " WHERE task_id=? AND status='fail' AND ts<=?"
+                " ORDER BY ts DESC LIMIT 1", (task_id, int(ts))).fetchone()
+            if not r:
+                return None
+            d = dict(r)
+            d["metrics"] = json.loads(d.pop("metrics_json") or "{}")
+            return d
+
+    def dns_answer_changes(self, target: str, t_from: int, t_to: int, limit: int = 5) -> list[dict]:
+        """同目标域名的 dns 任务在窗口内的解析值变更（eventview「DNS 变更联动」）。
+
+        只取 metrics_json.changed=1 的行（json_extract 过滤下推，LIMIT 生效），
+        返回 [{ts, answers, prev_answers, task_id, task_name}]，按 ts 倒序。
+        """
+        target = str(target or "").strip()
+        if not target:
+            return []
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT pr.ts AS ts, pr.metrics_json AS metrics_json,"
+                " t.id AS task_id, t.name AS task_name"
+                " FROM probe_results pr JOIN tasks t ON t.id = pr.task_id"
+                " WHERE t.type='dns' AND t.target=? AND pr.ts>=? AND pr.ts<=?"
+                " AND CAST(json_extract(pr.metrics_json,'$.changed') AS INTEGER)=1"
+                " ORDER BY pr.ts DESC LIMIT ?",
+                (target, int(t_from), int(t_to), max(1, int(limit)))).fetchall()
+            out = []
+            for r in rows:
+                m = json.loads(r["metrics_json"] or "{}")
+                out.append({"ts": int(r["ts"] or 0), "answers": m.get("answers") or [],
+                            "prev_answers": m.get("prev_answers") or [],
+                            "task_id": r["task_id"], "task_name": r["task_name"]})
+            return out
+
     # ---------- aggregates ----------
     def agg_recompute(self, bucket: str, b_from: int, b_to: int):
         """按桶区间重算聚合（幂等：先删后插）。bucket 已校验。"""
@@ -635,6 +705,30 @@ class Storage:
             r = self.db.execute(sql, args).fetchone()
             c, o = (r["c"] or 0), (r["o"] or 0)
             return {"count": c, "ok": o, "avail": round(o / c, 4) if c else None}
+
+    def agg_node_cells(self, bucket: str, task_id: str, t_from: int, t_to: int,
+                       limit: int = 2048) -> list[dict]:
+        """任务×节点的分节点桶序列（eventview 范围矩阵用）。
+
+        与 agg_buckets_existing 的区别：不跨节点合并，保留 node_id 维度，
+        供「北京全红、上海全绿」式的目标×节点矩阵取格。GROUP BY 后带 LIMIT。
+        返回 [{ts, node_id, count, ok, fail}]，按 ts、node_id 排序。
+        """
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT ts, node_id, SUM(count) AS count, SUM(ok) AS ok,"
+                " SUM(fail) AS fail FROM aggregates"
+                " WHERE bucket=? AND task_id=? AND ts>=? AND ts<=?"
+                " GROUP BY ts, node_id ORDER BY ts, node_id LIMIT ?",
+                (bucket, task_id, int(t_from), int(t_to), max(1, int(limit)))).fetchall()
+            out = []
+            for r in rows:
+                count = int(r["count"] or 0)
+                ok = int(r["ok"] or 0)
+                fail = int(r["fail"] or 0) if r["fail"] is not None else max(0, count - ok)
+                out.append({"ts": int(r["ts"] or 0), "node_id": r["node_id"],
+                            "count": count, "ok": ok, "fail": max(0, fail)})
+            return out
 
     # ---------- incidents ----------
     def incident_open(self, task_id: str, node_id: str, dns: str, url: str,
@@ -1024,19 +1118,30 @@ class Storage:
                 out.append(d)
             return out
 
+    @staticmethod
+    def _clamp_escalate_minutes(v) -> int:
+        """升级链阈值钳制：默认 0（关闭），上限 1440 分钟（1 天）。"""
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(n, 1440))
+
     def create_rule(self, rid: str, fields: dict, ts: int) -> dict:
         with self.lock:
             try:
                 self.db.execute(
                     "INSERT INTO alert_rules(id,name,metric,op,threshold,window_seconds,task_id,"
-                    "node_id,group_id,severity,channel_ids_json,silence_seconds,enabled,created_at)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "node_id,group_id,severity,channel_ids_json,silence_seconds,escalate_minutes,"
+                    "enabled,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (rid, fields["name"], fields["metric"], fields["op"], float(fields["threshold"]),
                      int(fields.get("window_seconds") or 300), fields.get("task_id") or "",
                      fields.get("node_id") or "", fields.get("group_id") or "",
                      fields.get("severity") or "warning",
                      json.dumps(fields.get("channel_ids") or []),
                      int(fields.get("silence_seconds") or 1800),
+                     self._clamp_escalate_minutes(fields.get("escalate_minutes") or 0),
                      1 if fields.get("enabled", True) else 0, ts))
             except sqlite3.IntegrityError:
                 raise ValueError(f"规则名已存在: {fields.get('name')}")
@@ -1055,6 +1160,9 @@ class Storage:
             for k, col in cols.items():
                 if k in fields and fields[k] is not None:
                     sets.append(f"{col}=?"); vals.append(fields[k])
+            if "escalate_minutes" in fields and fields["escalate_minutes"] is not None:
+                sets.append("escalate_minutes=?")
+                vals.append(self._clamp_escalate_minutes(fields["escalate_minutes"]))
             if "channel_ids" in fields:
                 sets.append("channel_ids_json=?")
                 vals.append(json.dumps(fields["channel_ids"] or []))
@@ -1173,6 +1281,48 @@ class Storage:
             ).fetchone()["c"]
             total = self.db.execute("SELECT COUNT(*) c FROM alerts").fetchone()["c"]
             return {"firing": firing, "total": total}
+
+    # ---------- 升级链（escalate_minutes）----------
+    # 口径：升级行本身 status='firing'（保持 alert_open/alert_last 的「最新行」语义），
+    # 上次升级时间写在该行 detail 里，格式固定为 "escalated_at=<epoch 秒>"。
+
+    def alert_open_keys(self, rule_id: str) -> list[str]:
+        """该规则当前仍处于 firing 的目标 key 列表（升级链扫描用）。"""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT a.key FROM alerts a WHERE a.rule_id=? AND a.status='firing' AND a.id=("
+                " SELECT a2.id FROM alerts a2 WHERE a2.rule_id=a.rule_id AND a2.key=a.key"
+                " ORDER BY a2.ts DESC, a2.id DESC LIMIT 1)", (rule_id,)).fetchall()
+            return sorted({r["key"] for r in rows})
+
+    def alert_episode_start(self, rule_id: str, key: str) -> int:
+        """当前未恢复告警这一轮的起点：最近一次 resolved 之后首条 firing 的 ts。
+
+        无未恢复告警（或已被清保留）返回 0。
+        """
+        with self.lock:
+            r = self.db.execute(
+                "SELECT MIN(ts) AS t0 FROM alerts"
+                " WHERE rule_id=? AND key=? AND status='firing'"
+                " AND ts>COALESCE((SELECT MAX(ts) FROM alerts"
+                "     WHERE rule_id=? AND key=? AND status='resolved'), 0)",
+                (rule_id, key, rule_id, key)).fetchone()
+            return int(r["t0"] or 0) if r and r["t0"] else 0
+
+    def alert_last_escalated(self, rule_id: str, key: str) -> int:
+        """上次升级通知的时间（读升级行 detail 的 escalated_at= 前缀）；从未升级返回 0。"""
+        with self.lock:
+            r = self.db.execute(
+                "SELECT detail FROM alerts WHERE rule_id=? AND key=?"
+                " AND detail LIKE 'escalated_at=%'"
+                " ORDER BY ts DESC, id DESC LIMIT 1", (rule_id, key)).fetchone()
+            if not r:
+                return 0
+            raw = str(r["detail"] or "")
+            try:
+                return int(raw.split("=", 1)[1].split(";", 1)[0])
+            except (IndexError, ValueError):
+                return 0
 
     # ---------- 设置（键值）----------
     def setting_get(self, key: str, default: str = "") -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from .. import __version__
 from ..common.util import now
+from . import jsonlog
 from .api_agent import setup_router as agent_router
 from .api_web import setup_router as web_router
 from .incidents import IncidentMachine
@@ -35,6 +37,11 @@ def create_app(cfg, storage: Storage | None = None):
     state = {"storage": storage, "cfg": cfg, "ingest": ingest,
              "register_token": cfg.agent.get("register_token", "gpm-dev-register")}
 
+    # 结构化日志开关（GPM_LOG_JSON=1，默认关闭保持原有纯文本行为）。这里与 lifespan
+    # 各调一次是故意的：uvicorn.run() 在 create_app 之后才应用自己的日志配置，
+    # lifespan（真正起服务时）再接一次才能覆盖 uvicorn 自身的启动/访问日志。
+    jsonlog.setup()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         stop = asyncio.Event()
@@ -45,6 +52,7 @@ def create_app(cfg, storage: Storage | None = None):
             asyncio.create_task(_alert_loop(state, stop)),
             asyncio.create_task(_retry_loop(state, stop)),
             asyncio.create_task(_digest_loop(state, stop)),
+            asyncio.create_task(_channel_probe_loop(state, stop)),
             asyncio.create_task(_selfcheck_loop(state, stop)),
         ]
         # AnyIO 线程池上限：默认虽是 40，但显式收敛到配置值 —— 曾因线程爆发
@@ -61,6 +69,7 @@ def create_app(cfg, storage: Storage | None = None):
             tasks += sdwatch.spawn_tasks(stop)
         except Exception as e:  # noqa: BLE001 - sd_notify 失败绝不影响主流程
             log.debug("sd_notify 未启用: %s", e)
+        jsonlog.setup()   # 见 create_app 顶部说明：覆盖 uvicorn.run 重置过的 handler
         log.info("服务端启动: %s (db=%s)", cfg.server["listen"], cfg.server["database"])
         yield
         stop.set()
@@ -132,6 +141,87 @@ def create_app(cfg, storage: Storage | None = None):
         return FileResponse(p, headers={"Cache-Control": "no-cache"})
 
     return app
+
+
+# 渠道自检「上次尝试」内存账本（进程级）：失败渠道的 last_ok_at 不会被推进，
+# 靠这里节流，避免每个轮询周期都给挂掉的渠道发探针（也就不会轰炸 IM 群）。
+_SELFCHECK_ATTEMPTS: dict[str, int] = {}
+
+
+def channel_selfcheck_tick(s: Storage, ts: int | None = None, sender=None,
+                           attempts: dict[str, int] | None = None) -> list[dict]:
+    """通知渠道周期自检一轮（ONCALL_OPTIMIZATION.md 第三期 10：渠道静默失效自证）。
+
+    - 周期：settings.channel_selfcheck_minutes（默认 10 分钟，0=关闭该功能）；
+    - 对 enabled 且到期的渠道调 notify.send 发一条静默探针（只调用 notify 的公开
+      send，不改通知模块）；成功/失败都经 storage.channel_touch 落到
+      last_ok_at / last_error（/metrics 的 gpm_notify_channel_up 依据它判断）；
+    - 到期判定：ts - max(last_ok_at, 上次尝试时间) >= 周期——「自检成功过」与
+      「刚尝试过（哪怕失败）」都会让渠道安静一个周期；
+    - 任何异常只记日志/转失败结果，绝不影响主流程。
+
+    返回本轮实际探测的渠道结果 [{channel_id, name, ok, detail}]（测试/排障用）。
+    """
+    ts = int(ts or now())
+    try:
+        minutes = int(s.setting_get("channel_selfcheck_minutes", "10") or 10)
+    except Exception as e:  # noqa: BLE001
+        log.debug("channel_selfcheck_minutes 读取失败，按默认 10: %s", e)
+        minutes = 10
+    if minutes <= 0:
+        return []
+    book = _SELFCHECK_ATTEMPTS if attempts is None else attempts
+    out: list[dict] = []
+    for ch in s.list_channels():
+        if not ch.get("enabled"):
+            continue
+        cid = str(ch.get("id") or "")
+        if not cid:
+            continue
+        last_ok = int(ch.get("last_ok_at") or 0)
+        if ts - max(last_ok, int(book.get(cid, 0))) < minutes * 60:
+            continue
+        book[cid] = ts
+        title = "【自检】通知渠道探活"
+        text = ("gpm 周期自检探针（静默消息）\n- 渠道: " + str(ch.get("name") or cid)
+                + "\n- 时间: " + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+                + "\n收到本条即表示该渠道当前可用。")
+        flat = {"type": ch.get("type"), **(ch.get("config") or {})}
+        try:
+            if sender is not None:
+                ok, msg = sender(flat, title, text)
+            else:
+                from . import notify  # 延迟导入：与 alerting/事件路径同款约束
+                ok, msg = notify.send(flat, title, text)
+            ok, msg = bool(ok), str(msg)
+        except Exception as e:  # noqa: BLE001 - 发送异常按失败处理
+            ok, msg = False, f"{type(e).__name__}: {e}"
+        try:
+            s.channel_touch(cid, ok, "" if ok else msg[:200], ts)
+        except Exception as e:  # noqa: BLE001
+            log.error("渠道自检结果写回失败 (%s): %s", cid, e)
+        out.append({"channel_id": cid, "name": str(ch.get("name") or cid),
+                    "ok": ok, "detail": msg})
+    return out
+
+
+async def _channel_probe_loop(state: dict, stop: asyncio.Event):
+    """渠道自检循环：每 60s 扫一次到期渠道（自检周期由 channel_selfcheck_minutes 控制）。"""
+    s: Storage = state["storage"]
+    interval = int(state["cfg"].server.get("channel_selfcheck_interval", 60) or 60)
+    while not stop.is_set():
+        try:
+            # notify.send 是阻塞网络调用 → 丢线程池，别卡事件循环
+            results = await asyncio.to_thread(channel_selfcheck_tick, s)
+            for r in results:
+                (log.info if r["ok"] else log.warning)(
+                    "渠道自检 %s(%s): %s", r["name"], r["channel_id"], r["detail"])
+        except Exception as e:  # noqa: BLE001 - 自检失败绝不影响主流程
+            log.error("渠道自检失败: %s", e)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _sweep_loop(state: dict, stop: asyncio.Event):

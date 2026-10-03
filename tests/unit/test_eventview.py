@@ -50,15 +50,24 @@ class FakeStorage:
     """只实现 eventview 会用到的只读方法。"""
 
     def __init__(self, incidents=(), tasks=(), nodes=(), aggs=None, buckets=None,
-                 ignore_window=False):
+                 ignore_window=False, audit=(), dns_changes=None, node_cells=None,
+                 heartbeats=None):
         self.incidents = [dict(i) for i in incidents]
         self.tasks = [dict(t) for t in tasks]
         self.nodes = [dict(n) for n in nodes]
         self.aggs = dict(aggs or {})         # (bucket,task,node,dns,url) -> rows
         self.buckets = dict(buckets or {})   # task_id -> 任务级桶
         self.ignore_window = ignore_window
+        self.audit = [dict(a) for a in audit]
+        self.dns_changes = [dict(r) for r in (dns_changes or [])]
+        self.node_cells = [dict(r) for r in (node_cells or [])]
+        self.heartbeats = [dict(h) for h in (heartbeats or [])]
         self.agg_calls = []
         self.bucket_calls = []
+        self.audit_calls = []
+        self.dns_calls = []
+        self.cell_calls = []
+        self.hb_calls = []
 
     def incident_get(self, iid):
         for i in self.incidents:
@@ -95,6 +104,29 @@ class FakeStorage:
         rows = self.buckets.get(task_id, [])
         return [dict(r) for r in rows if t_from <= r["ts"] <= t_to]
 
+    # ---- 定位四块的数据源 ----
+
+    def audit_list(self, limit=100, action="", target="", since=0):
+        self.audit_calls.append((limit, since))
+        rows = [dict(a) for a in self.audit if a.get("ts", 0) >= since]
+        rows.sort(key=lambda a: a.get("ts", 0), reverse=True)
+        return rows[:limit]
+
+    def dns_answer_changes(self, domain, t_from, t_to, limit=5):
+        self.dns_calls.append((domain, t_from, t_to, limit))
+        return [dict(r) for r in self.dns_changes if t_from <= r.get("ts", 0) <= t_to][:limit]
+
+    def agg_node_cells(self, bucket, task_id, t_from, t_to, limit=2048):
+        self.cell_calls.append((bucket, task_id, t_from, t_to))
+        rows = [dict(r) for r in self.node_cells
+                if r.get("ts", 0) and t_from <= r["ts"] <= t_to]
+        return rows[:limit]
+
+    def node_metrics(self, node_id, t_from, t_to, bucket=300):
+        self.hb_calls.append((node_id, t_from, t_to, bucket))
+        return [dict(h) for h in self.heartbeats
+                if h.get("node_id") == node_id and t_from <= h.get("ts", 0) <= t_to]
+
 
 def _stream_key(bucket, task_id="t1", node_id="n1", dns=DNS, url=URL):
     return (bucket, task_id, node_id, dns, url)
@@ -116,7 +148,8 @@ def _full_storage():
 
 def test_detail_structure_and_fields():
     out = eventview.detail(_full_storage(), 1)
-    assert set(out) == {"incident", "stats", "timeline", "blast", "series", "window"}
+    assert set(out) == {"incident", "stats", "timeline", "blast", "series", "window",
+                        "changes", "dns_changes", "scope_matrix"}
     assert set(out["stats"]) == {"samples", "fail", "avail", "rtt_avg", "error_class",
                                  "first_fail_ts", "last_fail_ts"}
     assert set(out["window"]) == {"from", "to", "bucket"}
@@ -464,3 +497,124 @@ def test_detail_never_raises_on_broken_storage():
     assert out["incident"]["node_name"] == "n9"
     assert [e["kind"] for e in out["timeline"]] == ["open", "recover"]
     assert out["window"]["bucket"] == "1m"
+
+
+# ---------------------------------------------------------------- 定位四块
+
+def _audit(ts, who="admin", action="停用任务", target_id="t1", detail=""):
+    return {"ts": ts, "who": who, "action": action, "target": "任务", "target_id": target_id,
+            "status": 200, "ip": "10.0.0.9", "detail": detail}
+
+
+def test_changes_block_window_order_and_limit():
+    audits = [_audit(BASE + 100, action="停用任务", detail="curl-A"),
+              _audit(BASE - 1200, who="ops", action="修改节点", target_id="n2"),
+              _audit(BASE - 999999),                            # 窗口外（太早）
+              _audit(BASE + 999999)] + \
+             [_audit(BASE + 50 + i) for i in range(6)]          # 撑到 8 条上限
+    store = FakeStorage(incidents=[_inc(1, BASE, BASE + 600)],
+                        tasks=[{"id": "t1", "name": "ping-223"}],
+                        nodes=[{"id": "n1", "name": "北京-1"}], audit=audits)
+    out = eventview.detail(store, 1)["changes"]
+    assert len(out) == eventview.CHANGES_LIMIT
+    assert [c["ts"] for c in out] == sorted((c["ts"] for c in out), reverse=True)
+    assert out[0]["ts"] == BASE + 100 and out[0]["who"] == "admin"
+    assert out[0]["action"] == "停用任务" and "t1" in out[0]["detail"] and "curl-A" in out[0]["detail"]
+    assert BASE - 1200 in {c["ts"] for c in out}               # 窗口内 ±30min 都算
+    assert BASE - 999999 not in {c["ts"] for c in out}
+    # 空态：给明确说明文字
+    empty = eventview.detail(FakeStorage(incidents=[_inc(2, BASE, BASE + 600)],
+                                         tasks=[{"id": "t1", "name": "A"}]), 2)["changes"]
+    assert empty[0]["ts"] == 0 and empty[0]["action"] == "none"
+    assert "没有操作审计记录" in empty[0]["detail"]
+
+
+def test_dns_changes_block():
+    task = {"id": "t1", "name": "curl-A", "target": "https://example.com/x",
+            "urls": ["https://example.com/x"]}
+    changes = [{"ts": BASE - 3600, "answers": ["1.1.1.1"], "prev_answers": ["2.2.2.2"],
+                "task_id": "tdns", "task_name": "dns-A"}]
+    store = FakeStorage(incidents=[_inc(1, BASE, BASE + 600)], tasks=[task],
+                        nodes=[{"id": "n1", "name": "北京-1"}], dns_changes=changes)
+    out = eventview.detail(store, 1)["dns_changes"]
+    assert store.dns_calls[0][0] == "example.com"              # 从 target 提取域名
+    assert store.dns_calls[0][1] == BASE + 600 - 86400         # 24h 窗口锚定在事件结束
+    assert out == [{"ts": BASE - 3600, "answers": ["1.1.1.1"], "changed": True}]
+
+    # 无变更 → 空态说明
+    out2 = eventview.detail(FakeStorage(incidents=[_inc(1, BASE, BASE + 600)], tasks=[task]),
+                            1)["dns_changes"]
+    assert out2[0]["changed"] is False and "无变更" in out2[0]["note"]
+    # 目标是 IP → 说明（不经过域名解析）
+    ip_task = {"id": "t2", "name": "ping-ip", "target": "223.5.5.5"}
+    out3 = eventview.detail(FakeStorage(incidents=[_inc(3, BASE, BASE + 600, task_id="t2")],
+                                        tasks=[ip_task]), 3)["dns_changes"]
+    assert "IP 地址" in out3[0]["note"]
+    # 节点侧事件 → 说明
+    node_inc = _inc(4, BASE, BASE + 600, task_id="", node_id="n1", kind="node",
+                    dns="", url="", reason={"event": "offline"})
+    out4 = eventview.detail(FakeStorage(incidents=[node_inc]), 4)["dns_changes"]
+    assert "没有目标域名" in out4[0]["note"]
+
+
+def test_scope_matrix_block():
+    cells = [{"ts": BASE + 60, "node_id": "n1", "count": 6, "ok": 0, "fail": 6},
+             {"ts": BASE + 120, "node_id": "n1", "count": 6, "ok": 0, "fail": 6},
+             {"ts": BASE + 60, "node_id": "n2", "count": 6, "ok": 6, "fail": 0}]
+    store = FakeStorage(incidents=[_inc(1, BASE, BASE + 600)],
+                        tasks=[{"id": "t1", "name": "ping-223", "nodes": []}],
+                        nodes=[{"id": "n1", "name": "北京-1"}, {"id": "n2", "name": "上海-1"},
+                               {"id": "n3", "name": "广州-1"}],
+                        node_cells=cells)
+    out = eventview.detail(store, 1)["scope_matrix"]
+    assert store.cell_calls[0][0] == "1m" and store.cell_calls[0][1] == "t1"
+    # 行按节点名排序（中文名按码点）；有数据的节点在前、无数据节点补在后面
+    assert [n["node_name"] for n in out["nodes"]] == ["上海-1", "北京-1", "广州-1"]
+    assert out["nodes"][1]["cells"] == [{"ts": BASE + 60, "st": "fail"},
+                                        {"ts": BASE + 120, "st": "fail"}]
+    assert out["nodes"][0]["cells"] == [{"ts": BASE + 60, "st": "ok"}]
+    assert out["nodes"][2]["cells"] == []                      # 无数据节点也在矩阵里（灰行）
+    v = out["verdict"]
+    assert v["mode"] == "single_node" and v["failed"] == 1 and v["total"] == 2
+    assert v["verdict"].startswith("仅单节点失败")
+    # 任务限定了 nodes → 未覆盖的节点不进矩阵
+    store2 = FakeStorage(incidents=[_inc(1, BASE, BASE + 600)],
+                         tasks=[{"id": "t1", "name": "A", "nodes": ["n1"]}],
+                         nodes=[{"id": "n1", "name": "北京-1"}, {"id": "n2", "name": "上海-1"}],
+                         node_cells=cells)
+    out2 = eventview.detail(store2, 1)["scope_matrix"]
+    assert [n["node_name"] for n in out2["nodes"]] == ["北京-1"]
+    # 节点侧事件没有目标任务 → 说明
+    node_inc = _inc(9, BASE, BASE + 600, task_id="", node_id="n1", kind="node",
+                    dns="", url="", reason={"event": "offline"})
+    out3 = eventview.detail(FakeStorage(incidents=[node_inc]), 9)["scope_matrix"]
+    assert out3["nodes"] == [] and "没有目标任务" in out3["verdict"]["verdict"]
+    # 窗口内无数据 → verdict 给说明
+    out4 = eventview.detail(FakeStorage(incidents=[_inc(1, BASE, BASE + 600)],
+                                        tasks=[{"id": "t1", "name": "A", "nodes": []}],
+                                        nodes=[{"id": "n1", "name": "N1"}]), 1)["scope_matrix"]
+    assert out4["nodes"][0]["cells"] == []
+    assert "没有该目标的节点探测数据" in out4["verdict"]["verdict"]
+
+
+def test_dying_block_only_for_node_events():
+    hbs = [{"node_id": "n1", "ts": BASE + 240, "cpu": 91.0, "mem": 80.5},
+           {"node_id": "n1", "ts": BASE - 3000, "cpu": 5.0, "mem": 30.0},    # 30 分钟窗口外
+           {"node_id": "n2", "ts": BASE + 240, "cpu": 1.0, "mem": 1.0}]      # 别的节点
+    node_inc = _inc(1, BASE, None, task_id="", node_id="n1", kind="node", dns="", url="",
+                    reason={"event": "offline", "last_heartbeat": BASE + 300})
+    store = FakeStorage(incidents=[node_inc],
+                        tasks=[], nodes=[{"id": "n1", "name": "北京-1"}], heartbeats=hbs)
+    out = eventview.detail(store, 1, ts=BASE + 400)
+    assert store.hb_calls[0][:3] == ("n1", BASE + 300 - 1800, BASE + 300)   # 锚定 last_heartbeat
+    assert out["dying"] == [{"ts": BASE + 240, "cpu": 91.0, "mem": 80.5}]
+    # probe 事件：无 dying 键（契约）
+    probe_store = FakeStorage(incidents=[_inc(1, BASE, BASE + 600)],
+                              tasks=[{"id": "t1", "name": "A"}],
+                              nodes=[{"id": "n1", "name": "N1"}], heartbeats=hbs)
+    assert "dying" not in eventview.detail(probe_store, 1)
+    # 无心跳数据 → 空态说明
+    node_inc2 = _inc(2, BASE, None, task_id="", node_id="n1", kind="node", dns="", url="",
+                     reason={"event": "offline", "last_heartbeat": BASE + 300})
+    empty = eventview.detail(FakeStorage(incidents=[node_inc2]), 2, ts=BASE + 400)["dying"]
+    assert empty[0]["ts"] == 0 and empty[0]["cpu"] is None and "没有该节点的心跳资源" in empty[0]["note"]

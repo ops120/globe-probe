@@ -34,6 +34,18 @@ async function renderSla() {
       + '<td class="num">' + pctText(n.avail) + '</td>'
       + '<td class="num">' + (n.uptime_seconds == null ? '—' : fmtDur(n.uptime_seconds)) + '</td></tr>').join('')
       || '<tr><td colspan="6" style="color:var(--faint)">无节点</td></tr>') + '</tbody>';
+  // MTTA/MTTR 分段行（服务端可选键 mtta/mttr:{p50_s,mean_s}，样本不足时值为 null 并给
+  // mtta_note/mttr_note 中文说明；键整体缺失（旧版服务端）时显示统一说明）
+  const segTxt = s => (s && (s.p50_s != null || s.mean_s != null))
+    ? 'p50 ' + (s.p50_s == null ? '—' : fmtDur(Math.round(s.p50_s)))
+      + ' · 均值 ' + (s.mean_s == null ? '—' : fmtDur(Math.round(s.mean_s)))
+    : '';
+  const mttA = segTxt(d.mtta), mttR = segTxt(d.mttr);
+  const mttNotes = [d.mtta_note, d.mttr_note].filter(Boolean);
+  $('#sla-mttr').innerHTML = '<span class="sub">MTTA / MTTR：</span>'
+    + '<span>【MTTA】' + (mttA || '—') + '</span><span>【MTTR】' + (mttR || '—') + '</span>'
+    + ((mttA || mttR) ? '' : '<span style="color:var(--faint)">'
+      + esc(mttNotes.length ? mttNotes.join('；') : '服务端暂未提供 MTTA/MTTR 统计（旧版服务端）') + '</span>');
   renderSlaIncidents(d);
 }
 
@@ -260,6 +272,8 @@ async function renderAlerts() {
   await renderDigest();
   await renderOutbox();
   await renderAudit();
+  // 值班总览只在子页可见时请求（默认子页）：旧版服务端无 /api/oncall，避免隐藏页也打接口产生 404 噪声
+  if (state.alertsSub === 'oncall') await renderOncall();
 }
 
 $$('#sla-range button').forEach(b => b.onclick = () => {
@@ -398,6 +412,7 @@ window.ruleModal = async (rid) => {
     + '<input type="text" id="r-thr" value="' + (x ? x.threshold : '0.95') + '" placeholder="阈值（可用率/丢包率用 0~1）"></div>'
     + '<div class="form-row"><label>窗口(秒)</label><input type="text" id="r-win" value="' + (x ? x.window_seconds : 300) + '"></div>'
     + '<div class="form-row"><label>静默(秒)</label><input type="text" id="r-sil" value="' + (x ? x.silence_seconds : 1800) + '"></div>'
+    + '<div class="form-row"><label>升级(分)</label><input type="text" id="r-esc" value="' + (x ? (x.escalate_minutes || 0) : 0) + '" title="firing 持续超过该分钟数且未确认 → 以【升级】前缀重发同一渠道；0=关闭（≤1440）"></div>'
     + '<div class="form-row"><label>级别</label><select id="r-sev">'
     + '<option value="warning"' + (x && x.severity === 'warning' ? ' selected' : '') + '>warning</option>'
     + '<option value="critical"' + (x && x.severity === 'critical' ? ' selected' : '') + '>critical</option></select></div>'
@@ -423,6 +438,7 @@ window.ruleModal = async (rid) => {
       name: $('#r-name').value.trim(), metric: $('#r-metric').value, op: $('#r-op').value,
       threshold: Number($('#r-thr').value), window_seconds: parseInt($('#r-win').value) || 300,
       silence_seconds: parseInt($('#r-sil').value) || 0, severity: $('#r-sev').value,
+      escalate_minutes: parseInt($('#r-esc').value) || 0,
       task_id: scope === 'task' ? $('#r-task').value : '',
       node_id: scope === 'node' ? $('#r-node').value : '',
       channel_ids: [...document.querySelectorAll('.r-ch:checked')].map(c => c.value),
@@ -625,6 +641,69 @@ $('#au-export').addEventListener('click', () => {
   toast('已导出 ' + rows.length + ' 条');
 });
 
+/* 事件详情弹窗新增诊断块（服务端可选键，缺失/为空 → 简短空态说明，不报错）：
+ * changes 同期变更 / dns_changes DNS 答案变更 / scope_matrix 范围矩阵（目标×节点小格）/
+ * dying 离线前资源（仅离线事件可能提供，无数据时整块缺省隐藏）。
+ * 新版服务端的空态约定：changes/dns_changes/dying 返回「单条占位行」（action=none 或带 note），
+ * scope_matrix 返回 nodes=[] + verdict.verdict=说明 —— 这里把占位行转成空态说明文字展示。
+ */
+function evExtraBlocks(d) {
+  const noteHtml = t => '<div class="ev-x-note" style="color:var(--faint);font-size:12px;padding:4px 0">' + esc(t || '') + '</div>';
+  const missing = name => noteHtml('服务端暂未提供「' + name + '」数据（旧版服务端或该事件无相关记录）');
+  // 同期变更：真实行 {ts,who,action,detail}；空态占位行 {ts:0,action:"none",detail:说明}
+  const chAll = d.changes || [];
+  const ch = chAll.filter(c => c.action !== 'none');
+  const chNote = (chAll.find(c => c.action === 'none') || {}).detail;
+  const chHtml = ch.length
+    ? '<table class="tbl"><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>详情</th></tr></thead><tbody>'
+      + ch.map(c => '<tr><td style="color:var(--muted)">' + (c.ts ? fmtTS(c.ts) : '—') + '</td>'
+        + '<td>' + esc(c.who || '—') + '</td><td>' + esc(c.action || '') + '</td>'
+        + '<td style="color:var(--muted)">' + esc(c.detail || '') + '</td></tr>').join('')
+      + '</tbody></table>'
+    : (chNote ? noteHtml(chNote) : missing('同期变更'));
+  // DNS 答案变更：真实行 {ts,answers,changed}；空态占位行 {ts:0,answers:[],changed:false,note:说明}
+  const dcAll = d.dns_changes || [];
+  const dc = dcAll.filter(c => (c.answers || []).length || c.changed);
+  const dcNote = (dcAll.find(c => c.note && !(c.answers || []).length) || {}).note;
+  const dcHtml = dc.length
+    ? '<table class="tbl"><thead><tr><th>时间</th><th>答案</th><th>变更</th></tr></thead><tbody>'
+      + dc.map(c => '<tr><td style="color:var(--muted)">' + (c.ts ? fmtTS(c.ts) : '—') + '</td>'
+        + '<td>' + ((c.answers || []).map(a => '<span class="code-inline">' + esc(a) + '</span>').join(' ') || '—') + '</td>'
+        + '<td>' + (c.changed ? '<span class="badge b-warn">变更</span>' : '<span class="badge b-ok">未变更</span>') + '</td></tr>').join('')
+      + '</tbody></table>'
+    : (dcNote ? noteHtml(dcNote) : missing('DNS 答案变更'));
+  // 范围矩阵：verdict 是 diagnose.verdict 字典（结论文字在 .verdict，附 failed/total）；无数据时 nodes=[]
+  const sm = d.scope_matrix;
+  let smHtml;
+  if (sm && ((sm.nodes || []).length || (sm.verdict && sm.verdict.verdict))) {
+    const v = sm.verdict || {};
+    const stColor = st => (st === 'ok' || st === 0) ? 'var(--ok)'
+      : (st === 'fail' || st === 1) ? 'var(--fail)' : 'var(--nodata)';
+    const tss = [...new Set((sm.nodes || []).flatMap(n => (n.cells || []).map(c => c.ts)))].sort((a, b) => a - b);
+    const rows = (sm.nodes || []).map(n => {
+      const map = {}; (n.cells || []).forEach(c => { map[c.ts] = c.st; });
+      return '<tr><td style="color:var(--fg-strong2)">' + esc(n.node_name || '') + '</td>'
+        + tss.map(ts => '<td><span title="' + fmtTS(ts) + '" style="display:inline-block;width:14px;height:14px;border-radius:3px;background:'
+          + stColor(map[ts] ?? 2) + '"></span></td>').join('') + '</tr>';
+    }).join('');
+    smHtml = (tss.length
+      ? '<table class="tbl"><thead><tr><th>节点</th>' + tss.map(ts => '<th>' + fmtHM(ts) + '</th>').join('')
+        + '</tr></thead><tbody>' + rows + '</tbody></table>'
+      : noteHtml(v.verdict || '窗口内没有节点探测数据'))
+      + (v.verdict ? '<div style="margin-top:6px"><span class="badge b-warn">' + esc(v.verdict) + '</span>'
+        + (v.total ? ' <span class="badge b-off">' + (v.failed ?? 0) + '/' + v.total + '</span>' : '')
+        + ' <span style="color:var(--faint);font-size:11px">小格：绿=成功 红=失败 灰=无数据</span></div>' : '');
+  } else smHtml = missing('范围矩阵');
+  // 离线前资源：真实数据行 {ts,cpu,mem}（仅节点侧事件）；占位行（仅 note）/键缺失 → 整块缺省隐藏
+  const dyAll = d.dying || [];
+  const dy = dyAll.filter(p => p.cpu != null || p.mem != null);
+  return '<details class="ev-x" open id="ev-x-changes"><summary>同期变更</summary>' + chHtml + '</details>'
+    + '<details class="ev-x" open id="ev-x-dnsc"><summary>DNS 答案变更</summary>' + dcHtml + '</details>'
+    + '<details class="ev-x" open id="ev-x-scope"><summary>范围矩阵（目标 × 节点）</summary>' + smHtml + '</details>'
+    + (dy.length ? '<details class="ev-x" open id="ev-x-dying"><summary>离线前资源（CPU / 内存）</summary>'
+      + '<div id="ev-dying" style="height:160px"></div></details>' : '');
+}
+
 /* 事件详情：时间线 / 影响范围 / 指标曲线 / 确认备注 */
 window.eventModal = async (iid) => {
   let d;
@@ -657,6 +736,7 @@ window.eventModal = async (iid) => {
     + '<div id="ev-chart" style="height:180px"></div>'
     + '<div class="sub" style="margin:14px 0 4px">时间线</div><div>' + tl + '</div>'
     + '<div class="sub" style="margin:14px 0 4px">影响范围（同期异常）</div>' + blast
+    + evExtraBlocks(d)
     + '<div class="form-row" style="align-items:flex-start;margin-top:14px"><label>确认/备注</label>'
     + '<textarea id="ev-note" rows="2" style="flex:1" placeholder="例如：已通知机房 / 属上游抖动，已知悉">' + esc(inc.note || '') + '</textarea></div>'
     + '<div style="text-align:right;margin-top:12px"><button class="btn ghost" onclick="closeModal()">关闭</button>'
@@ -673,6 +753,25 @@ window.eventModal = async (iid) => {
       lineStyle: { color: C('--accent') }, itemStyle: { color: C('--accent') },
       areaStyle: { color: 'rgba(78,140,230,.08)' } }],
   });
+  // 离线前资源迷你图（dying:[{ts,cpu,mem}]，仅节点侧离线事件且服务端提供时渲染，缺省整块隐藏）
+  const dy = d.dying || [];
+  if (dy.length) {
+    chart('ev-dying', {
+      grid: { left: 40, right: 12, top: 26, bottom: 22 },
+      tooltip: Object.assign({}, TIP, { trigger: 'axis', valueFormatter: v => v + ' %' }),
+      legend: { data: ['CPU', '内存'], textStyle: { color: C('--chart-label'), fontSize: 11 }, itemWidth: 14 },
+      xAxis: Object.assign({}, AXC, { type: 'category', data: dy.map(p => fmtHM(p.ts)) }),
+      yAxis: Object.assign({}, SPLIT, { type: 'value', max: 100, min: 0, name: '%', nameTextStyle: { color: C('--faint') }, axisLabel: AXC.axisLabel }),
+      series: [
+        { name: 'CPU', type: 'line', showSymbol: false, connectNulls: true,
+          data: dy.map(p => p.cpu == null ? null : p.cpu),
+          lineStyle: { color: C('--warn') }, itemStyle: { color: C('--warn') } },
+        { name: '内存', type: 'line', showSymbol: false, connectNulls: true,
+          data: dy.map(p => p.mem == null ? null : p.mem),
+          lineStyle: { color: C('--accent-3') }, itemStyle: { color: C('--accent-3') } },
+      ],
+    });
+  }
   $('#ev-ack').onclick = async () => {
     try {
       await api('/api/event/' + iid + '/ack', { method: 'POST', headers: { 'Content-Type': 'application/json' },
