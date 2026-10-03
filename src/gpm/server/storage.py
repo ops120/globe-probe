@@ -132,6 +132,21 @@ CREATE TABLE IF NOT EXISTS audit_log(
   target_id TEXT DEFAULT '', status INTEGER DEFAULT 0, ip TEXT DEFAULT '', detail TEXT DEFAULT '');
 CREATE INDEX IF NOT EXISTS ix_audit_ts ON audit_log(ts);
 
+-- JEV 故障判断轨迹（第七期 36）：输入载荷 + 各假设判定 + 组合规则，可回放。
+-- 轨迹落盘既是为了「重复判断不重复计费」，更是为了让结论可被质疑、被复核。
+CREATE TABLE IF NOT EXISTS jev_traces(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  incident_id INTEGER NOT NULL,
+  ts INTEGER DEFAULT 0,
+  judge TEXT DEFAULT '',
+  evidence_json TEXT DEFAULT '[]',
+  judgments_json TEXT DEFAULT '[]',
+  rule_json TEXT DEFAULT '{}',
+  verdict_json TEXT DEFAULT '{}',
+  total_ms INTEGER DEFAULT 0,
+  UNIQUE(incident_id));
+CREATE INDEX IF NOT EXISTS ix_jev_inc ON jev_traces(incident_id);
+
 -- 通知重投队列：派发失败的渠道进这里，按退避重试
 CREATE TABLE IF NOT EXISTS notify_outbox(
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, alert_id INTEGER DEFAULT 0,

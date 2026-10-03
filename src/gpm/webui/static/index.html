@@ -124,8 +124,14 @@ table.tbl{width:100%;border-collapse:collapse}
 .oc-meta b{color:var(--muted);font-weight:400}
 .oc-advice{font-size:12px;color:var(--note-fg);background:var(--accent-bg);border:1px solid var(--accent-bd);border-radius:6px;padding:6px 10px;margin:6px 0 8px;line-height:1.6}
 .oc-ops{display:flex;gap:8px;justify-content:flex-end}
-/* 第六期：第三方告警的旁证行（折叠在本地卡里）与独立卡 */
-.oc-ext{margin:6px 0 2px;border-top:1px dashed var(--bd);padding-top:6px}
+/* 第七期：JEV 判断（规则结论与模型判断分栏） */
+.jev{margin-top:4px}
+.jev-row{display:flex;gap:14px;flex-wrap:wrap;margin:6px 0}
+.jev-col{flex:1;min-width:260px;background:var(--bg-2);border:1px solid var(--bd);
+  border-radius:8px;padding:8px 10px;font-size:12px}
+.jev-lbl{color:var(--muted);font-size:11px;margin:8px 0 3px;text-transform:none}
+.jev-code{display:block;background:var(--bg-3);border:1px solid var(--bd);border-radius:6px;
+  padding:4px 8px;font-size:11px;margin-top:5px;word-break:break-all;color:var(--fg-2)}
 .oc-ext-lbl{font-size:12px;color:var(--muted);margin-bottom:3px}
 .oc-extrow{display:flex;align-items:center;gap:10px;font-size:12px;padding:3px 0}
 .oc-extt{color:var(--fg-2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -635,21 +641,21 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=43"></script>
+<script src="/static/echarts.min.js?v=44"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=43"></script>
-<script src="/static/gpm-api.js?v=43"></script>
-<script src="/static/gpm-theme.js?v=43"></script>
-<script src="/static/gpm-charts.js?v=43"></script>
-<script src="/static/gpm-page-overview.js?v=43"></script>
-<script src="/static/gpm-page-task.js?v=43"></script>
-<script src="/static/gpm-page-compare.js?v=43"></script>
-<script src="/static/gpm-page-geo.js?v=43"></script>
-<script src="/static/gpm-page-external.js?v=43"></script>
-<script src="/static/gpm-page-oncall.js?v=43"></script>
-<script src="/static/gpm-page-alerts.js?v=43"></script>
-<script src="/static/gpm-page-nodes.js?v=43"></script>
-<script src="/static/gpm-page-tasks.js?v=43"></script>
-<script src="/static/gpm-boot.js?v=43"></script>
+<script src="/static/gpm-utils.js?v=44"></script>
+<script src="/static/gpm-api.js?v=44"></script>
+<script src="/static/gpm-theme.js?v=44"></script>
+<script src="/static/gpm-charts.js?v=44"></script>
+<script src="/static/gpm-page-overview.js?v=44"></script>
+<script src="/static/gpm-page-task.js?v=44"></script>
+<script src="/static/gpm-page-compare.js?v=44"></script>
+<script src="/static/gpm-page-geo.js?v=44"></script>
+<script src="/static/gpm-page-external.js?v=44"></script>
+<script src="/static/gpm-page-oncall.js?v=44"></script>
+<script src="/static/gpm-page-alerts.js?v=44"></script>
+<script src="/static/gpm-page-nodes.js?v=44"></script>
+<script src="/static/gpm-page-tasks.js?v=44"></script>
+<script src="/static/gpm-boot.js?v=44"></script>
 </body>
 </html>

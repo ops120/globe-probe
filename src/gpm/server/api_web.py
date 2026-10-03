@@ -1730,6 +1730,44 @@ def setup_router(app_state) -> APIRouter:
                 s.setting_set(key, str(body[key] or "").strip()[:200])
         return external_settings()
 
+    # ---------- JEV 故障判断（第七期 31-38）----------
+    @router.get("/jev/{iid}")
+    def jev_get(iid: int):
+        """取已有的 JEV 轨迹（可回放）；没有则 404。"""
+        from . import jev as _jev
+        tr = _jev.load(s, iid)
+        if not tr:
+            raise HTTPException(404, "该事件还没有 JEV 判断轨迹")
+        return tr
+
+    @router.post("/jev/{iid}/run")
+    def jev_run(iid: int, force: bool = False, x_admin_token: str | None = Header(default=None)):
+        """跑一次 JEV 判断（或复用已落盘的轨迹）。
+
+        **前置门禁（第七期 38）**：不可信事件数 != 0 时**直接拒绝**，不调用判据 ——
+        输入若是僵尸/陈旧证据，模型只会把噪声包装成结论。
+        """
+        from . import eventview as _ev
+        from . import jev as _jev
+        if not force:
+            cached = _jev.load(s, iid)
+            if cached:
+                return cached
+        zombies = s.zombie_incidents()
+        n_zombie = sum(len(v) for v in zombies.values())
+        if n_zombie:
+            raise HTTPException(409, "证据不可信：存在 %d 条不可信事件（僵尸/陈旧），"
+                                     "请先让收口逻辑跑完再判断；本轮不调用判据"
+                                     % n_zombie)
+        try:
+            detail = _ev.detail(s, iid)
+        except KeyError:
+            raise HTTPException(404, "事件不存在")
+        trace = _jev.run(detail)
+        trace["incident_id"] = iid
+        _jev.save(s, trace)
+        return trace
+
     @router.get("/external/pull")
     def external_pull_state():
         """拉取适配器状态（第六期 26）。**如实区分**「支持但没配地址」「已配好」「未实现」。"""

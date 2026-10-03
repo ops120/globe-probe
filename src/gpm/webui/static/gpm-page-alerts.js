@@ -749,6 +749,43 @@ function evExtraBlocks(d) {
       + '<div id="ev-dying" style="height:160px"></div></details>' : '');
 }
 
+/* JEV 故障判断（第七期 36/37）：规则结论与模型判断**分栏**显示。
+ * 规则结论来自 diagnose.classify（确定性）；模型判断永远带置信度，
+ * **永不覆盖规则结论**（rule.model_can_override_rule 恒为 false）。
+ * 判据拒绝输出 / 证据不可信时这里明确降级，不假装有判断。 */
+function jevHtml(tr) {
+  if (!tr) return '<div style="color:var(--faint)">该事件还没有 JEV 判断</div>';
+  const v = tr.verdict || {}, rc = v.rule_conclusion || {}, jc = v.jev_conclusion || {};
+  const stateCls = { '一致': 'b-ok', '存在分歧': 'b-warn', '依据薄弱': 'b-off' }[v.state] || 'b-off';
+  const evRows = (tr.evidence || []).map(e => '<div style="font-size:12px;padding:2px 0">'
+    + '<span class="badge b-off">' + esc(e.id) + '</span> '
+    + '<span style="color:var(--fg-2)">' + esc(e.text) + '</span></div>').join('')
+    || '<div style="color:var(--faint)">没有候选证据（证据池由代码切分）</div>';
+  const jRows = (tr.judgments || []).map(j => '<div style="font-size:12px;padding:2px 0">'
+    + '<b>' + esc(j.hypothesis) + '</b> 支持度 <b>' + j.support + '</b> · 置信度 <b>' + j.confidence + '</b>'
+    + '</div>').join('') || '<div style="color:var(--faint)">判据没有给出有效判断</div>';
+  return '<div class="jev">'
+    + '<div class="jev-row"><div class="jev-col"><div class="jev-lbl">规则结论（确定性）</div>'
+    + '<div><span class="badge b-ok">' + esc(rc.layer || '—') + '</span> '
+    + esc(rc.advice || '') + '</div>'
+    + (rc.runbook ? '<code class="jev-code">' + esc(rc.runbook) + '</code>' : '') + '</div>'
+    + '<div class="jev-col"><div class="jev-lbl">模型判断（概率 · 不覆盖规则结论）</div>'
+    + '<div><span class="badge ' + stateCls + '">' + esc(v.state || '—') + '</span> '
+    + (jc.root_cause ? '<b>倾向 ' + esc(jc.root_cause) + '</b>' : '')
+    + '</div><div style="color:var(--faint);font-size:11px">' + esc(v.note || '') + '</div></div></div>'
+    + '<div class="jev-lbl">候选证据（E 编号由代码切分，模型只能引用池内 id）</div>' + evRows
+    + '<div class="jev-lbl">逐假设独立判断（只回 support / confidence）</div>' + jRows
+    + (tr.rejected && tr.rejected.length
+      ? '<div class="jev-lbl" style="color:var(--warn-fg)">被拒判断（幻觉闸）</div>'
+        + tr.rejected.map(x => '<div style="font-size:11px;color:var(--warn-fg)">· ' + esc(x) + '</div>').join('')
+      : '')
+    + '<div style="color:var(--faint);font-size:11px;margin-top:6px">'
+    + '判据：' + esc(tr.judge) + ' · 阈值在代码里（weak=' + (tr.rule || {}).weak_support
+    + '，分歧=' + (tr.rule || {}).disagree_margin + '）· 模型可覆盖规则结论：'
+    + ((tr.rule || {}).model_can_override_rule ? '是' : '否')
+    + ' · 判断耗时 ' + (tr.total_ms || 0) + ' ms</div></div>';
+}
+
 /* 事件详情：时间线 / 影响范围 / 指标曲线 / 确认备注 */
 window.eventModal = async (iid) => {
   let d;
@@ -782,11 +819,39 @@ window.eventModal = async (iid) => {
     + '<div class="sub" style="margin:14px 0 4px">时间线</div><div>' + tl + '</div>'
     + '<div class="sub" style="margin:14px 0 4px">影响范围（同期异常）</div>' + blast
     + evExtraBlocks(d)
+    + '<details class="ev-x" id="ev-x-jev"><summary>JEV 故障判断（规则结论 vs 模型判断）'
+      + ' <button class="btn sm" id="ev-jev-run" style="margin-left:8px">跑一次 JEV 判断</button></summary>'
+      + '<div id="ev-jev-body"><div style="color:var(--faint)">点「跑一次 JEV 判断」开始</div></div></details>'
     + '<div class="form-row" style="align-items:flex-start;margin-top:14px"><label>确认/备注</label>'
     + '<textarea id="ev-note" rows="2" style="flex:1" placeholder="例如：已通知机房 / 属上游抖动，已知悉">' + esc(inc.note || '') + '</textarea></div>'
     + '<div style="text-align:right;margin-top:12px"><button class="btn ghost" onclick="closeModal()">关闭</button>'
     + '<button class="btn" id="ev-ack">确认并保存备注</button></div>';
   $('#modal-mask').classList.remove('hidden');
+  // JEV：先取已有轨迹（可回放）；没有则显示提示。跑一次时若服务端拒绝（证据不可信），
+  // 如实转达前置门禁，不假装有判断。
+  const jevBody = $('#ev-jev-body');
+  const loadJev = async (force) => {
+    if (!jevBody) return;
+    if (!force) {
+      try {
+        const tr = await api('/api/jev/' + iid);
+        jevBody.innerHTML = jevHtml(tr);
+        return;
+      } catch (e) { /* 没有轨迹 → 继续显示提示 */ }
+    }
+    jevBody.innerHTML = '<div style="color:var(--faint)">判断中…</div>';
+    try {
+      const tr = await api('/api/jev/' + iid + '/run' + (force ? '?force=1' : ''),
+                           { method: 'POST' });
+      jevBody.innerHTML = jevHtml(tr);
+    } catch (e) {
+      jevBody.innerHTML = '<div style="color:var(--warn-fg);font-size:12px">'
+        + esc(e.message || String(e)) + '</div>';
+    }
+  };
+  const jevBtn = $('#ev-jev-run');
+  if (jevBtn) jevBtn.onclick = () => loadJev(true);
+  loadJev(false);
   const xs = (d.series || []).map(p => fmtHM(p.ts));
   chart('ev-chart', {
     grid: { left: 46, right: 12, top: 22, bottom: 24 },

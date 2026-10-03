@@ -206,7 +206,7 @@ def main() -> int:
                 if r.method in ("POST", "PUT", "PATCH", "DELETE") else None)
         page.on("response", lambda r: http_failures.append(f"{r.status} {r.url}")
                 if r.status >= 400 and not (r.status == 404
-                                            and ("/api/detail" in r.url or "/api/oncall" in r.url)) else None)
+                                            and ("/api/detail" in r.url or "/api/oncall" in r.url or "/api/jev/" in r.url)) else None)
 
         def shot(name):
             f = out / f"{name}.png"
@@ -661,6 +661,26 @@ def main() -> int:
         ck.ok(page.locator("#ev-ack").count() == 1, "事件详情有「确认并保存备注」入口")
         ck.ok(all(page.locator("#ev-x-" + b).count() == 1 for b in ("changes", "dnsc", "scope")),
               "事件详情含 同期变更 / DNS 答案变更 / 范围矩阵 三个新折叠块")
+        # 第七期 36/37：JEV 判断块 —— 规则结论与模型判断**分栏**，模型永不覆盖规则结论
+        ck.ok(page.locator("#ev-x-jev").count() == 1, "事件详情含 JEV 故障判断块")
+        ck.ok(page.locator("#ev-jev-run").count() == 1, "有「跑一次 JEV 判断」入口")
+        page.click("#ev-jev-run")
+        page.wait_for_timeout(2500)
+        _jev_html = page.evaluate("() => (document.getElementById('ev-jev-body')||{}).innerHTML || ''")
+        ck.ok("规则结论（确定性）" in _jev_html, "JEV 显示规则结论（确定性）")
+        ck.ok("模型判断（概率 · 不覆盖规则结论）" in _jev_html,
+              "JEV 显示模型判断，且标注不覆盖规则结论")
+        ck.ok("候选证据" in _jev_html and "E1" in _jev_html,
+              "JEV 显示代码切分的候选证据（E 编号）")
+        ck.ok("逐假设独立判断" in _jev_html, "JEV 显示逐假设独立判断（support/confidence）")
+        ck.ok("模型可覆盖规则结论：否" in _jev_html,
+              "轨迹明确标注模型不可覆盖规则结论")
+        _jev_api = page.evaluate(
+            "async (iid) => await (await fetch('/api/jev/' + iid)).json()", m_iid.group(1))
+        ck.ok(_jev_api["rule"]["model_can_override_rule"] is False,
+              "接口契约：模型不可覆盖规则结论")
+        ck.ok(_jev_api["verdict"]["state"] in ("一致", "存在分歧", "依据薄弱"),
+              "一致性三态之一（%s）" % _jev_api["verdict"]["state"])
         if ev_new and (ev_new["changes"] or ev_new["dns"] or ev_new["matrix"]):
             parts = []
             if ev_new["changes"]:
@@ -1394,7 +1414,7 @@ def main() -> int:
         # 值班总览对旧版服务端探测 /api/oncall 也会 404 —— 两者都是设计行为；
         # 只有当**全部** 4xx 都属于这类按需/可选端点时，才忽略对应的控制台噪声。
         def _designed_404(x: str) -> bool:
-            return x.startswith("404 ") and ("/api/detail" in x or "/api/oncall" in x)
+            return x.startswith("404 ") and ("/api/detail" in x or "/api/oncall" in x or "/api/jev/" in x)
 
         only_designed_404 = bool(http_all) and all(_designed_404(x) for x in http_all)
         kept = [e for e in console_errors
