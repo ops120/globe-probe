@@ -34,6 +34,64 @@ DEFAULTS = {
         "notify_retry_interval": 60,  # 通知失败重投的扫描周期（秒）
         "digest_check_interval": 300, # 巡检报告定时推送的检查周期（秒）
     },
+    # —— 第三方告警 webhook 接收（第六期）——
+    "hook": {
+        # 单次 payload 上限；超出返回 413
+        "max_body_bytes": 262144,        # 256 KB
+        # 每来源每分钟接收上限；超出返回 429
+        "rate_limit_per_min": 120,
+        # 关联到本地事件的时间窗：±多少秒 = window * 2
+        "link_window_seconds": 1800,     # 30 分钟
+        # 名字参与匹配的最短长度（节点 n1=1 字符不应匹配会命中 n10）
+        "link_min_name_len": 2,
+    },
+    # —— 第三方告警拉取（第六期，26）——
+    "pull": {
+        "default_interval_seconds": 300,   # 默认轮询周期
+        "backoff_base_seconds": 300,       # 失败退避基数
+        "backoff_max_seconds": 3600,       # 退避上限
+    },
+    # —— JEV 故障判断阈值（第七期）——
+    "jev": {
+        "min_support": 0.5,                # 单假设被判为「可能」的下限
+        "weak_support": 0.5,               # 最高支持度低于此 → 依据薄弱
+        "disagree_margin": 0.15,            # 最高与次高差距小于此 → 存在分歧
+        "min_confidence": 0.3,              # 置信度下限
+    },
+    # —— 事件详情/聚合页（第二期/第四期）——
+    "view": {
+        "changes_pad_seconds": 1800,         # 事件窗口 ±X 分钟的同期变更
+        "changes_per_card": 3,               # 卡片上只留 N 条
+        "changes_limit_detail": 8,           # 弹窗里最多展示 N 条
+        "changes_scan_limit": 64,            # 查变更的扫描上限
+        "node_suspect_min_tasks": 3,         # 「节点上 X 个任务同时失败」横切提示阈值
+        "dns_changes_window_seconds": 86400,
+        "dns_changes_limit": 5,
+        "matrix_max_cells": 60,              # 范围矩阵上限
+        "matrix_max_nodes": 32,
+        "blast_scan_limit": 200,
+        "dying_window_seconds": 1800,
+        "dying_max_points": 60,
+        "eventview_pad_seconds": 600,
+        "bucket_1m_max_seconds": 10800,     # 3 小时
+        "bucket_5m_max_seconds": 259200,    # 3 天
+    },
+    # —— 通知/告警评估（第三期）——
+    "alert": {
+        "scope_window_seconds": 60,
+        "escalate_max_minutes": 1440,        # 升级冷却
+        "retry_backoff_seconds": [60, 300, 900],
+        "notify_default_timeout_seconds": 8.0,
+        "notify_default_smtp_port": 587,
+    },
+    # —— 报表（第三期/第六期）——
+    "report": {
+        "flap_min_count": 3,
+        "flap_window_seconds": 1800,
+        "metrics_max_output_bytes": 204800,  # 200 KB
+        "prober_curl_scan_limit_bytes": 524288,  # 关键字/正则只扫前 512 KB
+        "agent_dns_memory_max": 500,
+    },
     "agent": {
         "server_url": "http://127.0.0.1:8620",
         "register_token": "gpm-dev-register",
@@ -110,6 +168,56 @@ class Config:
     @property
     def logging(self) -> dict:
         return self.raw["logging"]
+
+    # —— 按模块拆出来的配置块；调用方读 cfg.hook.xxx / cfg.jev.xxx 等 ——
+    @property
+    def hook(self) -> dict:
+        return self.raw["hook"]
+
+    @property
+    def pull(self) -> dict:
+        return self.raw["pull"]
+
+    @property
+    def jev(self) -> dict:
+        return self.raw["jev"]
+
+    @property
+    def view(self) -> dict:
+        return self.raw["view"]
+
+    @property
+    def alert(self) -> dict:
+        return self.raw["alert"]
+
+    @property
+    def report(self) -> dict:
+        return self.raw["report"]
+
+    # —— 以下是按模块拆出来的配置块；调用方读 cfg.hook.xxx / cfg.jev.xxx 等 ——
+    @property
+    def hook(self) -> dict:
+        return self.raw["hook"]
+
+    @property
+    def pull(self) -> dict:
+        return self.raw["pull"]
+
+    @property
+    def jev(self) -> dict:
+        return self.raw["jev"]
+
+    @property
+    def view(self) -> dict:
+        return self.raw["view"]
+
+    @property
+    def alert(self) -> dict:
+        return self.raw["alert"]
+
+    @property
+    def report(self) -> dict:
+        return self.raw["report"]
 
 
 def load_config(path: str | None) -> Config:
