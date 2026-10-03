@@ -592,8 +592,31 @@ def setup_router(app_state) -> APIRouter:
         nodes = {n["id"]: n for n in s.list_nodes()}
         tasks = {t["id"]: t for t in s.list_tasks()}
         rank = {"fail": 2, "skipped": 1, "ok": 0}   # 同一轮内多条流：最差状态代表节点
+        incs = s.list_incidents(max(1, min(limit, 200)), open_only=True)
+        # 范围判定的输入按「任务」去重后一次取齐：每流窗口内最新一行（单条窗口化
+        # SQL，替代逐事件 result_streams 的 N+1——线上 11 条 open 事件曾耗时 3.7s）。
+        # 语义与旧实现等价：某流全时间最新一条落在窗内 → 同一行；落在窗外 → 两版都排除。
+        tids = list({str(i.get("task_id") or "") for i in incs} - {""})
+        recent: dict[str, dict[str, tuple[int, str]]] = {t: {} for t in tids}
+        if tids:
+            ph = ",".join("?" for _ in tids)
+            with s.lock:
+                rows = s.db.execute(
+                    "SELECT task_id,node_id,ts,status FROM ("
+                    " SELECT task_id,node_id,ts,status,"
+                    " ROW_NUMBER() OVER (PARTITION BY task_id,node_id,dns,url"
+                    "                     ORDER BY ts DESC) rn"
+                    " FROM probe_results WHERE task_id IN (" + ph + ") AND ts BETWEEN ? AND ?)"
+                    " WHERE rn=1", (*tids, t_now - window, t_now)).fetchall()
+            for r in rows:
+                by_node = recent.setdefault(str(r["task_id"]), {})
+                nid_key = str(r["node_id"])
+                cur = by_node.get(nid_key)
+                if cur is None or int(r["ts"]) > cur[0] or (
+                        int(r["ts"]) == cur[0] and rank.get(str(r["status"]), -1) > rank.get(cur[1], -1)):
+                    by_node[nid_key] = (int(r["ts"]), str(r["status"]))
         items = []
-        for inc in s.list_incidents(max(1, min(limit, 200)), open_only=True):
+        for inc in incs:
             tid = str(inc.get("task_id") or "")
             nid = str(inc.get("node_id") or "")
             task = tasks.get(tid) or {}
@@ -604,18 +627,8 @@ def setup_router(app_state) -> APIRouter:
             # 范围判定输入：该任务各节点最近一轮（≤10 分钟窗）探测状态。
             # 同节点多条流（多 URL/多线路）取时间戳最新的一轮，轮内按最差状态合并
             # （一个 URL 挂即该节点本轮有失败，与事件的产生口径一致）。
-            per_node: dict[str, tuple[int, str]] = {}   # node_id -> (轮 ts, status)
-            for st in s.result_streams(tid):
-                st_ts = int(st.get("latest_ts") or 0)
-                status = str(st.get("latest_status") or "unknown")
-                if st_ts < t_now - window:
-                    continue
-                cur = per_node.get(st["node_id"])
-                if cur is None or st_ts > cur[0] or (
-                        st_ts == cur[0] and rank.get(status, -1) > rank.get(cur[1], -1)):
-                    per_node[st["node_id"]] = (st_ts, status)
             states = [{"node_id": k, "node_name": (nodes.get(k) or {}).get("name") or k,
-                       "status": v[1]} for k, v in per_node.items()]
+                       "status": v[1]} for k, v in recent.get(tid, {}).items()]
             last = s.latest_per_stream(tid, nid, inc.get("dns") or "",
                                        inc.get("url") or "", 1)
             items.append({

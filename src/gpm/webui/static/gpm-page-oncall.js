@@ -64,25 +64,29 @@ function renderOncallUnsupported(msg) {
 
 function oncallCard(it) {
   const scope = it.scope || {};
-  const target = it.url || it.dns || '';
+  const isNodeEv = !it.task_id;                       // 节点离线/节点事件（无目标任务）
+  const target = isNodeEv ? '' : (it.url || it.dns || '');
   const dur = it.duration_s != null ? fmtDur(Math.round(it.duration_s))
     : (it.started_at ? fmtDur(Math.max(0, Math.round(Date.now() / 1000 - it.started_at))) : '—');
   const lastSt = it.last_status === 'ok' ? '<span class="badge b-ok">成功</span>'
     : it.last_status ? '<span class="badge b-fail">' + esc(it.last_status) + '</span>' : '—';
-  const advice = [it.advice, scope.advice].filter(Boolean).join('；');
+  const advice = [it.advice, isNodeEv ? '' : scope.advice].filter(Boolean).join('；');
+  const scopeLine = (!isNodeEv && scope.total != null)
+    ? ('<span><b>范围</b> ' + esc(scope.verdict || (scope.total === 0 ? '无近期样本（任务停用或节点离线）' : '—'))
+      + (scope.total > 0 ? ' <span class="badge b-off">' + (scope.failed ?? '?') + '/' + scope.total + '</span>' : '')
+      + '</span>')
+    : '';
   return '<div class="oncall-card' + (it.acked ? ' acked' : '') + '" data-incident="' + esc(it.incident_id ?? '') + '">'
     + '<div class="oc-head">'
-    + '<span class="badge ' + (TYPE_BADGE[it.type] || 'b-off') + '">' + esc((it.type || '').toUpperCase()) + '</span>'
-    + '<b class="oc-title">' + esc(it.task_name || it.task_id || '未命名任务') + '</b>'
+    + '<span class="badge ' + (TYPE_BADGE[it.type] || 'b-off') + '">' + esc((it.type || 'NODE').toUpperCase()) + '</span>'
+    + '<b class="oc-title">' + esc(isNodeEv ? ((it.node_name || it.node_id || '节点') + ' · 节点事件') : (it.task_name || it.task_id || '未命名任务')) + '</b>'
     + (target ? '<span class="oc-target">' + esc(target) + '</span>' : '')
     + (it.error_class ? '<span class="badge b-fail">' + esc(it.error_class) + '</span>' : '')
     + (it.acked ? '<span class="badge b-off" title="已有人确认知晓">已确认</span>' : '')
     + '</div>'
     + '<div class="oc-meta">'
     + '<span><b>层面</b> ' + esc(it.layer || '—') + '</span>'
-    + '<span><b>范围</b> ' + esc(scope.verdict || '—')
-    + (scope.total != null ? ' <span class="badge b-off">' + (scope.failed ?? '?') + '/' + scope.total + '</span>' : '')
-    + '</span>'
+    + scopeLine
     + '<span><b>已持续</b> ' + esc(dur) + '</span>'
     + '<span><b>最近</b> ' + lastSt + ' ' + (it.last_ts ? '<span style="color:var(--muted)">' + fmtTS(it.last_ts) + '</span>' : '') + '</span>'
     + '</div>'
