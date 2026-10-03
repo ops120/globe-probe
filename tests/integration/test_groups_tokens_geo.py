@@ -291,13 +291,16 @@ def test_compare_prev_mode_and_offset_alignment(tmp_path):
 
     now = int(time.time())
     cur_start = now // 3600 * 3600
+    # 数据一律落在**已完结的小时**上（对比窗口只取已完结小时：当前小时尚未聚合完，
+    # 纳入会造成「末格恒空 + 与对比期的完整小时不可比」。此处从 cur_start-1h 起算。）
+    end = cur_start - 3600
     res = []
-    for h in range(4):                       # 最近 4 小时：全成功，rtt=10ms
-        base = cur_start - h * 3600 + 60
+    for h in range(4):                       # 最近 4 个已完结小时：全成功，rtt=10ms
+        base = end - h * 3600 + 60
         res += [{"ts": base + i * 60, "task_id": tid, "type": "ping", "status": "ok",
                  "metrics": {"rtt_avg": 10.0, "loss_rate": 0.0}} for i in range(10)]
     for h in range(4, 8):                    # 再往前 4 小时：一半失败，成功时 rtt=20ms
-        base = cur_start - h * 3600 + 60
+        base = end - h * 3600 + 60
         res += [{"ts": base + i * 60, "task_id": tid, "type": "ping",
                  "status": "ok" if i % 2 else "fail",
                  "error_class": "" if i % 2 else "timeout",
@@ -330,7 +333,7 @@ def test_compare_prev_mode_and_offset_alignment(tmp_path):
     # 日历型模式在历史不足时如实返回「无对比数据」
     yd = client.get(f"/api/compare?task_id={tid}&mode=yesterday&metric=avail").json()
     assert yd["has_other"] is False and yd["history_hours"] < 24
-    assert yd["today_label"] == "最近24小时"
+    assert yd["today_label"] == "最近 24 小时"
 
 
 # ---------------- 自定义「IP 段 → 位置」 ----------------

@@ -70,8 +70,18 @@ function fillTaskSelects() {
   if (ts2 && state.task) ts2.innerHTML = opts, ts2.value = state.task;
 }
 $$('.sidebar nav a').forEach(a => a.addEventListener('click', () => show(a.dataset.page)));
-$('#task-select').addEventListener('change', e => { state.task = e.target.value; state.dns = ''; state.url = ''; state.node = ''; renderTask(); });
-$('#cmp-task').addEventListener('change', () => renderCompare());
+/* 两个页面的任务下拉共用 state.task：任一页切换都要**同步另一个下拉并重画**。
+ * 原实现里 #cmp-task 的 change 只调 renderCompare()、从不更新 state.task ——
+ * 于是对比页选任务不生效，图表永远画的是任务详情页最后选中的那个任务（下拉形同装饰）。
+ * 这在浏览器实测里暴露：下拉显示 curl-baidu-multi，state.task 却仍是上一个任务。 */
+function pickTask(id, rerender) {
+  state.task = id;
+  state.dns = ''; state.url = ''; state.node = '';   // 换任务时清掉筛选，与任务页口径一致
+  fillTaskSelects();                                  // 两个下拉保持一致
+  rerender();
+}
+$('#task-select').addEventListener('change', e => pickTask(e.target.value, renderTask));
+$('#cmp-task').addEventListener('change', e => pickTask(e.target.value, renderCompare));
 $('#mtr-reset').addEventListener('click', () => renderTask());   // 清零点选轮次 → 回到最新
 $$('#task-range button').forEach(b => b.onclick = () => {
   $$('#task-range button').forEach(x => x.classList.remove('active')); b.classList.add('active');

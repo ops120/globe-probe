@@ -685,7 +685,19 @@ def setup_router(app_state) -> APIRouter:
     @router.get("/compare")
     def compare(task_id: str, mode: str = "yesterday", metric: str = "rtt",
                 window_hours: int = 0, node_id: str = "", dns: str = "", url: str = ""):
-        """按小时对比：最近24小时 vs 昨日/上周同日/30天前。走 1h 聚合表。
+        """按小时对比：最近整 24 小时 vs 上一周期（环比/同比）。走 1h 聚合表。
+
+        口径（2026-10-03 复核修正，见 .docs/ONCALL_OPTIMIZATION_2.md §1.4 / 第五期）：
+
+        1. 窗口一律对齐到**已完结的小时**。聚合只写到最后一个完结桶（app.py 的
+           complete_to），当前小时桶永不写入；原实现把当前小时也放进轴里，于是
+           「最近24小时」最后一格恒为 null，而对比线在同一轴位是完整小时 ——
+           等于拿空窗比整窗，末点天然不对称。
+        2. 环比 / 同比分开：prev/yesterday/lastweek/lastmonth 都是**环比**（相邻周期），
+           新增 lastyear 为**同比**（去年同期）。1h 聚合保留 730 天，同比有数据基础。
+        3. 同时返回**时段级汇总**（加权可用率/延迟/丢包 + Δ）与**覆盖度**（两边各多少格
+           有效、多少格可重叠）。原实现只给两条曲线：24 格里只有 4 格可比时，页面上
+           完全看不出来，这正是「环比数据不对」的观感来源。
 
         metric 决定比什么（历史缺陷：只比 rtt_avg，curl/mtr 该列为 NULL → 整页空白）：
           rtt   延迟均值（ms，仅 ping 类有）
@@ -693,13 +705,20 @@ def setup_router(app_state) -> APIRouter:
           loss  丢包率（%，ping 类有）
         """
         t_now = now()
-        offsets = {"yesterday": 86400, "lastweek": 7 * 86400, "lastmonth": 30 * 86400}
+        offsets = {"yesterday": 86400, "lastweek": 7 * 86400,
+                   "lastmonth": 30 * 86400, "lastyear": 365 * 86400}
         off = offsets.get(mode, 86400)
-        labels = {"yesterday": "昨日", "lastweek": "上周同日", "lastmonth": "30天前"}
+        labels = {"yesterday": "昨日同期", "lastweek": "上周同日",
+                  "lastmonth": "30 天前同期", "lastyear": "去年同期"}
+        # 同比 = 与去年同期比；环比 = 与相邻周期比。前端按这个字段分组标注，
+        # 避免再出现「把上周同日标成同比」的口径错误。
+        kinds = {"prev": "环比", "yesterday": "环比", "lastweek": "环比",
+                 "lastmonth": "环比", "lastyear": "同比"}
         metrics = {"rtt": ("rtt_avg", "ms", 1.0),
                    "avail": ("avail_rate", "%", 100.0),
                    "loss": ("loss_rate", "%", 100.0)}
         col, unit, scale = metrics.get(metric, metrics["rtt"])
+        n = max(1, min(int(window_hours) if window_hours else 24, 24 * 31))
 
         with s.lock:
             hmin = s.db.execute("SELECT MIN(ts) mn FROM probe_results").fetchone()["mn"] or 0
@@ -707,63 +726,131 @@ def setup_router(app_state) -> APIRouter:
         # → 「自动切前一时段」永不触发、原因文案走错分支（CI 实例实测发现的 bug）
         history_hours = round((t_now - hmin) / 3600, 2) if hmin else 0
 
-        def hourly(start: int, span: int) -> dict:
-            end = start + span
+        def buckets(t_from: int, t_to: int) -> dict:
+            """闭区间 [t_from, t_to] 内的 1h 桶，按 ts 索引（走节点维度时自动收窄）。"""
+            if t_to < t_from:
+                return {}
             if node_id:
-                rows = s.agg_read("1h", task_id, node_id, dns, url, start, end)
+                rows = s.agg_read("1h", task_id, node_id, dns, url, t_from, t_to)
             else:
-                rows = s.agg_buckets_existing("1h", task_id, start, end)
-            return {r["ts"]: r for r in rows}
+                rows = s.agg_buckets_existing("1h", task_id, t_from, t_to)
+            return {int(r["ts"]): r for r in rows}
 
-        cur_start = t_now // 3600 * 3600
+        def win(nb: int) -> list[int]:
+            """最近 nb 个**已完结**小时的轴：末格是「上一个整点」，不含当前小时。"""
+            end = (t_now // 3600) * 3600 - 3600
+            return list(range(end - (nb - 1) * 3600, end + 3600, 3600))
+
         if mode == "prev":
-            # 「前一时段」：窗口自适应 —— 从上限（默认 历史/2、最多 12h）往下找第一个
-            # 「两个时段都有数据」的窗口，保证刚上线的平台也能看到一条真正有两根线的对比
-            limit = int(window_hours) if window_hours else max(1, min(12, int(history_hours // 2) or 1))
-            picked = None
-            for w in range(limit, 0, -1):
-                span = w * 3600
-                hrs = list(range(cur_start - (w - 1) * 3600, cur_start + 3600, 3600))
-                t_b = hourly(cur_start - (w - 1) * 3600, span)
-                o_b = hourly(cur_start - (w - 1) * 3600 - span, span)
-                if sum(1 for h in hrs if h in t_b) and sum(1 for h in hrs if h in o_b):
-                    picked = (w, hrs, t_b, o_b)
+            # 「前一时段」：窗口自适应，保证刚上线的平台也能看到两条真正**可比**的曲线。
+            # 选择条件原先只是「两边各自有数据」，实测会挑出 24h 窗口却只有 4 格可比的
+            # 组合（两条线各占半轴）——那正是「环比数据不对」的观感来源。现在要求
+            # **至少一半的格两边都有数据**，从大到小取第一个满足的窗口；实在没有就退到
+            # 「有可比格的最大窗口」，再没有才退回上限窗口（此时前端会说明原因）。
+            pick_max = max(1, min(24, int(window_hours) if window_hours
+                                  else max(1, int(history_hours // 2) or 1)))
+            chosen = None
+            best = None                  # (overlap, w, hrs, t_b, o_b)：回退时取重叠最多的
+            for w in range(pick_max, 0, -1):
+                hrs = win(w)
+                t_b = buckets(hrs[0], hrs[-1])
+                o_b = buckets(hrs[0] - w * 3600, hrs[-1] - w * 3600)
+                # 注意：o_b 的键是**偏移后**的时间戳，必须用 h-w*3600 去查。
+                # 这与下游 series() 的取数口径是同一条：这里写错的话每个窗口都算出 0 重叠，
+                # 于是永远退到「上限窗口」——修复前那个「24h 窗口只有 4 格可比」的病就会复发。
+                ov = sum(1 for h in hrs if h in t_b and (h - w * 3600) in o_b)
+                if ov == 0:
+                    continue
+                if best is None or ov > best[0]:
+                    best = (ov, w, hrs, t_b, o_b)
+                if ov * 2 >= w:          # 至少一半的格真正可比
+                    chosen = (w, hrs, t_b, o_b)
                     break
-            if picked is None:
-                w = limit
-                span = w * 3600
-                hrs = list(range(cur_start - (w - 1) * 3600, cur_start + 3600, 3600))
-                picked = (w, hrs, hourly(cur_start - (w - 1) * 3600, span),
-                          hourly(cur_start - (w - 1) * 3600 - span, span))
-            w, hours, today, other = picked
+            if chosen is None:
+                if best is not None:     # 回退到「重叠最多」的窗口，而不是最大的窗口
+                    chosen = (best[1], best[2], best[3], best[4])
+                else:
+                    hrs = win(pick_max)
+                    chosen = (pick_max, hrs, buckets(hrs[0], hrs[-1]),
+                              buckets(hrs[0] - pick_max * 3600, hrs[-1] - pick_max * 3600))
+            w, hours, today, other = chosen
             label, today_label, used_window = f"前 {w} 小时", f"最近 {w} 小时", w
+            shift = w * 3600
         else:
-            hours = list(range(cur_start - 23 * 3600, cur_start + 3600, 3600))
-            today = hourly(cur_start - 23 * 3600, 86400)
-            other = hourly(cur_start - off - 23 * 3600, 86400)
-            label, today_label, used_window = labels.get(mode, mode), "最近24小时", 24
+            hours = win(n)
+            used_window = n
+            today = buckets(hours[0], hours[-1])
+            other = buckets(hours[0] - off, hours[-1] - off)
+            label = labels.get(mode, mode)
+            today_label = f"最近 {n} 小时"
+            shift = off
 
-        def series(by_h, offset: int = 0):
-            """把「对比时段」的桶按偏移对齐回当前时段的时间轴。
+        def series(by_h: dict, offset: int = 0) -> tuple[list, list]:
+            """把对比时段的桶对齐回当前时段的时间轴，并带回每格样本数。
 
-            历史 bug：对比桶是按 start-off 取出来的（键是偏移后的时间戳），
-            却仍用未偏移的 hours 去查 → 对比线恒为空，三种模式都只剩同一条当前曲线。
+            历史 bug：对比桶是按 start-off 取出来的（键是偏移后的时间戳），却仍用未偏移
+            的 hours 去查 → 对比线恒为空，三种模式都只剩同一条当前曲线。
+            样本数一并返回：让「这格只有 2 个样本」在界面上可见，而不是画一条同样粗的线。
             """
-            out = []
+            out, counts = [], []
             for h in hours:
                 r = by_h.get(h - offset)
-                v = r[col] if r is not None else None
+                v = r.get(col) if r else None
                 out.append(round(v * scale, 2) if v is not None else None)
-            return out
+                counts.append(int(r["count"] or 0) if r else 0)
+            return out, counts
 
-        shift = span if mode == "prev" else off
-        today_s, other_s = series(today), series(other, shift)
+        def period_total(by_h: dict, offset: int = 0) -> dict:
+            """时段级汇总：可用率按 Σok/Σcount（加权），延迟/丢包按样本数加权。"""
+            c = o = 0
+            rtt_num = rtt_den = 0.0
+            loss_num = loss_den = 0.0
+            for h in hours:
+                r = by_h.get(h - offset)
+                if not r:
+                    continue
+                cnt = int(r["count"] or 0)
+                c += cnt
+                o += int(r["ok"] or 0)
+                if r.get("rtt_avg") is not None and cnt:
+                    rtt_num += float(r["rtt_avg"]) * cnt
+                    rtt_den += cnt
+                if r.get("loss_rate") is not None and cnt:
+                    loss_num += float(r["loss_rate"]) * cnt
+                    loss_den += cnt
+            return {"count": c, "ok": o,
+                    "avail": round(100.0 * o / c, 3) if c else None,
+                    "rtt": round(rtt_num / rtt_den, 2) if rtt_den else None,
+                    "loss": round(100.0 * loss_num / loss_den, 3) if loss_den else None}
+
+        today_s, today_c = series(today)
+        other_s, other_c = series(other, shift)
+        t_sum = period_total(today)
+        o_sum = period_total(other, shift)
+
+        def delta(a, b):
+            return round(a - b, 3) if (a is not None and b is not None) else None
+
+        # 覆盖度：两条线各有多少格有效、有多少格**真正可比**（重叠）。
+        # 重叠为 0 时前端不再画两条各占半轴的断线，而是直接给结论与原因。
+        coverage = {"total": len(hours),
+                    "today": sum(1 for v in today_s if v is not None),
+                    "other": sum(1 for v in other_s if v is not None),
+                    "overlap": sum(1 for i in range(len(hours))
+                                   if today_s[i] is not None and other_s[i] is not None)}
         return {"mode": mode, "metric": metric, "unit": unit, "label": label,
+                "kind": kinds.get(mode, "环比"),
                 "today_label": today_label, "window_hours": used_window,
                 "has_other": any(v is not None for v in other_s),
                 "has_today": any(v is not None for v in today_s),
                 "history_from": hmin, "history_hours": history_hours,
-                "hours": hours, "today": today_s, "other": other_s}
+                "hours": hours, "today": today_s, "other": other_s,
+                "today_counts": today_c, "other_counts": other_c,
+                "coverage": coverage,
+                "summary": {"today": t_sum, "other": o_sum,
+                            "delta": {"avail_pp": delta(t_sum["avail"], o_sum["avail"]),
+                                      "rtt_ms": delta(t_sum["rtt"], o_sum["rtt"]),
+                                      "loss_pp": delta(t_sum["loss"], o_sum["loss"])}}}
 
     @router.get("/detail")
     def detail(task_id: str, node_id: str, ts: int, dns: str = "", url: str = "",

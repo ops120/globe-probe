@@ -307,47 +307,103 @@ def main() -> int:
         page.click('nav a[data-page="compare"]')
         wait_page(page, "compare")
         ck.ok(page.locator("#cmp-metric button").count() == 3, "对比页有 延迟/可用率/丢包率 三个指标")
+        # 口径：环比 4 种（前一时段/昨日/上周同日/30天前）+ 同比 1 种（去年同期）。
+        # 修复前把「上周同日」「30天前」标成同比，且系统里根本没有同比能力。
+        ck.ok(page.locator("#cmp-mode button").count() == 5, "对比模式有 4 种环比 + 1 种同比")
+        ck.ok(page.locator('#cmp-mode button[data-m="lastyear"]').count() == 1,
+              "有「同比 · 去年同期」入口（原先根本没有同比）")
+        _mlabels = page.eval_on_selector_all(
+            "#cmp-mode button", "els => els.map(e => e.textContent.trim())")
+        ck.ok(sum(1 for x in _mlabels if x.startswith("环比")) == 4
+              and sum(1 for x in _mlabels if x.startswith("同比")) == 1,
+              "环比/同比标注正确（%s）" % _mlabels)
         page.click('#cmp-metric button[data-k="avail"]')
         page.wait_for_timeout(1600)
         t1 = (page.text_content("#cmp-title") or "").strip()
-        ck.ok("可用率" in t1, f"标题随指标变化（{t1[:40]}）")
+        ck.ok("可用率" in t1, "标题随指标变化（%s）" % t1[:40])
         ck.ok(page.locator("#chart-cmp canvas").count() >= 1, "对比图已渲染")
-        # 历史不足 24h：应自动切到「前一时段」并画出两条真实曲线（修复前三种模式都只有一条）。
-        # 长期运行的实例（history ≥24h，如线上 8620）按设计**不会**触发自动切换——按数据口径分支
-        hist = page.evaluate(
-            """async () => (await (await fetch('/api/compare?task_id=' + state.task
-                + '&mode=yesterday&metric=avail')).json()).history_hours""")
+        # —— 第五期口径：窗口只取已完结小时 / 时段汇总结论 / 覆盖度 ——
+        _cmp = page.evaluate("""async () => {
+            const q = m => fetch('/api/compare?task_id=' + state.task
+                + '&mode=' + m + '&metric=avail').then(r => r.json());
+            const [y, ly] = await Promise.all([q('yesterday'), q('lastyear')]);
+            return { y, ly, now: Math.floor(Date.now() / 1000),
+                     lastH: Math.floor(Date.now() / 1000 / 3600) * 3600 - 3600 };
+        }""")
+        _y = _cmp["y"]
+        ck.ok(_y["hours"][-1] == _cmp["lastH"],
+              "对比窗口末格是「上一个整点」（不把尚未聚合完的当前小时放进轴里）")
+        ck.ok(all(h < _cmp["now"] // 3600 * 3600 for h in _y["hours"]),
+              "轴内不含未完结的当前小时")
+        ck.ok(_y["kind"] == "环比" and _cmp["ly"]["kind"] == "同比",
+              "接口区分环比/同比（昨日=%s，去年同期=%s）" % (_y["kind"], _cmp["ly"]["kind"]))
+        _cov = _y["coverage"]
+        ck.ok(_cov["total"] == len(_y["hours"])
+              and _cov["overlap"] <= min(_cov["today"], _cov["other"]),
+              "接口报告覆盖度（可比 %d/%d 格，本时段 %d 格 · 对比期 %d 格）"
+              % (_cov["overlap"], _cov["total"], _cov["today"], _cov["other"]))
+        _sum = page.text_content("#cmp-summary") or ""
+        ck.ok("Δ" in _sum and "可比" in _sum, "页面给出时段结论与覆盖度（%s）" % _sum[:60])
+        ck.ok("仅已完结小时" in t1, "标题写明窗口只取已完结小时")
+        # 两条线只在**真有重叠**时才画：修复前无论可比与否都画两条，
+        # 于是「各占半轴、一格不重叠」看起来就是「数据不对」。
         d = page.evaluate("""() => {
             const inst = echarts.getInstanceByDom(document.getElementById('chart-cmp'));
             const s = inst ? (inst.getOption().series || []) : [];
             return { names: s.map(x => x.name),
                      counts: s.map(x => (x.data || []).filter(v => v != null).length) };
         }""")
-        if hist is not None and hist < 24:
-            ck.ok(len(d["names"]) == 2, f"自动切到「前一时段」并给出两条曲线（{d['names']}）")
-            ck.ok(all(c > 0 for c in d["counts"]), f"两条曲线都有数据点（{d['counts']}）")
-            ck.ok("已自动切到" in t1, "标题说明为什么自动切换")
-        else:
-            ck.ok(len(d["names"]) == 2, f"对比图画出两条曲线（{d['names']}）")
-            ck.ok(any(c > 0 for c in d["counts"]),
-                  f"至少一条曲线有数据点（{d['counts']}；空的那条对应接口 has_today/has_other=false 的口径）")
-            ck.ok(True, f"（实例历史 {hist}h ≥24h，按设计不触发「自动切前一时段」，"
-                        "跳过自动切换说明断言）")
-        shot("compare-avail")
-        # 手动选「昨日」时应被尊重：历史 <24h 时说明为何没有对比线；≥24h 时直接出昨日曲线
+        # 图表当前模式可能已被**自动切换**（历史 <24h 时切到「前一时段」），所以判断
+        # 条数的覆盖度必须取自实际显示的那个模式 —— 拿固定 mode=yesterday 的结果去比，
+        # 会在自动切换的实例上得到「页面画 2 条、断言按 0 重叠要求 1 条」的假失败。
+        _active = page.evaluate(
+            "() => { const b = document.querySelector('#cmp-mode button.active');"
+            " return b && b.dataset ? b.dataset.m : ''; }")
+        _act_cov = page.evaluate(
+            """async (m) => (await (await fetch('/api/compare?task_id=' + state.task
+                + '&mode=' + m + '&metric=avail')).json()).coverage""", _active)
+        _act_ov = (_act_cov or {}).get("overlap", 0)
+        _expect_lines = 2 if _act_ov > 0 else 1
+        ck.ok(len(d["names"]) == _expect_lines,
+              "曲线条数与可比性一致（当前模式 %s，重叠 %s 格 → 画 %d 条；"
+              "重叠为 0 时不该画两条各占半轴的断线）"
+              % (_active, _act_ov, len(d["names"])))
+        ck.ok(any(c > 0 for c in d["counts"]), "至少一条曲线有数据点（%s）" % d["counts"])
+        # 末格取值必须与样本数一致：有样本才非空。修复前轴里含尚未聚合的当前小时，
+        # 该桶永不写入 → 末格**恒空**，这是「空窗比整窗」的直接来源。
+        # 断言用不变量而不是「末格一定有数据」——那个小时本来就可能没有数据。
+        ck.ok((_y["today"][-1] is None) == (_y["today_counts"][-1] == 0),
+              "末格取值与样本数一致（末格样本数 %s）" % _y["today_counts"][-1])
+        _hist = _y["history_hours"]
         page.click('#cmp-mode button[data-m="yesterday"]')
         page.wait_for_timeout(1600)
         t2 = (page.text_content("#cmp-title") or "").strip()
-        if hist is not None and hist < 24:
-            ck.ok("不足 24 小时" in t2 and "昨日同期尚未产生数据" in t2,
-                  f"手动选昨日时说明原因（{t2[-40:]}）")
+        if _hist is not None and _hist < 24:
+            ck.ok("不足 24 小时" in t2 and "尚未产生数据" in t2,
+                  "手动选昨日时说明原因（%s）" % t2[-40:])
         else:
-            ck.ok("昨日" in t2,
-                  f"手动选昨日时模式被尊重（history {hist}h ≥24h，无需缺数据说明；{t2[-40:]}）")
-        page.click('#cmp-mode button[data-m="prev"]')
-        page.click('#cmp-metric button[data-k="rtt"]')
+            ck.ok("昨日同期" in t2, "手动选昨日时模式被尊重（%s）" % t2[-40:])
+        # 同比模式必须真的能取到去年同期数据（1h 聚合保留 730 天）
+        page.click('#cmp-mode button[data-m="lastyear"]')
         page.wait_for_timeout(1200)
-
+        t3 = (page.text_content("#cmp-title") or "").strip()
+        ck.ok("同比" in t3 and "去年同期" in t3, "同比模式标题正确（%s）" % t3[:50])
+        # 任务下拉必须真的生效：#cmp-task 的 change 原先只调 renderCompare()、
+        # 从不更新 state.task → 对比页换任务图表不变（下拉形同装饰）。
+        _before = page.evaluate("() => state.task")
+        _opts = page.eval_on_selector_all("#cmp-task option", "els => els.map(e => e.value)")
+        _other = next((v for v in _opts if v and v != _before), None)
+        if _other:
+            page.select_option("#cmp-task", value=_other)
+            page.wait_for_timeout(1600)
+            ck.ok(page.evaluate("() => state.task") == _other,
+                  "对比页任务下拉真正切换任务（state.task 随之变化）")
+            ck.ok(page.evaluate(
+                "() => document.querySelector('#task-select').value") == _other,
+                "两个页面的任务下拉保持同步")
+        else:
+            ck.ok(True, "（实例只有一个任务，跳过对比页任务切换断言）")
+        page.wait_for_timeout(1200)
         # ---- 告警与报表：二级菜单（值班总览/报表/事件与告警/通知配置/操作审计）----
         print("→ 告警与报表（二级菜单）")
         page.click('nav a[data-page="alerts"]')
@@ -379,7 +435,15 @@ def main() -> int:
             on_cards = page.locator("#oncall-body .oncall-card").count()
             on_body = page.text_content("#oncall-body") or ""
             ck.ok(on_cards >= 1, f"「全部」分档下列出卡片（{on_cards} 张）")
-            ck.ok("层面" in on_body and "范围" in on_body, "值班卡片含层面/范围标注")
+            # 层面对每张卡都应有；「范围」只对**探测类**事件成立——节点离线事件没有
+            # error_class 也没有目标范围，强行要求会出现「只有节点卡时必然失败」的假阴性。
+            ck.ok("层面" in on_body, "值班卡片含层面标注")
+            _probe_cards = page.locator(
+                "#oncall-body .oncall-card:has(button:has-text('去处理'))").count()
+            if _probe_cards > 0:
+                ck.ok("范围" in on_body, f"探测类卡片含范围标注（{_probe_cards} 张探测卡）")
+            else:
+                ck.ok(True, "（当前只有节点侧事件卡，跳过「范围」断言：节点事件无目标范围）")
             # 「最近」必须是相对时间：判断这张卡还可不可信的第一依据就是「最后一次样本多久前」
             ck.ok(re.search(r"(秒前|分钟前|小时前|天前|无样本)", on_body) is not None,
                   "卡片「最近」显示相对时间（多久之前）")
@@ -459,6 +523,11 @@ def main() -> int:
         # 事件详情新增块的两分支判定：先看该事件响应里有没有新键（旧后端/旧数据没有 → 空态说明）
         # 注意折叠视图第一行是「分组行」（onclick=toggleEvGroup），要找含 eventModal 的行
         ev_new = None
+        # 先切到平铺视图再取 id：**断言的事件必须与点开的那一行是同一条**。
+        # 原实现在折叠视图里取 id、却点平铺视图的第一行，两者并不保证一致
+        # （分组行/排序不同就会拿到另一条事件）→ 断言看着失败，其实测的是别的事件。
+        page.click('#inc-fold button[data-f="0"]')
+        page.wait_for_timeout(900)
         row_onclick = page.evaluate(
             """() => ([...document.querySelectorAll('#sla-incs tbody tr[onclick]')]
                 .map(tr => tr.getAttribute('onclick'))
@@ -476,10 +545,8 @@ def main() -> int:
                 const realDy = (d.dying || []).filter(p => p.cpu != null || p.mem != null).length;
                 return { changes: realCh, dns: realDns, matrix: realMx ? 1 : 0, dying: realDy };
             }""", m_iid.group(1))
-        # 折叠视图下点的是「分组行」（展开/收起），要开详情弹窗先切到平铺
-        page.click('#inc-fold button[data-f="0"]')
-        page.wait_for_timeout(900)
-        page.locator("#sla-incs tbody tr").first.click()
+        # 点开**同一条**事件（上面已切到平铺视图）
+        page.locator(f'#sla-incs tbody tr[onclick*="eventModal({m_iid.group(1)})"]').first.click()
         wait_modal(page)
         ev_txt = page.text_content("#modal-body") or ""
         ck.ok("时间线" in ev_txt and "影响范围" in ev_txt, "事件详情含时间线与影响范围")

@@ -108,6 +108,11 @@ table.tbl{width:100%;border-collapse:collapse}
 .subtabs button:hover{background:var(--bg-3);color:var(--fg-strong)}
 .subtabs button.active{background:var(--btn);color:var(--accent-2)}
 /* 值班总览：每条故障一张卡（非表格）。分档 chip 让「正在失败」和「只是收不到样本」一眼分开 */
+.cmp-summary{display:flex;gap:10px 22px;flex-wrap:wrap;font-size:13px;color:var(--fg-2);padding:8px 12px;margin-bottom:8px;background:var(--bg-2);border:1px solid var(--bd);border-radius:8px}
+.cmp-summary b{color:var(--fg-strong)}
+.cmp-summary .up{color:var(--ok-fg)}
+.cmp-summary .down{color:var(--fail-fg)}
+.cmp-summary .cov{color:var(--muted);font-size:12px}
 .oncall-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 .oncall-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:12px}
 .oncall-card{border:1px solid var(--bd);border-left:3px solid var(--fail);border-radius:8px;background:var(--panel);padding:12px 14px}
@@ -340,16 +345,19 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
             </div>
             <div class="seg" id="cmp-mode">
               <button data-m="prev">环比 · 前一时段</button>
-              <button data-m="yesterday" class="active">环比 · 昨日</button>
-              <button data-m="lastweek">同比 · 上周同日</button>
-              <button data-m="lastmonth">同比 · 30天前</button>
+              <button data-m="yesterday" class="active">环比 · 昨日同期</button>
+              <button data-m="lastweek">环比 · 上周同日</button>
+              <button data-m="lastmonth">环比 · 30天前</button>
+              <button data-m="lastyear">同比 · 去年同期</button>
             </div>
           </div>
         </div>
         <div class="panel">
           <div class="panel-head" id="cmp-title">按小时对比（最近24小时 vs 昨日同期）</div>
+          <div id="cmp-summary" class="cmp-summary"></div>
           <div id="chart-cmp" class="chart h340"></div>
-          <div class="hint">对比查询一律走 1h 聚合表，不允许对原始 10s 表做跨周期扫描（性能红线）</div>
+          <div class="hint">对比查询一律走 1h 聚合表，不允许对原始 10s 表做跨周期扫描（性能红线）
+            · 窗口只取<b>已完结的小时</b>（当前小时尚未聚合完毕，纳入会造成末点恒空、与对比期不可比）</div>
         </div>
       </section>
 
@@ -558,20 +566,20 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=36"></script>
+<script src="/static/echarts.min.js?v=38"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=36"></script>
-<script src="/static/gpm-api.js?v=36"></script>
-<script src="/static/gpm-theme.js?v=36"></script>
-<script src="/static/gpm-charts.js?v=36"></script>
-<script src="/static/gpm-page-overview.js?v=36"></script>
-<script src="/static/gpm-page-task.js?v=36"></script>
-<script src="/static/gpm-page-compare.js?v=36"></script>
-<script src="/static/gpm-page-geo.js?v=36"></script>
-<script src="/static/gpm-page-oncall.js?v=36"></script>
-<script src="/static/gpm-page-alerts.js?v=36"></script>
-<script src="/static/gpm-page-nodes.js?v=36"></script>
-<script src="/static/gpm-page-tasks.js?v=36"></script>
-<script src="/static/gpm-boot.js?v=36"></script>
+<script src="/static/gpm-utils.js?v=38"></script>
+<script src="/static/gpm-api.js?v=38"></script>
+<script src="/static/gpm-theme.js?v=38"></script>
+<script src="/static/gpm-charts.js?v=38"></script>
+<script src="/static/gpm-page-overview.js?v=38"></script>
+<script src="/static/gpm-page-task.js?v=38"></script>
+<script src="/static/gpm-page-compare.js?v=38"></script>
+<script src="/static/gpm-page-geo.js?v=38"></script>
+<script src="/static/gpm-page-oncall.js?v=38"></script>
+<script src="/static/gpm-page-alerts.js?v=38"></script>
+<script src="/static/gpm-page-nodes.js?v=38"></script>
+<script src="/static/gpm-page-tasks.js?v=38"></script>
+<script src="/static/gpm-boot.js?v=38"></script>
 </body>
 </html>
