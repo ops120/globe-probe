@@ -1835,6 +1835,12 @@ class Storage:
                     "DELETE FROM external_alerts WHERE COALESCE(NULLIF(ended_at,0),"
                     " COALESCE(NULLIF(started_at,0), received_at)) < ?", (cutoff,))
                 out["external_alerts"] = cur.rowcount
+            if incidents_days > 0:
+                # JEV 轨迹：事件被保留策略清掉后，它的判断轨迹会永久堆积
+                # （jev_traces 没有级联）。轨迹是「可回放」的解释性数据，不该比事件活得久。
+                cur = self.db.execute(
+                    "DELETE FROM jev_traces WHERE ts < ?", (ts - incidents_days * day,))
+                out["jev_traces"] = cur.rowcount
             self.db.commit()
             return out
 

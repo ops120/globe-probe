@@ -33,6 +33,21 @@ def _port_open(port: int) -> bool:
         return False
 
 
+def _live_server(port: int = 8620) -> bool:
+    """8620 上是**真正在服务的** gpm（/api/health 回 ok），而不是端口开着的半启动态。
+
+    只探端口不够：服务端重启窗口里端口已经 bind 但应用还没就绪，探测会误判成
+    「有服务」然后让用例失败（复核中撞到过一次）。这里看 health 是否真的回 JSON。
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/api/health" % port, timeout=2) as r:
+            # 注意：先去掉空格再比对，否则 '"ok": true' 永远匹配不上（我写错过一次）
+            return '"ok":true' in r.read().decode("utf-8", "replace").replace(" ", "")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _free_listener() -> tuple[socket.socket, int]:
     """起一个真实监听器（保证端口活），测试结束自动关闭。"""
     s = socket.socket()
@@ -79,7 +94,7 @@ def test_tcp_connect_ok_and_rtt():
         lsock.close()
 
 
-@pytest.mark.skipif(not _port_open(8620), reason="本机 8620 无活服务，跳过")
+@pytest.mark.skipif(not _live_server(8620), reason="本机 8620 无活着的 gpm，跳过")
 def test_tcp_connect_live_server_8620():
     """真实连线上活服务 127.0.0.1:8620：ok + rtt_ms>0。"""
     r = run_tcp({"target": "127.0.0.1:8620", "params": {"timeout": 3}},
@@ -259,7 +274,7 @@ def test_curl_cmd_enhancement_flags():
     assert "-L" in plain and "-X" not in plain   # 缺省维持原行为（GET + 跟随）
 
 
-@pytest.mark.skipif(not _port_open(8620), reason="本机 8620 无活服务，跳过")
+@pytest.mark.skipif(not _live_server(8620), reason="本机 8620 无活着的 gpm，跳过")
 def test_curl_keyword_hit_and_miss_live():
     """对活服务 /api/health（响应含 "ok"）实测 keyword 命中与未命中。"""
     url = "http://127.0.0.1:8620/api/health"

@@ -104,7 +104,7 @@ def test_old_six_arg_call_still_works_and_applies_defaults(tmp_path):
 
     # external_* 是第六期新增的表，旧签名调用也要按默认值清理（此处没有数据 → 0）
     assert out == {"alerts": 1, "audit_log": 1, "notify_outbox": 1, "incidents": 1,
-                   "external_alert_links": 0, "external_alerts": 0}
+                   "external_alert_links": 0, "external_alerts": 0, "jev_traces": 0}
     assert _counts(s, "alerts") == 0 and _counts(s, "incidents") == 0
 
 
@@ -133,6 +133,22 @@ def test_external_alerts_purged_with_their_links(tmp_path):
     with s.lock:
         left = [r["id"] for r in s.db.execute("SELECT id FROM external_alerts")]
     assert left == [2], left
+
+
+def test_jev_traces_purged_with_incident_retention(tmp_path):
+    """事件被清理后 JEV 轨迹不能永久堆积（轨迹是解释性数据，不该比事件活得久）。"""
+    s = make_storage(tmp_path)
+    with s.lock:
+        s.db.execute("INSERT INTO jev_traces(incident_id,ts,judge) VALUES(1,?, 'local')",
+                     (NOW - 200 * DAY,))
+        s.db.execute("INSERT INTO jev_traces(incident_id,ts,judge) VALUES(2,?, 'local')",
+                     (NOW - 1 * DAY,))
+        s.db.commit()
+    out = s.retention(30, 90, 180, 730, 7, NOW, incidents_days=180)
+    assert out["jev_traces"] == 1, out
+    with s.lock:
+        left = [r["incident_id"] for r in s.db.execute("SELECT incident_id FROM jev_traces")]
+    assert left == [2]
 
 
 def test_non_positive_days_skip_table(tmp_path):
