@@ -70,6 +70,7 @@ def create_app(cfg, storage: Storage | None = None):
             asyncio.create_task(_digest_loop(state, stop)),
             asyncio.create_task(_channel_probe_loop(state, stop)),
             asyncio.create_task(_selfcheck_loop(state, stop)),
+            asyncio.create_task(_pull_loop(state, stop)),
         ]
         # AnyIO 线程池上限：默认虽是 40，但显式收敛到配置值 —— 曾因线程爆发
         # MemoryError 假死，health 的 threads 字段应稳定在 tokens 附近，超出即异常。
@@ -247,6 +248,31 @@ async def _channel_probe_loop(state: dict, stop: asyncio.Event):
             log.error("渠道自检失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _pull_loop(state: dict, stop: asyncio.Event):
+    """第三方告警 API 拉取（第六期 26）：每 60s 检查一次到期来源。
+
+    只拉「已启用 + 该来源支持 + 配了地址 + 过了退避」的；默认全关，不会自己去打外部接口。
+    未实现的两家（腾讯云/GCP）在 due_sources 里就被过滤掉了，不会空转。
+    """
+    s: Storage = state["storage"]
+    while not stop.is_set():
+        try:
+            from . import pullers
+            for src in pullers.due_sources(s, now()):
+                r = pullers.poll_source(s, src)
+                if r.get("error"):
+                    log.warning("拉取 %s 失败：%s", src, r["error"])
+                elif r.get("fetched"):
+                    log.info("拉取 %s：%d 条（新增 %d 更新 %d）",
+                             src, r["fetched"], r["created"], r["updated"])
+        except Exception as e:  # noqa: BLE001 - 拉取失败不影响主流程
+            log.error("第三方告警拉取失败: %s", e)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=60)
         except asyncio.TimeoutError:
             pass
 

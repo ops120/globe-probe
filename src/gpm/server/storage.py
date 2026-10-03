@@ -1059,6 +1059,40 @@ class Storage:
             out.setdefault(iid, []).append(self._ext_alert(d))
         return out
 
+    def external_alert_stats(self, t_from: int, t_to: int) -> dict:
+        """窗口内第三方告警按来源统计（第六期 29 的报表维度）。
+
+        给的是「平均持续时间」（已恢复事件的 ended_at-started_at），**不是 MTTA**：
+        外部告警是只读接入，没有本平台的确认动作，硬报 MTTA 等于编数。
+        """
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT source, status, started_at, ended_at FROM external_alerts"
+                " WHERE COALESCE(NULLIF(started_at,0), received_at) >= ?"
+                "   AND COALESCE(NULLIF(started_at,0), received_at) <= ?",
+                (int(t_from), int(t_to))).fetchall()
+        by: dict = {}
+        for r in rows:
+            b = by.setdefault(str(r["source"]),
+                              {"source": str(r["source"]), "total": 0, "firing": 0,
+                               "resolved": 0, "_dur": []})
+            b["total"] += 1
+            if str(r["status"]) == "resolved":
+                b["resolved"] += 1
+                st, en = int(r["started_at"] or 0), int(r["ended_at"] or 0)
+                if st and en > st:
+                    b["_dur"].append(en - st)
+            else:
+                b["firing"] += 1
+        out = []
+        for b in by.values():
+            d = b.pop("_dur")
+            b["avg_duration_s"] = round(sum(d) / len(d), 1) if d else None
+            out.append(b)
+        return {"sources": sorted(out, key=lambda x: x["source"]),
+                "mtta_note": ("外部告警没有本平台的确认动作（只读接入），"
+                              "因此只给「平均持续时间」，不编造 MTTA")}
+
     def external_alert_summary(self, ts: int, days: int = 1) -> dict:
         """按来源/状态汇总（报表用）。"""
         cutoff = ts - max(0, int(days)) * 86400 if days else 0

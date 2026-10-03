@@ -7,6 +7,24 @@
 function pctText(v) { return v == null ? '—' : (v * 100).toFixed(2) + '%'; }
 function numText(v, unit) { return v == null ? '—' : (typeof v === 'number' ? v.toFixed(1) : v) + (unit || ''); }
 
+/* 第六期 29：SLA 报表的「按来源」维度。**不编造 MTTA**：外部告警是只读接入、
+ * 没有本平台的确认动作，所以只给「平均持续时间」，并在表尾写明原因。 */
+function renderSlaExternal(ext) {
+  const el = $('#sla-ext');
+  if (!el) return;
+  const srcs = (ext && ext.sources) || [];
+  el.innerHTML = '<thead><tr><th>来源</th><th>合计</th><th>告警中</th><th>已恢复</th>'
+    + '<th>平均持续</th></tr></thead><tbody>'
+    + (srcs.length ? srcs.map(x => '<tr><td>' + esc(x.source.toUpperCase()) + '</td>'
+        + '<td class="num">' + x.total + '</td><td class="num">' + x.firing + '</td>'
+        + '<td class="num">' + x.resolved + '</td>'
+        + '<td class="num">' + (x.avg_duration_s == null ? '—' : fmtDur(Math.round(x.avg_duration_s)))
+        + '</td></tr>').join('')
+      : '<tr><td colspan="5" style="color:var(--faint)">窗口内没有第三方告警</td></tr>')
+    + '</tbody><tfoot><tr><td colspan="5" style="color:var(--faint)">'
+    + esc((ext && ext.mtta_note) || '') + '</td></tr></tfoot>';
+}
+
 async function renderSla() {
   const hours = state.slaHours || 24;
   const to = Math.floor(Date.now() / 1000), from = to - hours * 3600;
@@ -46,6 +64,7 @@ async function renderSla() {
     + '<span>【MTTA】' + (mttA || '—') + '</span><span>【MTTR】' + (mttR || '—') + '</span>'
     + ((mttA || mttR) ? '' : '<span style="color:var(--faint)">'
       + esc(mttNotes.length ? mttNotes.join('；') : '服务端暂未提供 MTTA/MTTR 统计（旧版服务端）') + '</span>');
+  renderSlaExternal(d.external);       // 第六期 29：第三方告警按来源（与本地事件分开列）
   renderSlaIncidents(d);
 }
 

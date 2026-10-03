@@ -1730,6 +1730,47 @@ def setup_router(app_state) -> APIRouter:
                 s.setting_set(key, str(body[key] or "").strip()[:200])
         return external_settings()
 
+    @router.get("/external/pull")
+    def external_pull_state():
+        """拉取适配器状态（第六期 26）。**如实区分**「支持但没配地址」「已配好」「未实现」。"""
+        from . import pullers
+        return {"sources": [pullers.state(s, src) for src in hooks.SOURCES],
+                "hint": ("webhook 推不到（内网隔离 / 源侧不支持推送）时可改用 API 拉。"
+                         "本期**只实现了 Grafana(Alertmanager v2 /alerts) 与 Zabbix"
+                         "(JSON-RPC trigger.get)**；腾讯云需要 TC3-HMAC 签名、GCP 需要 OAuth，"
+                         "未实现——不会假装成功。")}
+
+    @router.put("/external/pull/{source}")
+    def external_pull_set(source: str, body: dict,
+                          x_admin_token: str | None = Header(default=None)):
+        """配置某来源的拉取：地址 / Token / 开关 / 周期。"""
+        check_write(x_admin_token)
+        if source not in hooks.SOURCES:
+            raise HTTPException(404, "未知来源：%s" % source)
+        from . import pullers
+        if body.get("url") is not None:
+            s.setting_set("pull_%s_url" % source, str(body["url"] or "").strip()[:500])
+        if body.get("token") is not None:
+            s.setting_set("pull_%s_token" % source, str(body["token"] or "").strip()[:200])
+        if body.get("enabled") is not None:
+            s.setting_set("pull_%s_enabled" % source, "1" if body["enabled"] else "0")
+        if body.get("interval_seconds") is not None:
+            try:
+                iv = int(body["interval_seconds"])
+            except (TypeError, ValueError):
+                raise HTTPException(422, "interval_seconds 必须是整数")
+            s.setting_set("pull_interval_seconds", str(max(60, min(iv, 86400))))
+        return pullers.state(s, source)
+
+    @router.post("/external/pull/{source}/run")
+    def external_pull_run(source: str, x_admin_token: str | None = Header(default=None)):
+        """立即拉一次（人工验证用）。返回如实结果：成功条数 / 未实现 / 错误原因。"""
+        check_write(x_admin_token)
+        if source not in hooks.SOURCES:
+            raise HTTPException(404, "未知来源：%s" % source)
+        from . import pullers
+        return pullers.poll_source(s, source)
+
     @router.post("/external/correlate")
     def external_correlate(days: int = 7, x_admin_token: str | None = Header(default=None)):
         """手动重跑关联（新增了任务/节点、或改了名字之后用）。"""

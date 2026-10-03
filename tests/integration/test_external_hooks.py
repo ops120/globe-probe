@@ -371,6 +371,35 @@ def test_summary_by_source(tmp_path):
     assert by["zabbix"]["firing"] == 1
 
 
+def test_sla_reports_external_by_source(tmp_path):
+    """第六期 29：SLA 报表加「按来源」维度。
+
+    **不编造 MTTA**：外部告警是只读接入，没有本平台的确认动作，所以只给「平均持续时间」
+    并在 mtta_note 里说明原因 —— 报表里出现一个算不出来的指标比不出现更糟。
+    """
+    client, cfg, s = make_client(tmp_path)
+    set_token(client, "tk")
+    now = int(time.time())
+    post_hook(client, "grafana", {"alerts": [
+        {"fingerprint": "f1", "status": "firing", "labels": {"alertname": "A"}},
+        {"fingerprint": "f2", "status": "resolved", "labels": {"alertname": "B"},
+         "startsAt": "2026-10-03T10:00:00Z", "endsAt": "2026-10-03T10:30:00Z"}]},
+        token="tk")
+    post_hook(client, "zabbix", {"event_id": "z1", "trigger": "T", "status": "PROBLEM"},
+              token="tk")
+
+    rep = client.get("/api/report/sla?t_from=%d&t_to=%d" % (now - 86400, now + 60)).json()
+    ext = rep["external"]
+    by = {x["source"]: x for x in ext["sources"]}
+    assert by["grafana"]["total"] == 2 and by["grafana"]["firing"] == 1
+    assert by["grafana"]["resolved"] == 1
+    assert by["grafana"]["avg_duration_s"] == 1800.0, by["grafana"]
+    assert by["zabbix"]["firing"] == 1 and by["zabbix"]["avg_duration_s"] is None
+    assert "MTTA" in ext["mtta_note"] and "不编造" in ext["mtta_note"]
+    # 与本地事件分开列：第三方口径不同，不能混进可用率计算
+    assert "incidents" in rep and "overall" in rep
+
+
 def test_settings_reports_configured_without_leaking_token(tmp_path):
     client, cfg, s = make_client(tmp_path)
     d = client.get("/api/external/settings").json()

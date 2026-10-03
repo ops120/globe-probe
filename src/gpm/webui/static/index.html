@@ -453,6 +453,9 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
               <div><div class="sub" style="margin:6px 0">按节点</div><table class="tbl" id="sla-nodes"></table></div>
             </div>
             <div id="sla-mttr" style="display:flex;gap:6px 16px;flex-wrap:wrap;font-size:12px;margin-top:10px"></div>
+            <div class="sub" style="margin:12px 0 6px">第三方告警（按来源）
+              <span style="color:var(--faint)">—— 与本地事件分开列：口径不同，不混进可用率</span></div>
+            <table class="tbl" id="sla-ext"></table>
           </div>
         </div>
 
@@ -496,6 +499,10 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
               <span id="ext-hint" class="sub" style="margin-left:10px;white-space:nowrap"></span></div>
             <div class="hint" id="ext-recv-hint"></div>
             <div id="ext-src-state" class="cmp-summary"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">API 拉取 <span class="sub">webhook 推不到（内网隔离/源侧不支持推送）时改用 API 拉。本期<b>只实现 Grafana 与 Zabbix</b>；腾讯云需要 TC3-HMAC 签名、GCP 需要 OAuth，未实现——不会假装成功</span></div>
+            <table class="tbl" id="ext-pull-tbl"></table>
           </div>
           <div class="panel">
             <div class="panel-head">按来源汇总
@@ -628,21 +635,21 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=42"></script>
+<script src="/static/echarts.min.js?v=43"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=42"></script>
-<script src="/static/gpm-api.js?v=42"></script>
-<script src="/static/gpm-theme.js?v=42"></script>
-<script src="/static/gpm-charts.js?v=42"></script>
-<script src="/static/gpm-page-overview.js?v=42"></script>
-<script src="/static/gpm-page-task.js?v=42"></script>
-<script src="/static/gpm-page-compare.js?v=42"></script>
-<script src="/static/gpm-page-geo.js?v=42"></script>
-<script src="/static/gpm-page-external.js?v=42"></script>
-<script src="/static/gpm-page-oncall.js?v=42"></script>
-<script src="/static/gpm-page-alerts.js?v=42"></script>
-<script src="/static/gpm-page-nodes.js?v=42"></script>
-<script src="/static/gpm-page-tasks.js?v=42"></script>
-<script src="/static/gpm-boot.js?v=42"></script>
+<script src="/static/gpm-utils.js?v=43"></script>
+<script src="/static/gpm-api.js?v=43"></script>
+<script src="/static/gpm-theme.js?v=43"></script>
+<script src="/static/gpm-charts.js?v=43"></script>
+<script src="/static/gpm-page-overview.js?v=43"></script>
+<script src="/static/gpm-page-task.js?v=43"></script>
+<script src="/static/gpm-page-compare.js?v=43"></script>
+<script src="/static/gpm-page-geo.js?v=43"></script>
+<script src="/static/gpm-page-external.js?v=43"></script>
+<script src="/static/gpm-page-oncall.js?v=43"></script>
+<script src="/static/gpm-page-alerts.js?v=43"></script>
+<script src="/static/gpm-page-nodes.js?v=43"></script>
+<script src="/static/gpm-page-tasks.js?v=43"></script>
+<script src="/static/gpm-boot.js?v=43"></script>
 </body>
 </html>

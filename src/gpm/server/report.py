@@ -397,6 +397,9 @@ def sla(storage, t_from: int, t_to: int, task_id: str = "", node_id: str = "") -
             "group_count": len(groups),
             "flapping_groups": sum(1 for g in groups if g["flapping"]),
         },
+        # 第六期 29：第三方告警按来源。**与本地事件分开列**——两套模型不合并，
+        # 报表上也不该混在一起算可用率（第三方的口径与我们不同）。
+        "external": storage.external_alert_stats(t_from, t_to),
     }
 
 

@@ -42,6 +42,8 @@ async function renderExternal() {
       '<span>' + esc(x.source.toUpperCase()) + ' <b>' + (x.configured ? '已配置' : '未配置')
       + '</b></span>').join('');
   }
+  await renderExternalPull();
+
   const sm = await api('/api/external/summary?days=1');
   const srcs = sm.sources || [];
   $('#ext-sum-tbl').innerHTML = '<thead><tr><th>来源</th><th>告警中</th><th>已恢复</th>'
@@ -85,6 +87,64 @@ async function renderExternal() {
       + '（先在「第三方接入」里配对 Token，再把源侧的 webhook 指过来）</td></tr>')
     + '</tbody>';
 }
+
+/* API 拉取配置（第六期 26）：能力、地址、开关、立即拉一次。
+ * 未实现的来源把「立即拉」禁用并把原因写在行里，而不是给一个点了报错的按钮。 */
+async function renderExternalPull() {
+  const el = $('#ext-pull-tbl');
+  if (!el) return;
+  const d = await api('/api/external/pull');
+  const iv = (d.sources[0] || {}).interval_seconds || 300;
+  el.innerHTML = '<thead><tr><th>来源</th><th>能力</th><th>拉取地址</th><th>Token</th>'
+    + '<th>启用</th><th>最近成功</th><th>最近错误</th><th>操作</th></tr></thead><tbody>'
+    + d.sources.map(x => '<tr data-src="' + esc(x.source) + '">'
+      + '<td><span class="badge b-warn">' + esc(x.source.toUpperCase()) + '</span></td>'
+      + '<td>' + (x.supported ? '<span class="badge b-ok">支持</span>'
+        : '<span class="badge b-off" title="需要官方签名/OAuth，本期未实现">未实现</span>') + '</td>'
+      + '<td><input type="text" class="ext-pu" placeholder="' + (x.supported ? '如 https://grafana.example.com' : '未实现')
+        + '" value="' + esc(x.url || '') + '"' + (x.supported ? '' : ' disabled') + '></td>'
+      + '<td><input type="text" class="ext-pt" placeholder="只写不读"' + (x.supported ? '' : ' disabled') + '></td>'
+      + '<td><input type="checkbox" class="ext-pe"' + (x.enabled ? ' checked' : '')
+        + (x.supported ? '' : ' disabled') + '></td>'
+      + '<td style="color:var(--muted)">' + (x.last_ok ? fmtAgo(x.last_ok) : '—') + '</td>'
+      + '<td style="color:var(--fail-fg);max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'
+        + esc(x.last_error || '') + '">' + esc(x.last_error || '—') + '</td>'
+      + '<td style="white-space:nowrap">'
+      + (x.supported
+        ? '<button class="btn sm ghost" onclick="extPullSave(&quot;' + esc(x.source) + '&quot;)">保存</button>'
+          + '<button class="btn sm" onclick="extPullRun(&quot;' + esc(x.source) + '&quot;)">立即拉一次</button>'
+        : '<span class="oc-exttime">—</span>')
+      + '</td></tr>').join('')
+    + '</tbody>'
+    + '<tfoot><tr><td colspan="8" style="color:var(--faint)">轮询周期 ' + iv
+    + ' 秒（60~86400）；失败按 300s×2ⁿ 退避、上限 1 小时。状态来自 '
+    + esc(d.hint.slice(0, 40)) + '…</td></tr></tfoot>';
+}
+
+window.extPullSave = async (src) => {
+  const row = document.querySelector('#ext-pull-tbl tr[data-src="' + src + '"]');
+  if (!row) return;
+  const body = { url: row.querySelector('.ext-pu').value,
+                 enabled: row.querySelector('.ext-pe').checked };
+  const tk = row.querySelector('.ext-pt').value;
+  if (tk) body.token = tk;      // 只写不读：留空表示不改动已存的 Token
+  try {
+    await api('/api/external/pull/' + src, { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    toast('已保存 ' + src + ' 的拉取配置');
+    renderExternalPull();
+  } catch (e) { toast('保存失败: ' + e.message); }
+};
+
+window.extPullRun = async (src) => {
+  try {
+    const r = await api('/api/external/pull/' + src + '/run', { method: 'POST' });
+    if (!r.supported) toast(src + ' 未实现：' + r.error);
+    else if (r.error) toast('拉取失败：' + r.error);
+    else toast('拉取 ' + r.fetched + ' 条（新增 ' + r.created + '，更新 ' + r.updated + '）');
+    renderExternalPull();
+  } catch (e) { toast('拉取失败: ' + e.message); }
+};
 
 $('#ext-save').addEventListener('click', async () => {
   const v = ($('#ext-token').value || '').trim();

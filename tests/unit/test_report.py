@@ -15,6 +15,8 @@ from gpm.server.report import BUCKETS, DAY, daily_series, digest_text, sla
 BASE = 1767225600  # 2026-01-01 00:00:00 UTC（正好落在 UTC 日界）
 
 ALLOWED_METHODS = {"list_tasks", "list_nodes", "list_incidents", "node_avail",
+                   # 第六期 29：SLA 的「按来源」维度（第三方告警与本地事件分开列）
+                   "external_alert_stats",
                    "agg_buckets_existing", "result_streams", "get_task"}
 
 
@@ -50,6 +52,12 @@ class FakeStorage:
         self.incident_limit = limit
         rows = sorted(self.incidents, key=lambda i: i.get("started_at") or 0, reverse=True)
         return [dict(i) for i in rows[:limit]]
+
+    def external_alert_stats(self, t_from, t_to):
+        # 第六期 29：SLA 报表的「按来源」维度。假对象也要实现，否则报表读不到就报错
+        # （这正是「允许清单」的价值：新增 storage 调用会在这里显式暴露出来）。
+        self.calls.append(("external_alert_stats", t_from, t_to))
+        return {"sources": [], "mtta_note": ""}
 
     def node_avail(self, node_id, t_from, task_ids=None):
         self.calls.append(("node_avail", node_id, t_from, task_ids))

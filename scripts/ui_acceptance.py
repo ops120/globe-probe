@@ -508,6 +508,12 @@ def main() -> int:
         ck.ok(("可用率" in sla_txt) and ("事件" in sla_txt), "SLA 卡片含可用率与事件")
         ck.ok(wait_count(page, "#sla-tasks tbody tr") >= 1, "SLA 按任务表有数据行")
         ck.ok(wait_count(page, "#sla-nodes tbody tr") >= 1, "SLA 按节点表有数据行")
+        # 第六期 29：SLA 加「第三方告警（按来源）」维度，与本地事件分开列
+        _sla_ext = page.text_content("#sla-ext") or ""
+        ck.ok("来源" in _sla_ext and "平均持续" in _sla_ext,
+              "SLA 报表含「第三方告警（按来源）」维度")
+        ck.ok("MTTA" in _sla_ext and "不编造" in _sla_ext,
+              "第三方只给「平均持续」，并说明为何不报 MTTA")
         mttr_txt = (page.text_content("#sla-mttr") or "").strip()
         mttr_probe = page.evaluate("""async () => {
             const to = Math.floor(Date.now() / 1000);
@@ -548,6 +554,17 @@ def main() -> int:
         ck.ok(_srckeys == ["configured", "source"],
               "来源状态只暴露「配没配」（字段 %s）" % _srckeys)
         ck.ok(page.locator("#ext-sum-tbl tbody tr").count() >= 1, "按来源汇总表已渲染")
+        # 第六期 26：API 拉取配置。未实现的来源要**如实标注**，而不是给一个点了报错的按钮
+        ck.ok(page.locator("#ext-pull-tbl tbody tr").count() == 4,
+              "拉取配置列出四家来源")
+        _pull_txt = page.text_content("#ext-pull-tbl") or ""
+        ck.ok("支持" in _pull_txt and "未实现" in _pull_txt,
+              "拉取能力如实区分「支持」与「未实现」（腾讯云/GCP 需要官方签名/OAuth）")
+        _pull = page.evaluate("async () => await (await fetch('/api/external/pull')).json()")
+        ck.ok({x["source"]: x["supported"] for x in _pull["sources"]} ==
+              {"grafana": True, "zabbix": True, "tencent": False, "gcp": False},
+              "接口能力表正确（%s）" % {x["source"]: x["supported"] for x in _pull["sources"]})
+        ck.ok("未实现" in _pull["hint"], "接口提示里也写明哪两家未实现")
         ck.ok(page.locator("#ext-tbl tbody tr").count() >= 1, "第三方告警表已渲染（含空态行）")
         # 未配置时任何来源都必须被拒绝（安全底线）。
         # 用 Python 侧发请求而不是浏览器 fetch：浏览器会把 401 记成控制台错误，
