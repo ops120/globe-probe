@@ -825,6 +825,34 @@ class Storage:
                 out.append(d)
             return out
 
+    def zombie_incidents(self, limit: int = 50) -> dict:
+        """「不可信事件」自查（.docs/ONCALL_OPTIMIZATION_2.md §三 的三条自查 SQL）。
+
+        值班页用它**自证**「这一屏没有在说假话」：正常应恒为 0；一旦 >0 就说明收口逻辑
+        退化了（第一期修掉的那些症状又回来了），页面自己报警，不需要运维去数卡片。
+
+        三类：
+          stale_ok   事件开着，但该流最近一条样本已是 ok（该被恢复收口）
+          disabled   任务已停用却仍开着事件（该被停用收口）
+          node_online 节点在线却挂着离线事件（该被恢复收口）
+        """
+        with self.lock:
+            stale_ok = [int(r["id"]) for r in self.db.execute(
+                "SELECT i.id FROM incidents i WHERE i.ended_at IS NULL AND i.kind='probe'"
+                " AND (SELECT p.status FROM probe_results p"
+                "      WHERE p.task_id=i.task_id AND p.node_id=i.node_id"
+                "        AND p.dns=i.dns AND p.url=i.url"
+                "      ORDER BY p.ts DESC LIMIT 1)='ok' LIMIT ?", (limit,)).fetchall()]
+            disabled = [int(r["id"]) for r in self.db.execute(
+                "SELECT i.id FROM incidents i JOIN tasks t ON t.id=i.task_id"
+                " WHERE i.ended_at IS NULL AND i.kind='probe' AND t.enabled=0 LIMIT ?",
+                (limit,)).fetchall()]
+            node_online = [int(r["id"]) for r in self.db.execute(
+                "SELECT i.id FROM incidents i JOIN nodes n ON n.id=i.node_id"
+                " WHERE i.ended_at IS NULL AND i.kind='node' AND n.status='online' LIMIT ?",
+                (limit,)).fetchall()]
+        return {"stale_ok": stale_ok, "disabled": disabled, "node_online": node_online}
+
     def streams_with_open_incidents(self) -> list[dict]:
         """所有仍有未恢复**探测**事件的流（task×node×dns×url），供启动时重建状态。"""
         with self.lock:

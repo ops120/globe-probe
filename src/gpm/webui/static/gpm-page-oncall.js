@@ -79,6 +79,47 @@ const ONCALL_BUCKET_BADGE = {
 };
 const ONCALL_KIND_BADGE = { node_suspect: ['b-warn', '根因提示'], node: ['b-off', 'NODE'] };
 
+/* 第四期 17：「本平台可信度」——先排除「监控自己坏了」，再谈故障。
+ * 三个数都是可解释的：探测新鲜度（最近样本距今，>10 分钟说明数据可能停更）、
+ * 通知渠道（与 gpm_notify_channel_up 同一口径，避免指标和页面对不上）、
+ * 事件自愈（不可信事件数，正常恒为 0；>0 说明收口逻辑退化了，页面自己报警）。 */
+function ocSelfcheckBar(d) {
+  const sc = d.selfcheck || {};
+  const ch = sc.channels || {};
+  const z = sc.zombie_events || 0;
+  const age = sc.probe_age_s;
+  const ageTxt = age == null ? '无数据' : fmtDur(Math.round(age));
+  const chTxt = ch.enabled
+    ? (ch.up + '/' + ch.enabled + (ch.unknown ? '（' + ch.unknown + ' 个未自检）' : ''))
+    : '未配置渠道';
+  return '<div class="oc-check' + (z > 0 ? ' bad' : '') + '">'
+    + '<span>探测新鲜度 <b>' + esc(ageTxt) + '</b>'
+    + (age != null && age > 600 ? ' ⚠' : '') + '</span>'
+    + '<span>通知渠道 <b>' + esc(chTxt) + '</b>' + (ch.down ? ' ⚠' : '') + '</span>'
+    + '<span>事件自愈 <b>' + (z === 0 ? '正常' : z + ' 条不可信') + '</b>'
+    + (z > 0 ? ' ⚠' : '') + '</span>'
+    + '</div>';
+}
+
+/* 第四期 16：节点资源饱和度。实测 win-local 长期 CPU 90~95% —— 这种节点上的失败
+ * 要先怀疑节点自身，而不是逐个目标排查。CPU≥85% 标红，离线标灰。 */
+function ocNodeBar(d) {
+  const ns = d.nodes_health || [];
+  if (!ns.length) return '';
+  return '<div class="oc-nodes">' + ns.map(n => {
+    const cpu = n.cpu == null ? '—' : Math.round(n.cpu) + '%';
+    const mem = n.mem == null ? '—' : Math.round(n.mem) + '%';
+    const off = n.status !== 'online';
+    const hot = !off && n.cpu != null && n.cpu >= 85;
+    return '<span class="oc-node' + (off ? ' off' : (hot ? ' hot' : '')) + '"'
+      + ' title="' + esc(n.name) + '：CPU / 内存取最近一次心跳的采样值'
+      + (n.heartbeat_age_s != null ? '（心跳 ' + fmtAgo(Date.now() / 1000 - n.heartbeat_age_s) + '）' : '')
+      + '">'
+      + esc(n.name) + ' CPU <b>' + cpu + '</b> · 内存 ' + mem
+      + (off ? ' · 离线' : (hot ? ' · 高负载' : '')) + '</span>';
+  }).join('') + '</div>';
+}
+
 /* 一条行动项落在哪个分档：维护窗口优先（计划内维护不该以「正在失败」占屏） */
 function groupBucket(g) { return g.maintenance ? 'maintenance' : (g.bucket || 'live'); }
 
@@ -129,7 +170,7 @@ function paintOncall() {
     ? '<div class="oc-warn">通知里的「点击查看」链接<b>未启用</b>（未配置 public_url）。'
       + '到「通知配置 → 通知深链」填上本站地址即可，之后发出的告警会直接带定位链接。</div>'
     : '';
-  body.innerHTML = chips + pubHint + (items.length
+  body.innerHTML = ocSelfcheckBar(d) + ocNodeBar(d) + chips + pubHint + (items.length
     ? '<div class="oncall-grid">' + items.map(oncallCard).join('') + '</div>'
     : '<div class="oncall-empty">该筛选下没有卡片<br>'
       + '<span style="font-size:12px">「沉默/陈旧」表示事件还开着、但我们已经收不到新样本——'

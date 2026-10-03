@@ -227,12 +227,11 @@ def _selfcheck_minutes(storage) -> int:
     return minutes if minutes > 0 else 10
 
 
-def _channel_up_samples(storage, now_ts: int) -> list[str]:
-    """gpm_notify_channel_up 样本行：enabled 且自检在 staleness 内 → 1，否则 0。
+def _channel_states(storage, now_ts: int) -> list:
+    """(渠道, 状态) 列表，状态 ∈ 1 / 0 / None。
 
-    - 依据 notify_channels.last_ok_at 与当前时间差（ staleness = 2×自检周期，
-      容忍一个周期的滞后，避免周期边界抖动）+ enabled；
-    - 渠道从未自检过（last_ok_at=0）→ 不输出该系列（「未知」不是「down」）。
+    None = 「从未自检过」——未知不是 down，指标里不输出该系列，值班页单独计数。
+    口径：enabled 且 last_ok_at 在 staleness（2×自检周期，容忍一个周期滞后）内 → 1。
     """
     lc = getattr(storage, "list_channels", None)
     if not callable(lc):
@@ -242,15 +241,49 @@ def _channel_up_samples(storage, now_ts: int) -> list[str]:
     except Exception:
         return []
     staleness = 2 * _selfcheck_minutes(storage) * 60
-    samples: list[str] = []
+    # 显式标注：首条 append 是 (c, None)，否则会被推断成 list[tuple[Any, None]]
+    out: list = []
     for c in channels:
         last_ok = _as_int(_get(c, "last_ok_at")) or 0
         if last_ok <= 0:
+            out.append((c, None))
+        elif _as_bool_int(_get(c, "enabled")) and (now_ts - last_ok) <= staleness:
+            out.append((c, 1))
+        else:
+            out.append((c, 0))
+    return out
+
+
+def channel_health(storage, now_ts: int) -> dict:
+    """渠道健康汇总（第四期 17）。与 gpm_notify_channel_up 共用同一份状态计算，
+    避免「指标说渠道正常、值班页说渠道挂了」这种自相矛盾。"""
+    states = _channel_states(storage, now_ts)
+    enabled = [(c, st) for c, st in states if _as_bool_int(_get(c, "enabled"))]
+    total = len(enabled)
+    up = sum(1 for _c, st in enabled if st == 1)
+    unknown = sum(1 for _c, st in enabled if st is None)
+    down = [{"id": str(_get(c, "id") or ""), "name": str(_get(c, "name") or ""),
+             "last_ok_at": _as_int(_get(c, "last_ok_at")) or 0,
+             "last_error": str(_get(c, "last_error") or "")}
+            for c, st in enabled if st == 0]
+    return {"enabled": total, "up": up, "unknown": unknown,
+            "down": len(down), "down_list": down[:5]}
+
+
+def _channel_up_samples(storage, now_ts: int) -> list[str]:
+    """gpm_notify_channel_up 样本行：enabled 且自检在 staleness 内 → 1，否则 0。
+
+    渠道从未自检过（last_ok_at=0）→ 不输出该系列（「未知」不是「down」）。
+    """
+    samples: list[str] = []
+    for c, st in _channel_states(storage, now_ts):
+        if st is None:
             continue
-        up = 1 if _as_bool_int(_get(c, "enabled")) and (now_ts - last_ok) <= staleness else 0
+        # 注意：**停用渠道也要输出 0**（状态计算里 enabled=0 已归为 0）。这是既有契约，
+        # 有测试钉住；channel_health() 那边才只统计 enabled 的渠道。
         samples.append(
             f'gpm_notify_channel_up{{channel_id="{_escape_label(_get(c, "id"))}",'
-            f'name="{_escape_label(_get(c, "name"))}"}} {up}')
+            f'name="{_escape_label(_get(c, "name"))}"}} {st}')
     return samples
 
 

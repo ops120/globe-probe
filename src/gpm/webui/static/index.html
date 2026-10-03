@@ -124,8 +124,18 @@ table.tbl{width:100%;border-collapse:collapse}
 .oc-meta b{color:var(--muted);font-weight:400}
 .oc-advice{font-size:12px;color:var(--note-fg);background:var(--accent-bg);border:1px solid var(--accent-bd);border-radius:6px;padding:6px 10px;margin:6px 0 8px;line-height:1.6}
 .oc-ops{display:flex;gap:8px;justify-content:flex-end}
-/* 第三期：卡片内的「下一步命令」与「同期变更」；顶部未配置 public_url 的提示条 */
-.oc-runbook{display:flex;align-items:center;gap:8px;margin:6px 0 2px;flex-wrap:wrap}
+/* 第四期：值班页顶部的「本平台可信度」与节点资源饱和度 */
+.oc-check{display:flex;gap:8px 22px;flex-wrap:wrap;font-size:12px;color:var(--fg-2);
+  background:var(--bg-2);border:1px solid var(--bd);border-radius:8px;padding:7px 12px;margin-bottom:8px}
+.oc-check b{color:var(--fg-strong)}
+.oc-check.bad{border-color:rgba(245,165,36,.45);background:rgba(245,165,36,.08)}
+.oc-nodes{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.oc-node{font-size:12px;color:var(--fg-2);background:var(--bg-3);border:1px solid var(--bd);
+  border-radius:12px;padding:3px 10px}
+.oc-node b{color:var(--fg-strong);font-weight:600}
+.oc-node.hot{border-color:rgba(229,72,77,.5);color:var(--fail-fg)}
+.oc-node.hot b{color:var(--fail-fg)}
+.oc-node.off{opacity:.6}
 .oc-rb-lbl{color:var(--muted);font-size:12px}
 .oc-runbook code{background:var(--bg-3);border:1px solid var(--bd);border-radius:6px;
   padding:4px 8px;font-size:12px;color:var(--fg-strong2);word-break:break-all;flex:1}
@@ -587,20 +597,20 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=40"></script>
+<script src="/static/echarts.min.js?v=41"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=40"></script>
-<script src="/static/gpm-api.js?v=40"></script>
-<script src="/static/gpm-theme.js?v=40"></script>
-<script src="/static/gpm-charts.js?v=40"></script>
-<script src="/static/gpm-page-overview.js?v=40"></script>
-<script src="/static/gpm-page-task.js?v=40"></script>
-<script src="/static/gpm-page-compare.js?v=40"></script>
-<script src="/static/gpm-page-geo.js?v=40"></script>
-<script src="/static/gpm-page-oncall.js?v=40"></script>
-<script src="/static/gpm-page-alerts.js?v=40"></script>
-<script src="/static/gpm-page-nodes.js?v=40"></script>
-<script src="/static/gpm-page-tasks.js?v=40"></script>
-<script src="/static/gpm-boot.js?v=40"></script>
+<script src="/static/gpm-utils.js?v=41"></script>
+<script src="/static/gpm-api.js?v=41"></script>
+<script src="/static/gpm-theme.js?v=41"></script>
+<script src="/static/gpm-charts.js?v=41"></script>
+<script src="/static/gpm-page-overview.js?v=41"></script>
+<script src="/static/gpm-page-task.js?v=41"></script>
+<script src="/static/gpm-page-compare.js?v=41"></script>
+<script src="/static/gpm-page-geo.js?v=41"></script>
+<script src="/static/gpm-page-oncall.js?v=41"></script>
+<script src="/static/gpm-page-alerts.js?v=41"></script>
+<script src="/static/gpm-page-nodes.js?v=41"></script>
+<script src="/static/gpm-page-tasks.js?v=41"></script>
+<script src="/static/gpm-boot.js?v=41"></script>
 </body>
 </html>

@@ -874,14 +874,34 @@ def setup_router(app_state) -> APIRouter:
             it["changes"] = chg.get(it["incident_id"], [])
             it["runbook"] = runbook_for(it["layer"])
         pub = alerting.public_url(s)
+        # 第四期 16/17：先排除「监控自己坏了」，再谈故障 ——
+        #   ① 节点资源饱和度：实测 win-local 长期 CPU 90~95%，这种节点上的失败先怀疑节点自身；
+        #   ② 本平台可信度三数：探测新鲜度（最近样本距今）/ 渠道可用 / 事件自愈（不可信事件数）。
+        #      不可信事件数就是 §三 那三条自查 SQL，正常恒为 0，>0 时页面自己报警。
+        from . import metrics as _metrics
+        with s.lock:
+            _last_res = s.db.execute("SELECT MAX(ts) m FROM probe_results").fetchone()["m"] or 0
+        _zombie = s.zombie_incidents()
+        selfcheck = {
+            "probe_age_s": (t_now - int(_last_res)) if _last_res else None,
+            "channels": _metrics.channel_health(s, t_now),
+            "zombie_events": sum(len(v) for v in _zombie.values()),
+            "zombie_detail": _zombie,
+        }
+        nodes_health = [{
+            "node_id": n["id"], "name": n["name"], "status": n.get("status") or "",
+            "cpu": n.get("cpu"), "mem": n.get("mem"), "streams": n.get("hb_tasks") or 0,
+            "heartbeat_age_s": ((t_now - int(n["last_heartbeat"]))
+                                if n.get("last_heartbeat") else None),
+        } for n in nodes.values()]
         # 聚合后的「行动项」：同一任务一张卡 + 按节点横切（第二期 7-9）。
         # items 保持原样返回，前端与既有验收断言不受影响。
         return {"ts": t_now, "items": items,
                 "groups": _oncall_groups(items, t_now),
+                "selfcheck": selfcheck, "nodes_health": nodes_health,
                 # 第三期 12：未配置 public_url 时通知里**没有**「点击查看」链接，
                 # 页面上要显著提示，否则运维只会以为「链接坏了」。
                 "public_url": pub, "public_url_configured": bool(pub)}
-
     @router.get("/compare")
     def compare(task_id: str, mode: str = "yesterday", metric: str = "rtt",
                 window_hours: int = 0, node_id: str = "", dns: str = "", url: str = ""):

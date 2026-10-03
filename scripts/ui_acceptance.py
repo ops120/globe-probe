@@ -478,6 +478,15 @@ def main() -> int:
                       "命令以代码块呈现（可复制）")
             else:
                 ck.ok(True, "（无探测类卡片，跳过「下一步命令」断言）")
+            # 第四期 16/17：顶部「本平台可信度」三数与节点资源饱和度
+            _sc_txt = page.text_content("#oncall-body .oc-check") or ""
+            ck.ok("探测新鲜度" in _sc_txt and "通知渠道" in _sc_txt and "事件自愈" in _sc_txt,
+                  "值班页顶部给出平台可信度三数（%s）" % _sc_txt[:50])
+            _sc = page.evaluate("async () => (await (await fetch('/api/oncall')).json()).selfcheck")
+            ck.ok(("正常" in _sc_txt) == (_sc["zombie_events"] == 0),
+                  "事件自愈显示与自查 SQL 一致（不可信 %s 条）" % _sc["zombie_events"])
+            ck.ok(page.locator("#oncall-body .oc-nodes .oc-node").count() >= 1,
+                  "值班页列出节点资源饱和度（CPU/内存/离线态）")
             # 第三期 12：未配置 public_url 时值班页要显著提示；配好后提示消失
             _pubd = page.evaluate(
                 "async () => await (await fetch('/api/settings/public-url')).json()")
