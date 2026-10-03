@@ -15,7 +15,7 @@ from ..common.models import NodeUpdate, TaskCreate, TaskUpdate, validate_params
 from ..common.util import new_id, now, sha256, validate_domain, validate_host_port, \
     validate_target
 from . import alerting, geo
-from .diagnose import classify, verdict
+from .diagnose import classify, runbook_for, verdict
 from .storage import BUCKET_SECONDS
 
 log = logging.getLogger("gpm.web")
@@ -83,6 +83,52 @@ def _oncall_group_subtitle(count: int, nodes: list, targets: list) -> str:
     return " · ".join(bits)
 
 
+CHANGES_PAD_SECONDS = 1800      # 事件窗口 ±30 分钟
+CHANGES_PER_CARD = 3            # 卡片上只留最有用的几条（完整清单仍在事件详情弹窗里）
+
+
+def _oncall_changes(s, items: list, t_now: int) -> dict:
+    """同期变更（第三期 14）：事件窗口 ±30 分钟内、**动过这个东西**的写操作。
+
+    原先只有事件详情弹窗里有——值班的人要先点开弹窗才知道「这期间有人改过配置」，
+    而「刚改完就炸」是排查时最省时间的线索之一。
+
+    实现上按**一次查询**取齐所有事件的并集窗口，再在内存里按 target_id / 名称分发
+    （逐条查会退化成 N+1，而 /api/oncall 是首屏接口）。只保留与「该任务/该节点」
+    直接相关的记录：泛泛列 8 条无关审计等于噪声。
+    """
+    probe = [it for it in items if it["task_id"]]
+    if not probe:
+        return {}
+    pad = CHANGES_PAD_SECONDS
+    t_from = min(int(it["started_at"] or t_now) for it in probe) - pad
+    rows = s.audit_list(limit=500, since=t_from) or []
+    out: dict = {}
+    for it in probe:
+        lo = int(it["started_at"] or t_now) - pad
+        hi = t_now + pad
+        keys = {str(it["task_id"]), str(it["node_id"])}
+        names = [str(it.get("task_name") or ""), str(it.get("node_name") or "")]
+        # 显式标注：字面量字典会被推断成 dict[str, object]，sort 的 key 就不可比了
+        picked: list[dict] = []
+        for r in rows:
+            ts = int(r.get("ts") or 0)
+            if ts < lo or ts > hi:
+                continue
+            rid = str(r.get("target_id") or "")
+            detail = str(r.get("detail") or "")
+            if rid not in keys and not any(n and n in detail for n in names):
+                continue
+            head = str(r.get("target") or "")
+            picked.append({"ts": ts, "who": str(r.get("who") or ""),
+                           "action": str(r.get("action") or ""),
+                           "detail": " · ".join(x for x in (head, detail) if x)})
+        if picked:
+            picked.sort(key=lambda x: x["ts"], reverse=True)
+            out[it["incident_id"]] = picked[:CHANGES_PER_CARD]
+    return out
+
+
 def _oncall_groups(items: list, t_now: int) -> list:
     """把逐流事件聚合为「行动项」：同一任务一张卡 + 按节点横切提示。
 
@@ -130,6 +176,8 @@ def _oncall_groups(items: list, t_now: int) -> list:
             "acked": all(m["acked"] for m in members),
             "maintenance": next((m.get("maintenance") for m in members
                                  if m.get("maintenance")), None),
+            "runbook": next((m.get("runbook") for m in members if m.get("runbook")), ""),
+            "changes": next((m.get("changes") for m in members if m.get("changes")), []),
             "subtitle": _oncall_group_subtitle(len(members), nodes, targets),
             "members": members,
         })
@@ -146,6 +194,7 @@ def _oncall_groups(items: list, t_now: int) -> list:
             "duration_s": it.get("duration_s") or 0,
             "last_ts": it.get("last_ts") or 0, "acked": it["acked"],
             "maintenance": it.get("maintenance"), "subtitle": "节点事件",
+            "runbook": it.get("runbook") or "", "changes": [],
             "members": [it],
         })
 
@@ -180,6 +229,7 @@ def _oncall_groups(items: list, t_now: int) -> list:
             "last_ts": max(int(m["last_ts"] or 0) for m in members),
             "acked": False,
             "maintenance": None,
+            "runbook": runbook_for("节点侧"), "changes": [],
             "subtitle": "%d 个任务同时失败" % len(tids_set),
             "members": members,
         })
@@ -818,10 +868,19 @@ def setup_router(app_state) -> APIRouter:
             mw = s.in_maintenance(t_now, task_id=it["task_id"], node_id=it["node_id"])
             it["maintenance"] = ({"name": mw.get("name") or "维护窗口",
                                   "ends_at": mw.get("ends_at")} if mw else None)
+        # 第三期 13/14：卡片上直接给「可粘贴的命令」与「同期变更」。
+        chg = _oncall_changes(s, items, t_now)
+        for it in items:
+            it["changes"] = chg.get(it["incident_id"], [])
+            it["runbook"] = runbook_for(it["layer"])
+        pub = alerting.public_url(s)
         # 聚合后的「行动项」：同一任务一张卡 + 按节点横切（第二期 7-9）。
         # items 保持原样返回，前端与既有验收断言不受影响。
         return {"ts": t_now, "items": items,
-                "groups": _oncall_groups(items, t_now)}
+                "groups": _oncall_groups(items, t_now),
+                # 第三期 12：未配置 public_url 时通知里**没有**「点击查看」链接，
+                # 页面上要显著提示，否则运维只会以为「链接坏了」。
+                "public_url": pub, "public_url_configured": bool(pub)}
 
     @router.get("/compare")
     def compare(task_id: str, mode: str = "yesterday", metric: str = "rtt",
@@ -1470,6 +1529,29 @@ def setup_router(app_state) -> APIRouter:
     @router.get("/report/digest/settings")
     def digest_settings():
         return _digest_settings()
+
+    # ---------- 通知深链前缀（第三期 11/12）----------
+    @router.get("/settings/public-url")
+    def public_url_get():
+        """当前深链前缀。未配置时最好用的排障线索就是「配置在哪、怎么设」。"""
+        v = alerting.public_url(s)
+        return {"public_url": v, "configured": bool(v),
+                "hint": ("未配置：通知里不会有「点击查看」链接（不编造链接）。"
+                         "可在 config.yaml 的 server.public_url 设置，或在本页直接保存。")}
+
+    @router.put("/settings/public-url")
+    def public_url_set(body: dict, x_admin_token: str | None = Header(default=None)):
+        """配置通知深链前缀（如 https://gpm.example.com）。空串=不带链接。
+
+        历史缺陷：这个值原先只有 setting_get 一条来源，**没有任何地方写过它** ——
+        没有 config 键也没有接口，等于线上根本配不了，于是每条通知都没有【链接】段落。
+        """
+        check_write(x_admin_token)
+        v = str(body.get("public_url") or "").strip().rstrip("/")
+        if v and not (v.startswith("http://") or v.startswith("https://")):
+            raise HTTPException(422, "public_url 必须以 http:// 或 https:// 开头")
+        s.setting_set("public_url", v)
+        return {"public_url": v, "configured": bool(v)}
 
     @router.put("/report/digest/settings")
     def digest_settings_set(body: dict, x_admin_token: str | None = Header(default=None)):

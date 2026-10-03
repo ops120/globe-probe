@@ -244,11 +244,22 @@ def _duration_text(t0: int, stats: dict, ts: int) -> str:
     return "【持续】已持续 " + str(seconds // 60) + " 分钟" + tail
 
 
+def public_url(storage) -> str:
+    """深链前缀。取配置 `server.public_url` 优先，其次 settings 里的同名键。
+
+    历史缺陷：只有 setting_get 一条来源，而 **没有任何地方调用 setting_set("public_url")**
+    —— 没有 config 键也没有接口，等于线上根本配不了，于是每条通知都没有【链接】段落
+    （.docs/ONCALL_OPTIMIZATION_2.md 第三期 12）。
+    """
+    value = str(_safe_call(storage, "setting_get", "public_url", "", default="") or "")
+    return value.strip().rstrip("/")
+
+
 def _link_line(storage, task_id: str, ts_start: int) -> str:
-    """【链接】段落：public_url 未配置（默认空）时整段省略。"""
+    """【链接】段落：public_url 未配置时整段省略（不编造链接）。"""
     if not task_id:
         return ""
-    base = str(_safe_call(storage, "setting_get", "public_url", "", default="") or "").strip()
+    base = public_url(storage)
     if not base:
         return ""
     return ("【链接】" + base.rstrip("/") + "/index.html?task=" + str(task_id)

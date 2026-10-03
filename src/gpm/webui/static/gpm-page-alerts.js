@@ -127,6 +127,21 @@ function slaCsv() {
   return lines.join('\n');
 }
 
+/* 通知深链前缀（第三期 11/12）：未配置时通知里不会有「点击查看」链接。
+ * 这个值原先只有 setting_get 一条来源、且没有任何地方写过它 —— 没有 config 键也没有
+ * 接口，等于线上根本配不了；现在既支持 config.yaml 的 server.public_url，也能在这里改。 */
+async function renderPublicUrl() {
+  const el = $('#pub-url'), hint = $('#pub-hint');
+  if (!el) return;
+  let d;
+  try { d = await api('/api/settings/public-url'); } catch (e) { if (hint) hint.textContent = '读取失败'; return; }
+  el.value = d.public_url || '';
+  if (hint) {
+    hint.textContent = d.configured ? '已配置：通知会带「点击查看」深链' : '未配置：通知不带链接';
+    hint.style.color = d.configured ? 'var(--ok-fg)' : 'var(--warn-fg)';
+  }
+}
+
 async function renderChannels() {
   const chans = await api('/api/alerts/channels');
   state.channels = chans;
@@ -268,6 +283,7 @@ async function renderAlerts() {
   state.nodeMap = nodes;
   if (!state.tasks || !state.tasks.length) state.tasks = await api('/api/tasks');
   await Promise.all([renderSla(), renderChannels(), renderRules(), renderWindows()]);
+  await renderPublicUrl();
   await renderAlertHistory();
   await renderDigest();
   await renderOutbox();
@@ -508,6 +524,15 @@ window.delWindow = async (wid) => {
   try { await api('/api/alerts/windows/' + wid, { method: 'DELETE' }); toast('已删除'); renderWindows(); }
   catch (e) { toast('失败: ' + e.message); }
 };
+$('#pub-save').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/settings/public-url', { method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public_url: $('#pub-url').value || '' }) });
+    toast(r.configured ? '已保存：通知将带深链' : '已清空：通知不带链接');
+    renderPublicUrl();
+  } catch (e) { toast('保存失败: ' + e.message); }
+});
 $('#ch-new').addEventListener('click', () => chModal(''));
 $('#rule-new').addEventListener('click', () => ruleModal(''));
 $('#mw-new').addEventListener('click', () => mwModal());

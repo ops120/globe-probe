@@ -73,8 +73,11 @@ def test_oncall_two_nodes_one_fail(tmp_path):
     r = client.get("/api/oncall")
     assert r.status_code == 200, r.text
     body = r.json()
-    # 第二期新增 groups（聚合后的「行动项」）；items 保持原样以兼容既有前端与断言
-    assert set(body) == {"ts", "items", "groups"} and body["ts"] > 0
+    # 第二期新增 groups（聚合后的「行动项」）；第三期新增 public_url /
+    # public_url_configured（未配置时页面显著提示「通知里的链接未启用」）。
+    # items 保持原样以兼容既有前端与断言。
+    assert set(body) == {"ts", "items", "groups",
+                         "public_url", "public_url_configured"} and body["ts"] > 0
     items = [i for i in body["items"] if i["task_id"] == tid]
     assert len(items) == 1, body["items"]
     it = items[0]

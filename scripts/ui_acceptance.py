@@ -470,6 +470,23 @@ def main() -> int:
             got_node = page.locator("#oncall-body button", has_text="看节点").count()
             ck.ok(got_goto + got_node >= 1,
                   "值班卡片有行动入口（去处理 %d / 看节点 %d）" % (got_goto, got_node))
+            # 第三期 13：探测类卡片给「下一步命令」（可粘贴），而不是只给一句散文建议
+            if _probe_cards > 0:
+                ck.ok(page.locator("#oncall-body .oc-runbook").count() >= 1,
+                      "探测类卡片给出「下一步命令」")
+                ck.ok(page.locator("#oncall-body .oc-runbook code").count() >= 1,
+                      "命令以代码块呈现（可复制）")
+            else:
+                ck.ok(True, "（无探测类卡片，跳过「下一步命令」断言）")
+            # 第三期 12：未配置 public_url 时值班页要显著提示；配好后提示消失
+            _pubd = page.evaluate(
+                "async () => await (await fetch('/api/settings/public-url')).json()")
+            if _pubd["configured"]:
+                ck.ok(page.locator("#oncall-body .oc-warn").count() == 0,
+                      "已配置 public_url → 值班页不显示未配置提示")
+            else:
+                ck.ok(page.locator("#oncall-body .oc-warn").count() == 1,
+                      "未配置 public_url → 值班页显著提示（不让运维以为「链接坏了」）")
         else:
             ck.ok(False, "值班总览未渲染出预期内容（%s）" % on_txt[:80])
         shot("alerts-oncall")
@@ -509,6 +526,17 @@ def main() -> int:
         ck.ok(page.locator("#ch-new").count() == 1 and page.locator("#rule-new").count() == 1,
               "渠道/规则有新建入口")
         ck.ok(page.locator("#mw-new").count() == 1, "维护窗口有新建入口")
+        # 第三期 12：public_url 原先没有任何配置入口（没有 config 键、也没有接口），
+        # 等于线上配不了 → 每条通知都没有【链接】段落。现在可在本页保存。
+        ck.ok(page.locator("#pub-url").count() == 1 and page.locator("#pub-save").count() == 1,
+              "通知配置有 public_url 输入与保存入口")
+        _pub_hint = (page.text_content("#pub-hint") or "").strip()
+        ck.ok(("已配置" in _pub_hint) or ("未配置" in _pub_hint),
+              "public_url 明确显示当前是否配置（%s）" % _pub_hint[:30])
+        _pub = page.evaluate(
+            "async () => await (await fetch('/api/settings/public-url')).json()")
+        ck.ok(_pub["configured"] == ("已配置" in _pub_hint),
+              "页面提示与接口一致（configured=%s）" % _pub["configured"])
         wait_count(page, "#ch-tbl tbody tr")
         ck.ok("本地演练" in (page.text_content("#ch-tbl") or ""), "渠道表显示已配置的通知渠道")
         rule_txt = page.text_content("#rule-tbl") or ""
@@ -640,14 +668,17 @@ def main() -> int:
         if not dl:
             ck.ok(True, "（无「首个流有 ok 记录」的启用任务，跳过深链断言）")
         else:
-            # 契约深链格式是 /index.html?task=..&ts=..；boot 只解析 location.search，
-            # 旧版服务端静态层只路由 /（/index.html 404）时退回 /?task=..，两者等价
+            # 契约深链格式是 /index.html?task=..&ts=..；boot 只解析 location.search。
+            # 原先只路由了 "/"，于是通知里的「点击查看」链接**一直是 404**，而这里又特意
+            # 在 404 时静默退回 "/" 继续断言 —— 两边都没发现。现在把「/index.html 可达」
+            # 变成一条显式断言：它才是通知里真正会发给运维的路径。
             idx_ok = True
             try:
                 with urllib.request.urlopen(args.base + "/index.html", timeout=10) as r:
                     idx_ok = r.status < 400
             except Exception:  # noqa: BLE001 - 404/不可达都退回根路径
                 idx_ok = False
+            ck.ok(idx_ok, "通知深链路径 /index.html 可达（它就是通知里发给运维的 URL）")
             dl_path = "/index.html" if idx_ok else "/"
             print(f"   深链目标：{dl['name']} ts={dl['ts']}（路径 {dl_path}）")
             page.goto(args.base + dl_path + "?task=" + str(dl["id"]) + "&ts=" + str(dl["ts"]),

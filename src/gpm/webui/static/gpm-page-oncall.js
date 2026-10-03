@@ -123,12 +123,28 @@ function paintOncall() {
         + '</select>'
       : '')
     + '</div>';
-  body.innerHTML = chips + (items.length
+  // 第三期 12：未配置 public_url 时通知里没有「点击查看」链接。这里显著提示，
+  // 否则运维只会以为「链接坏了」，而其实是根本没人配过（配置入口也是这次才补上的）。
+  const pubHint = (d.public_url_configured === false)
+    ? '<div class="oc-warn">通知里的「点击查看」链接<b>未启用</b>（未配置 public_url）。'
+      + '到「通知配置 → 通知深链」填上本站地址即可，之后发出的告警会直接带定位链接。</div>'
+    : '';
+  body.innerHTML = chips + pubHint + (items.length
     ? '<div class="oncall-grid">' + items.map(oncallCard).join('') + '</div>'
     : '<div class="oncall-empty">该筛选下没有卡片<br>'
       + '<span style="font-size:12px">「沉默/陈旧」表示事件还开着、但我们已经收不到新样本——'
       + '不代表目标此刻仍在失败，正常的会被后端自动收口。</span></div>');
 }
+
+window.oncallCopy = async (btn, text) => {
+  try {
+    await navigator.clipboard.writeText(text);
+    if (btn) { const o = btn.textContent; btn.textContent = '已复制'; setTimeout(() => btn.textContent = o, 1200); }
+  } catch (e) {
+    // 非 https / 无剪贴板权限时退回手动选中，别静默失败
+    toast('复制失败，请手动选择命令');
+  }
+};
 
 window.oncallFilter = (k) => { state.oncallFilter = k; paintOncall(); };
 window.oncallToggleUnacked = () => { state.oncallUnacked = !state.oncallUnacked; paintOncall(); };
@@ -194,6 +210,19 @@ function oncallCard(g) {
     + '<span><b>最近</b> ' + lastSt + ' ' + lastTime + '</span>'
     + '</div>'
     + (advice ? '<div class="oc-advice">建议：' + esc(advice) + '</div>' : '')
+    // 第三期 13：「建议」是散文，这里给能直接粘贴的第一条命令
+    + (g.runbook ? '<div class="oc-runbook"><span class="oc-rb-lbl">下一步命令</span>'
+        + '<code>' + esc(g.runbook) + '</code>'
+        + '<button class="btn sm ghost" onclick="oncallCopy(this,&quot;'
+        + esc(g.runbook).replace(/"/g, '&quot;') + '&quot;)">复制</button></div>' : '')
+    // 第三期 14：同期变更（±30 分钟内动过这个任务/节点）——「刚改完就炸」最省时间的线索
+    + ((g.changes && g.changes.length)
+      ? '<div class="oc-changes">' + g.changes.map(c =>
+          '<div class="oc-crow"><span class="oc-cts">' + esc(fmtAgo(c.ts)) + '</span>'
+          + '<span class="oc-cact">' + esc(c.action || '') + '</span>'
+          + '<span class="oc-cdet" title="' + esc(c.detail || '') + '">' + esc(c.detail || '') + '</span>'
+          + '</div>').join('') + '</div>'
+      : '')
     + rows
     + '<div class="oc-ops">'
     + (members.length > 1

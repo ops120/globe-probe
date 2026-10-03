@@ -29,6 +29,14 @@ REPO = "https://github.com/ops120/globe-probe"
 
 def create_app(cfg, storage: Storage | None = None):
     storage = storage or Storage(cfg.server["database"])
+    # public_url 以配置文件为准（启动时写入 settings）。历史缺陷：这个键只有 setting_get
+    # 一条来源、且没有任何地方写过它 —— 没有 config 键也没有接口，等于线上配不了，
+    # 于是每条通知都没有【链接】段落（.docs/ONCALL_OPTIMIZATION_2.md 第三期 12）。
+    try:
+        if str(cfg.server.get("public_url") or "").strip():
+            storage.setting_set("public_url", str(cfg.server["public_url"]).strip())
+    except Exception as e:  # noqa: BLE001 - 配置写入失败不影响起服务
+        log.warning("public_url 写入设置失败: %s", e)
     machine = IncidentMachine(storage, cfg.probe.get("fail_threshold", 3),
                               cfg.probe.get("recover_threshold", 2),
                               cfg.probe.get("flap_window_seconds", 600),
@@ -139,6 +147,17 @@ def create_app(cfg, storage: Storage | None = None):
 
     @app.get("/")
     def index():
+        return FileResponse(webui / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.get("/index.html")
+    def index_html():
+        """通知深链用的是 {public_url}/index.html?task=..&ts=..
+
+        原先只路由了 "/"，于是「点击查看」链接一直是 **404**（线上实测），而验收脚本
+        又特意在 /index.html 404 时退回 "/" 继续断言 —— 两边都没发现问题。
+        这里把 /index.html 补上：既让通知里的链接可用，也让**已经发出去的历史通知**
+        重新可点（.docs/ONCALL_OPTIMIZATION_2.md 第三期 11）。
+        """
         return FileResponse(webui / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/static/{name}")

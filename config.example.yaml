@@ -6,6 +6,9 @@ server:
   database: "data/gpm.db"
   webui_dir: ""                    # 默认使用包内 webui/static
   admin_token: ""                  # 设置后写接口要求 X-Admin-Token
+  public_url: ""                   # 通知里「点击查看」深链前缀（如 https://gpm.example.com）。
+                                   # 留空则通知**不带**链接（不编造链接），且值班页会显著提示
+                                   # 未配置。也可在 WebUI「通知配置 → 通知深链」里设置。
   ingest_batch_max: 500
   late_window_seconds: 300
   clock_skew_seconds: 120

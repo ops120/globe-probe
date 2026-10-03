@@ -82,6 +82,27 @@ def _classify_http(ec: str) -> tuple[str, str] | None:
     return ("应用层", f"目标返回 {n}：核对期望状态码配置")
 
 
+# 层面 → **可直接粘贴运行**的第一条排查命令（.docs/ONCALL_OPTIMIZATION_2.md 第三期 13）。
+# 卡片上的「建议」是散文，值班的人还得自己想命令；这里把「第一步跑什么」直接给出来。
+# 占位符：<域名> <解析线路> <目标IP> <主机> <端口> <URL>
+RUNBOOK: dict[str, str] = {
+    "DNS 层": "dig @<解析线路> <域名> +short   # 或 nslookup <域名> <解析线路>",
+    "网络层": "mtr -r -c 10 <目标IP>            # Windows: tracert -d <目标IP>",
+    "网络/端口层": "nc -vz <主机> <端口>          # 无 nc 时: curl -v --connect-timeout 3 telnet://<主机>:<端口>",
+    "网络/服务端层": "curl -o /dev/null -s -w 'dns=%{time_namelookup} connect=%{time_connect} ttfb=%{time_starttransfer} total=%{time_total}\\n' <URL>",
+    "TLS 层": "openssl s_client -connect <主机>:443 -servername <主机> </dev/null 2>/dev/null | openssl x509 -noout -dates",
+    "服务端层": "curl -sI <URL>",
+    "应用层": "curl -s <URL> | head -c 500",
+    "节点侧": "在节点上查进程与资源：ps -ef | grep gpm-agent；top -b -n1 | head -5",
+    "节点侧(DNS)": "确认该节点 DNS 是否被代理劫持为 fake-ip；给该任务配 DoH 线路",
+}
+
+
+def runbook_for(layer: str) -> str:
+    """层面 → 可粘贴命令；未知层面返回空串（不编造命令）。"""
+    return RUNBOOK.get((layer or "").strip(), "")
+
+
 def classify(error_class: str) -> tuple[str, str]:
     """error_class → (层面, 建议动作)。空/未知返回「待定位」。"""
     ec = (error_class or "").strip()

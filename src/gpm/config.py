@@ -26,6 +26,9 @@ DEFAULTS = {
         "retention_incidents_days": 180,  # 已关闭事件保留
         "thread_pool_tokens": 40,     # AnyIO 线程池上限（防线程爆发 MemoryError）
         "tasks_cache_seconds": 15,    # /api/tasks 列表缓存秒数（0=禁用）；config_version 变更立即失效，?fresh=1 绕过
+        # 通知里「点击查看」深链的前缀（如 https://gpm.example.com）。留空则通知不带链接——
+        # 界面会显著提示未配置，不再让运维以为「链接坏了」。
+        "public_url": "",
         "alert_eval_interval": 30,    # 告警规则评估周期（秒）
         "notify_retry_interval": 60,  # 通知失败重投的扫描周期（秒）
         "digest_check_interval": 300, # 巡检报告定时推送的检查周期（秒）

@@ -124,8 +124,18 @@ table.tbl{width:100%;border-collapse:collapse}
 .oc-meta b{color:var(--muted);font-weight:400}
 .oc-advice{font-size:12px;color:var(--note-fg);background:var(--accent-bg);border:1px solid var(--accent-bd);border-radius:6px;padding:6px 10px;margin:6px 0 8px;line-height:1.6}
 .oc-ops{display:flex;gap:8px;justify-content:flex-end}
-/* 聚合卡展开后的成员行：一张卡代表多条流，点开可逐条看/逐条确认 */
-.oc-members{margin:6px 0 2px;border-top:1px dashed var(--bd);padding-top:6px}
+/* 第三期：卡片内的「下一步命令」与「同期变更」；顶部未配置 public_url 的提示条 */
+.oc-runbook{display:flex;align-items:center;gap:8px;margin:6px 0 2px;flex-wrap:wrap}
+.oc-rb-lbl{color:var(--muted);font-size:12px}
+.oc-runbook code{background:var(--bg-3);border:1px solid var(--bd);border-radius:6px;
+  padding:4px 8px;font-size:12px;color:var(--fg-strong2);word-break:break-all;flex:1}
+.oc-changes{margin:6px 0 2px;border-top:1px dashed var(--bd);padding-top:6px}
+.oc-crow{display:flex;gap:10px;font-size:12px;padding:2px 0;flex-wrap:wrap}
+.oc-cts{color:var(--faint);min-width:72px}
+.oc-cact{color:var(--warn-fg)}
+.oc-cdet{color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.oc-warn{font-size:12px;color:var(--warn-fg);background:rgba(245,165,36,.10);
+  border:1px solid rgba(245,165,36,.35);border-radius:8px;padding:8px 12px;margin-bottom:10px}
 .oc-mrow{display:flex;align-items:center;gap:10px;font-size:12px;padding:3px 0;flex-wrap:wrap}
 .oc-mnode{color:var(--fg-2);min-width:82px}
 .oc-mtgt{color:var(--muted);flex:1;word-break:break-all}
@@ -462,6 +472,13 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 
         <div class="subpage hidden" data-subpage="notify">
           <div class="panel">
+            <div class="panel-head">通知深链 <span class="sub">通知里「点击查看」链接的前缀（如 https://gpm.example.com）。留空则通知不带链接——不编造链接</span>
+              <span style="flex:1"></span><button class="btn sm" id="pub-save">保存</button></div>
+            <div class="form-row"><label>public_url</label>
+              <input type="text" id="pub-url" placeholder="https://gpm.example.com" style="flex:1">
+              <span id="pub-hint" class="sub" style="margin-left:10px;white-space:nowrap"></span></div>
+          </div>
+          <div class="panel">
             <div class="panel-head">通知渠道 <span class="sub">Webhook / 企业微信 / 钉钉 / 飞书 / SMTP；可测试发送</span>
               <span style="flex:1"></span><button class="btn sm" id="ch-new">+ 新增渠道</button></div>
             <table class="tbl" id="ch-tbl"></table>
@@ -570,20 +587,20 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=39"></script>
+<script src="/static/echarts.min.js?v=40"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=39"></script>
-<script src="/static/gpm-api.js?v=39"></script>
-<script src="/static/gpm-theme.js?v=39"></script>
-<script src="/static/gpm-charts.js?v=39"></script>
-<script src="/static/gpm-page-overview.js?v=39"></script>
-<script src="/static/gpm-page-task.js?v=39"></script>
-<script src="/static/gpm-page-compare.js?v=39"></script>
-<script src="/static/gpm-page-geo.js?v=39"></script>
-<script src="/static/gpm-page-oncall.js?v=39"></script>
-<script src="/static/gpm-page-alerts.js?v=39"></script>
-<script src="/static/gpm-page-nodes.js?v=39"></script>
-<script src="/static/gpm-page-tasks.js?v=39"></script>
-<script src="/static/gpm-boot.js?v=39"></script>
+<script src="/static/gpm-utils.js?v=40"></script>
+<script src="/static/gpm-api.js?v=40"></script>
+<script src="/static/gpm-theme.js?v=40"></script>
+<script src="/static/gpm-charts.js?v=40"></script>
+<script src="/static/gpm-page-overview.js?v=40"></script>
+<script src="/static/gpm-page-task.js?v=40"></script>
+<script src="/static/gpm-page-compare.js?v=40"></script>
+<script src="/static/gpm-page-geo.js?v=40"></script>
+<script src="/static/gpm-page-oncall.js?v=40"></script>
+<script src="/static/gpm-page-alerts.js?v=40"></script>
+<script src="/static/gpm-page-nodes.js?v=40"></script>
+<script src="/static/gpm-page-tasks.js?v=40"></script>
+<script src="/static/gpm-boot.js?v=40"></script>
 </body>
 </html>
