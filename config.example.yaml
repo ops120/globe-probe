@@ -50,6 +50,9 @@ probe:
   dns_cache_max: 300
   fail_threshold: 3                # 连续失败 N 次开启事件
   recover_threshold: 2             # 连续成功 N 次恢复
+  stale_after_seconds: 21600       # 陈旧事件自动收口（6h）：某流超过该时长既无新样本也无
+                                   # 恢复样本 → 自动收口。任务停用/节点移除后不再产生结果，
+                                   # 状态机永远等不到 ok，否则事件会在值班页无限期挂着；0=关闭
   jitter_ratio: 0.1
 
 logging:

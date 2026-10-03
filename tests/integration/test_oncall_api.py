@@ -17,7 +17,7 @@ from gpm.server.app import channel_selfcheck_tick, create_app  # noqa: E402
 
 ONCALL_FIELDS = {"incident_id", "task_id", "task_name", "type", "node_id", "node_name",
                  "dns", "url", "error_class", "layer", "advice", "scope", "started_at",
-                 "duration_s", "last_status", "last_ts", "acked"}
+                 "duration_s", "last_status", "last_ts", "last_age_s", "bucket", "acked"}
 
 
 def make_client(tmp_path):
@@ -99,6 +99,61 @@ def test_oncall_two_nodes_one_fail(tmp_path):
     assert it2["acked"] is True
 
 
+# ---------------------------------------------------------------- 分档口径
+
+def test_oncall_bucket_rules():
+    """分档规则：「沉默 ≠ 故障」——事件开着不代表此刻还在失败。
+
+    线上实测：11 张值班卡里 9 张是陈旧/失效的（任务停用、节点在线却挂着离线事件、
+    连续 ok 却仍开着），第一屏不可信，运维第二次就不看了。
+    """
+    from gpm.server.api_web import _oncall_bucket
+
+    # 新鲜失败 → 正在失败
+    assert _oncall_bucket({"interval_seconds": 60}, {}, "fail", 30, 21600) == "live"
+    # 失败样本已过期（但未到陈旧阈值）→ 沉默待确认，不能算「正在失败」
+    assert _oncall_bucket({"interval_seconds": 60}, {}, "fail", 2000, 21600) == "silent"
+    # 远超陈旧阈值 → 陈旧待收口
+    assert _oncall_bucket({"interval_seconds": 60}, {}, "ok", 40 * 3600, 21600) == "stale"
+    # 无样本 → 陈旧（收不到样本这件事本身要显式暴露，而不是装作还在坏）
+    assert _oncall_bucket({"interval_seconds": 60}, {}, None, None, 21600) == "stale"
+    # 节点侧：离线就是真在坏；其余按陈旧
+    assert _oncall_bucket({}, {"status": "offline"}, None, None, 21600) == "live"
+    assert _oncall_bucket({}, {"status": "online"}, None, None, 21600) == "stale"
+
+
+def test_oncall_node_event_has_node_layer(tmp_path):
+    """节点离线事件没有 error_class，不能因此显示「待定位」。"""
+    client, cfg, s = make_client(tmp_path)
+    nid, _ = register(client, cfg, "nd-layer", {"os": "linux"})
+    ts0 = int(time.time())
+    s.db.execute("UPDATE nodes SET last_heartbeat=? WHERE id=?", (ts0 - 300, nid))
+    s.db.commit()
+    s.sweep_offline(60, ts0)
+
+    items = client.get("/api/oncall").json()["items"]
+    node_items = [i for i in items if not i["task_id"]]
+    assert len(node_items) == 1, items
+    it = node_items[0]
+    assert it["layer"] == "节点侧", it
+    assert "心跳" in it["advice"]
+    assert it["bucket"] == "live"                 # 节点确实离线
+    assert it["last_status"] is None and it["last_age_s"] is None
+
+
+def test_oncall_bucket_reported_for_incidents(tmp_path):
+    """每个 item 都要带 bucket/last_age_s，前端分档靠它。"""
+    client, cfg, s = make_client(tmp_path)
+    n1, tk1 = register(client, cfg, "bj-b", {"os": "linux"})
+    tid = client.post("/api/tasks", json={
+        "name": "ping-bucket", "type": "ping", "target": "223.5.5.5",
+        "interval_seconds": 10}).json()["id"]
+    ts0 = int(time.time()) - 30
+    fail_round(client, n1, tk1, tid, ts0)
+    it = client.get("/api/oncall").json()["items"][0]
+    assert it["bucket"] == "live" and it["last_age_s"] is not None
+
+
 def test_oncall_scope_partial_all_nodes_and_empty(tmp_path):
     """三档范围结论各命中一次；无 open 事件时 items 为空。"""
     client, cfg, s = make_client(tmp_path)
@@ -139,7 +194,11 @@ def test_oncall_scope_partial_all_nodes_and_empty(tmp_path):
 
 
 def test_oncall_limit_and_node_incident_shape(tmp_path):
-    """kind=node（节点离线）事件同样成行：无任务信息、layer 走「待定位」兜底。"""
+    """kind=node（节点离线）事件同样成行：无任务信息，但层面必须落到「节点侧」。
+
+    节点事件没有 error_class，早期实现直接走 classify 兜底成「待定位」——值班的人
+    第一眼看到的就是一个没有信息量的『待定位』。"""
+
     client, cfg, s = make_client(tmp_path)
     nid, _token = register(client, cfg, "lonely-node")
     ts0 = int(time.time()) - 60
@@ -149,7 +208,10 @@ def test_oncall_limit_and_node_incident_shape(tmp_path):
     it = items[0]
     assert it["incident_id"] == iid and it["node_name"] == "lonely-node"
     assert it["task_id"] == "" and it["task_name"] == ""
-    assert it["layer"] == "待定位" and it["last_status"] is None and it["last_ts"] == 0
+    assert it["layer"] == "节点侧" and it["last_status"] is None and it["last_ts"] == 0
+    assert "心跳" in it["advice"]
+    # 该节点本身是 online（这条事件是直接构造的），所以分档为「陈旧」而不是「正在失败」
+    assert it["bucket"] == "stale"
     assert it["scope"]["mode"] == ""   # 没有失败样本，不做范围结论
     # limit 参数生效
     items = client.get("/api/oncall?limit=1").json()["items"]

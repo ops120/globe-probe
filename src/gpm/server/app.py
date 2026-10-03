@@ -45,6 +45,14 @@ def create_app(cfg, storage: Storage | None = None):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         stop = asyncio.Event()
+        # 重启后重建事件状态机的内存视图。没有这一步，内存里所有 incident_id 都是 None，
+        # 「重启后恢复」的流会留下永远关不掉的僵尸事件（.docs/ONCALL_OPTIMIZATION_2.md 根因 1.1）。
+        try:
+            n = machine.rebuild_all()
+            if n:
+                log.info("事件状态重建：%d 条仍有未恢复事件的流", n)
+        except Exception as e:  # noqa: BLE001 - 重建失败不影响起服务
+            log.error("事件状态重建失败: %s", e)
         tasks = [
             asyncio.create_task(_sweep_loop(state, stop)),
             asyncio.create_task(_agg_loop(state, stop)),
@@ -233,6 +241,15 @@ async def _sweep_loop(state: dict, stop: asyncio.Event):
                 log.warning("%d 个节点心跳超时，标记离线", n)
         except Exception as e:  # noqa
             log.error("离线 sweep 失败: %s", e)
+        try:
+            # 陈旧事件自动收口：「沉默 ≠ 故障」。任务停用/节点移除后不再产生结果，
+            # 状态机永远等不到 ok，事件会在值班页上无限期显示「已持续 N 小时」。
+            stale = int(state["cfg"].probe.get("stale_after_seconds", 21600) or 0)
+            closed = s.close_stale_incidents(now(), stale)
+            if closed:
+                log.warning("陈旧事件自动收口 %d 条（>%ds 无新样本）", len(closed), stale)
+        except Exception as e:  # noqa
+            log.error("陈旧事件 sweep 失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=15)
         except asyncio.TimeoutError:

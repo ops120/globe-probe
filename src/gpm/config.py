@@ -60,6 +60,9 @@ DEFAULTS = {
         "recover_threshold": 2,
         "flap_window_seconds": 600,   # 抖动合并窗口：关闭后多久内再次失败算同一次事件
         "flap_max_seconds": 21600,    # 单次事件上限（超过则不再合并，防止无限累积）
+        # 陈旧事件自动收口：某流超过该秒数既无新样本也无恢复样本 → 收口（0=关闭该机制）。
+        # 「沉默 ≠ 故障」：任务停用/节点移除后不再产生结果，否则事件会永远挂着
+        "stale_after_seconds": 21600,
         "jitter_ratio": 0.1,
     },
     "logging": {"level": "INFO", "file": ""},

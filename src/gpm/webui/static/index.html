@@ -107,7 +107,8 @@ table.tbl{width:100%;border-collapse:collapse}
 .subtabs button{background:none;border:none;color:var(--nav);font-size:13px;padding:7px 14px;border-radius:6px;cursor:pointer;font-family:inherit}
 .subtabs button:hover{background:var(--bg-3);color:var(--fg-strong)}
 .subtabs button.active{background:var(--btn);color:var(--accent-2)}
-/* 值班总览：每条故障一张卡（非表格） */
+/* 值班总览：每条故障一张卡（非表格）。分档 chip 让「正在失败」和「只是收不到样本」一眼分开 */
+.oncall-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
 .oncall-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:12px}
 .oncall-card{border:1px solid var(--bd);border-left:3px solid var(--fail);border-radius:8px;background:var(--panel);padding:12px 14px}
 .oncall-card.acked{border-left-color:var(--muted)}
@@ -557,20 +558,20 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=35"></script>
+<script src="/static/echarts.min.js?v=36"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=35"></script>
-<script src="/static/gpm-api.js?v=35"></script>
-<script src="/static/gpm-theme.js?v=35"></script>
-<script src="/static/gpm-charts.js?v=35"></script>
-<script src="/static/gpm-page-overview.js?v=35"></script>
-<script src="/static/gpm-page-task.js?v=35"></script>
-<script src="/static/gpm-page-compare.js?v=35"></script>
-<script src="/static/gpm-page-geo.js?v=35"></script>
-<script src="/static/gpm-page-oncall.js?v=35"></script>
-<script src="/static/gpm-page-alerts.js?v=35"></script>
-<script src="/static/gpm-page-nodes.js?v=35"></script>
-<script src="/static/gpm-page-tasks.js?v=35"></script>
-<script src="/static/gpm-boot.js?v=35"></script>
+<script src="/static/gpm-utils.js?v=36"></script>
+<script src="/static/gpm-api.js?v=36"></script>
+<script src="/static/gpm-theme.js?v=36"></script>
+<script src="/static/gpm-charts.js?v=36"></script>
+<script src="/static/gpm-page-overview.js?v=36"></script>
+<script src="/static/gpm-page-task.js?v=36"></script>
+<script src="/static/gpm-page-compare.js?v=36"></script>
+<script src="/static/gpm-page-geo.js?v=36"></script>
+<script src="/static/gpm-page-oncall.js?v=36"></script>
+<script src="/static/gpm-page-alerts.js?v=36"></script>
+<script src="/static/gpm-page-nodes.js?v=36"></script>
+<script src="/static/gpm-page-tasks.js?v=36"></script>
+<script src="/static/gpm-boot.js?v=36"></script>
 </body>
 </html>

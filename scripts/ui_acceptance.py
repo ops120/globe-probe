@@ -100,7 +100,9 @@ def wait_oncall(page, timeout=15000, step=300):
     while waited < timeout:
         txt = page.text_content("#oncall-body") or ""
         if ("服务端暂不支持" in txt or "当前没有进行中的故障" in txt
-                or page.locator("#oncall-body .oncall-card").count() >= 1):
+                or page.locator("#oncall-body .oncall-card").count() >= 1
+                # 分档 chip 出现即代表数据已加载：默认只显示「正在失败」时可能一张卡都没有
+                or page.locator("#oncall-body .oncall-chips").count() >= 1):
             return txt
         page.wait_for_timeout(step)
         waited += step
@@ -363,15 +365,34 @@ def main() -> int:
             ck.ok(True, "值班总览：旧后端无 /api/oncall → 「服务端暂不支持」降级说明出现（不算失败）")
         elif "当前没有进行中的故障" in on_txt:
             ck.ok(True, "值班总览：无进行中故障 → 空态说明出现")
-        elif page.locator("#oncall-body .oncall-card").count() >= 1:
+        elif page.locator("#oncall-body .oncall-chips").count() >= 1:
+            # 分档口径（ONCALL_OPTIMIZATION_2.md 第一期）：第一屏默认只显示「正在失败」，
+            # 「沉默/陈旧」不混进来——事件开着不等于此刻还在坏。
+            on_body = page.text_content("#oncall-body") or ""
+            ck.ok(page.locator("#oncall-body .oncall-chips button").count() == 4,
+                  "值班总览有四个分档 chip（正在失败/沉默待确认/陈旧待收口/全部）")
+            for b in ("正在失败", "沉默待确认", "陈旧待收口"):
+                ck.ok(b in on_body, f"分档口径含「{b}」")
+            # 切到「全部」再断言卡片，避免默认档恰好为空导致误判
+            page.click('#oncall-body .oncall-chips button:has-text("全部")')
+            page.wait_for_timeout(400)
             on_cards = page.locator("#oncall-body .oncall-card").count()
             on_body = page.text_content("#oncall-body") or ""
-            ck.ok("层面" in on_body and "范围" in on_body,
-                  f"值班卡片含层面/范围标注（{on_cards} 张卡）")
-            ck.ok(page.locator("#oncall-body button", has_text="去处理").count() >= 1,
-                  "值班卡片有「去处理」入口")
+            ck.ok(on_cards >= 1, f"「全部」分档下列出卡片（{on_cards} 张）")
+            ck.ok("层面" in on_body and "范围" in on_body, "值班卡片含层面/范围标注")
+            # 「最近」必须是相对时间：判断这张卡还可不可信的第一依据就是「最后一次样本多久前」
+            ck.ok(re.search(r"(秒前|分钟前|小时前|天前|无样本)", on_body) is not None,
+                  "卡片「最近」显示相对时间（多久之前）")
+            # 分档徽章必须落在每张卡上
+            ck.ok(page.locator("#oncall-body .oncall-card .oc-head .badge").count()
+                  >= on_cards, "每张卡都带状态/分档徽章")
             ck.ok(page.locator("#oncall-body button", has_text="确认").count() >= 1,
                   "值班卡片有确认入口")
+            # 探测类卡给「去处理」，节点类卡给「看节点」（原先节点卡片按钮点了没反应）
+            got_goto = page.locator("#oncall-body button", has_text="去处理").count()
+            got_node = page.locator("#oncall-body button", has_text="看节点").count()
+            ck.ok(got_goto + got_node >= 1,
+                  f"值班卡片有行动入口（去处理 {got_goto} / 看节点 {got_node}）")
         else:
             ck.ok(False, f"值班总览未渲染出预期内容（{on_txt[:80]}）")
         shot("alerts-oncall")

@@ -218,6 +218,11 @@ class Storage:
                     (token_hash, json.dumps(tags, ensure_ascii=False), version,
                      json.dumps(system, ensure_ascii=False), token_id,
                      local_ip, local_ip, egress_ip, egress_ip, ts, ts, ts, r["id"]))
+                # 重新注册同样是「节点活过来了」：必须收口未恢复的节点侧事件。
+                # 只把 status 置 online 而不收口，会让 node_touch 的关闭分支失效
+                # （它原先以「原状态非 online」为前提）→ 事件永远收不了口
+                # （见 .docs/ONCALL_OPTIMIZATION_2.md 根因 1.2）。
+                self._close_node_incidents_locked(r["id"], ts, "自动收口：节点重新注册恢复")
                 self.db.commit()
                 return r["id"], False
             nid = "n" + name.encode("utf-8").hex()[:12] + secrets4()
@@ -239,11 +244,12 @@ class Storage:
         with self.lock:
             local_ip = str(stats.get("local_ip") or "")
             cur = self.db.execute("SELECT status FROM nodes WHERE id=?", (node_id,)).fetchone()
-            if cur and cur["status"] != "online":
-                # 离线 → 恢复：关闭节点侧未恢复事件（事件流里显示「已恢复 + 时长」）
-                self.db.execute(
-                    "UPDATE incidents SET ended_at=?, duration_ms=MAX(0,(?-started_at))*1000"
-                    " WHERE kind='node' AND node_id=? AND ended_at IS NULL", (ts, ts, node_id))
+            # 心跳到达 = 节点活着 → 关闭节点侧未恢复事件（事件流里显示「已恢复 + 时长」）。
+            # 这里**不再**以「原状态非 online」为前提：register_node 会把 status 直接置成
+            # online，若仍加这个前提，走重新注册恢复的节点事件将永远收不了口
+            # （见 .docs/ONCALL_OPTIMIZATION_2.md 根因 1.2，线上 win-local 实例已复现）。
+            if cur:
+                self._close_node_incidents_locked(node_id, ts, "自动收口：节点心跳恢复")
             self.db.execute(
                 "UPDATE nodes SET status='online', last_heartbeat=?, updated_at=?,"
                 " version=CASE WHEN ?<>'' THEN ? ELSE version END,"
@@ -368,6 +374,7 @@ class Storage:
                        ("name", "target", "urls", "params", "dns", "nodes",
                         "interval_seconds", "enabled")
                        if k in fields}
+            was_enabled = bool(cur.get("enabled"))
             if "urls" in allowed:
                 allowed["urls_json"] = json.dumps(allowed.pop("urls") or [])
             if "params" in allowed:
@@ -381,6 +388,12 @@ class Storage:
             if sets:
                 self.db.execute(f"UPDATE tasks SET {sets}, config_version=config_version+1,"
                                 f" updated_at=? WHERE id=?", vals + [ts, tid])
+            # 停用任务 → 立即收口其未恢复事件。停用后不再产生结果，状态机永远等不到 ok，
+            # 事件会在值班页上无限期显示「已持续 N 小时」（线上实测 ping-223/mtr-google-dns
+            # 停用后仍挂着 47 小时）。放在 storage 层而不是路由层，保证任何调用方都生效。
+            if "enabled" in allowed and was_enabled and not bool(int(allowed["enabled"] or 0)):
+                self._close_task_incidents_locked(
+                    tid, ts, "自动收口：任务被停用（不再产生样本）")
             self._snapshot_revision(tid, ts)
             self._bump_config_version()
             self.db.commit()
@@ -388,6 +401,8 @@ class Storage:
 
     def delete_task(self, tid: str, ts: int):
         with self.lock:
+            # 先收口：任务没了，其未恢复事件不可能再等到 ok，留着就是值班页上的孤儿卡片
+            self._close_task_incidents_locked(tid, ts, "自动收口：任务被删除")
             self.db.execute("DELETE FROM tasks WHERE id=?", (tid,))
             self._bump_config_version()
             self.db.commit()
@@ -741,13 +756,17 @@ class Storage:
             self.db.commit()
             return int(cur.lastrowid or 0)
 
-    def incident_close(self, inc_id: int, ended_at: int):
+    def incident_close(self, inc_id: int, ended_at: int, note: str = "") -> bool:
+        """按 id 收口事件（幂等）。note 记录收口原因，不改动 reason_json 里的原始证据。"""
         with self.lock:
-            self.db.execute(
+            cur = self.db.execute(
                 "UPDATE incidents SET ended_at=?,"
-                " duration_ms=MAX(0,(?-started_at))*1000 WHERE id=?",   # 时钟回拨时不产生负时长
-                (ended_at, ended_at, inc_id))
+                " duration_ms=MAX(0,(?-started_at))*1000,"   # 时钟回拨时不产生负时长
+                " note=CASE WHEN ?<>'' THEN ? ELSE note END"
+                " WHERE id=? AND ended_at IS NULL",
+                (ended_at, ended_at, note, note, inc_id))
             self.db.commit()
+            return cur.rowcount > 0
 
     def open_incident_for(self, task_id: str, node_id: str, dns: str, url: str):
         with self.lock:
@@ -805,6 +824,91 @@ class Storage:
                 d["reason"] = json.loads(d.pop("reason_json") or "{}")
                 out.append(d)
             return out
+
+    def streams_with_open_incidents(self) -> list[dict]:
+        """所有仍有未恢复**探测**事件的流（task×node×dns×url），供启动时重建状态。"""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT DISTINCT task_id,node_id,dns,url FROM incidents"
+                " WHERE ended_at IS NULL AND kind='probe'").fetchall()
+            return [{"task_id": r["task_id"], "node_id": r["node_id"],
+                     "dns": r["dns"] or "", "url": r["url"] or ""} for r in rows]
+
+    def _close_task_incidents_locked(self, task_id: str, ts: int, note: str = "") -> int:
+        """收口某任务未恢复的探测事件（调用方需已持有 self.lock）。"""
+        cur = self.db.execute(
+            "UPDATE incidents SET ended_at=?,"
+            " duration_ms=MAX(0,(?-started_at))*1000,"
+            " note=CASE WHEN ?<>'' THEN ? ELSE note END"
+            " WHERE task_id=? AND kind='probe' AND ended_at IS NULL",
+            (ts, ts, note, note, task_id))
+        return cur.rowcount
+
+    def close_task_incidents(self, task_id: str, ts: int, note: str = "") -> int:
+        """收口某任务未恢复的探测事件（任务停用/删除时调用）。"""
+        with self.lock:
+            n = self._close_task_incidents_locked(task_id, ts, note)
+            self.db.commit()
+            return n
+
+    def _close_node_incidents_locked(self, node_id: str, ts: int, note: str = "") -> int:
+        """收口某节点未恢复的节点侧事件（调用方需已持有 self.lock）。"""
+        cur = self.db.execute(
+            "UPDATE incidents SET ended_at=?,"
+            " duration_ms=MAX(0,(?-started_at))*1000,"
+            " note=CASE WHEN ?<>'' THEN ? ELSE note END"
+            " WHERE kind='node' AND node_id=? AND ended_at IS NULL",
+            (ts, ts, note, note, node_id))
+        return cur.rowcount
+
+    def close_node_incidents(self, node_id: str, ts: int, note: str = "") -> int:
+        with self.lock:
+            n = self._close_node_incidents_locked(node_id, ts, note)
+            self.db.commit()
+            return n
+
+    def close_stale_incidents(self, ts: int, stale_after: int,
+                              limit: int = 500) -> list[dict]:
+        """陈旧事件自动收口：「沉默」不等于「故障」。
+
+        任务被停用、节点被移除或长期离线后不再产生结果，状态机永远等不到 ok，事件就会
+        在值班页上无限期显示「已持续 N 小时」（线上实测有挂 59 小时的）。这里以「该流最后
+        一条样本」判陈旧，ended_at 取最后一条样本的时刻（诚实反映最后一次已知活动时点），
+        原始 reason_json 保留不动，收口原因写进 note。
+
+        stale_after<=0 表示关闭该机制。
+        """
+        if stale_after <= 0:
+            return []
+        cutoff = ts - int(stale_after)
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT i.id, i.task_id, i.node_id, i.dns, i.url, i.started_at,"
+                " (SELECT MAX(r.ts) FROM probe_results r"
+                "  WHERE r.task_id=i.task_id AND r.node_id=i.node_id"
+                "    AND r.dns=i.dns AND r.url=i.url) AS last_ts"
+                " FROM incidents i WHERE i.ended_at IS NULL AND i.kind='probe'"
+                " ORDER BY i.started_at LIMIT ?", (max(1, int(limit)),)).fetchall()
+            closed = []
+            for r in rows:
+                last_ts = int(r["last_ts"] or 0)
+                if last_ts >= cutoff:
+                    continue                      # 近期还有样本：不算沉默
+                started = int(r["started_at"] or ts)
+                end = max(started, last_ts)       # 无样本时退回事件开始时刻
+                note = ("自动收口：超过 %d 小时无新样本（任务停用/节点移除或长期离线）"
+                        % max(1, int(stale_after) // 3600))
+                cur = self.db.execute(
+                    "UPDATE incidents SET ended_at=?,"
+                    " duration_ms=MAX(0,(?-started_at))*1000,"
+                    " note=CASE WHEN COALESCE(note,'')='' THEN ? ELSE note END"
+                    " WHERE id=? AND ended_at IS NULL", (end, end, note, r["id"]))
+                if cur.rowcount:
+                    closed.append({"id": r["id"], "task_id": r["task_id"],
+                                   "node_id": r["node_id"], "ended_at": end,
+                                   "last_ts": last_ts})
+            self.db.commit()
+            return closed
 
     # ---------- 节点分组（组级任务分配）----------
     def list_groups(self) -> list[dict]:

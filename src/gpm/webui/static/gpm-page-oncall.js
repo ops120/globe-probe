@@ -40,16 +40,52 @@ async function renderOncall(force) {
   } finally {
     oncallBusy = false;
   }
-  const items = d.items || [];
-  $('#oncall-sub').textContent = '进行中故障 ' + items.length + ' 条'
+  state.oncallData = d;
+  paintOncall();
+}
+
+/* 分档：让第一屏只显示「现在值不值得动手」的东西。
+ * 「沉默 ≠ 故障」——事件还开着不代表目标此刻仍在失败，必须一眼能分清。 */
+const ONCALL_BUCKETS = [
+  ['live', '正在失败', 'b-fail'],
+  ['silent', '沉默待确认', 'b-warn'],
+  ['stale', '陈旧待收口', 'b-off'],
+  ['all', '全部', 'b-off'],
+];
+
+function paintOncall() {
+  const body = $('#oncall-body');
+  const d = state.oncallData || {};
+  if (!body) return;
+  const all = d.items || [];
+  const counts = { live: 0, silent: 0, stale: 0 };
+  all.forEach(x => { const b = x.bucket || 'live'; counts[b] = (counts[b] || 0) + 1; });
+  if (!state.oncallFilter) state.oncallFilter = 'live';
+  const items = state.oncallFilter === 'all'
+    ? all : all.filter(x => (x.bucket || 'live') === state.oncallFilter);
+  const other = all.length - counts.live;
+  $('#oncall-sub').textContent = '正在失败 ' + counts.live + ' 条'
+    + (other > 0 ? ' · 另有 ' + other + ' 条沉默/陈旧' : '')
     + (d.ts ? ' · 数据时间 ' + fmtTS(d.ts) : '');
-  if (!items.length) {
+  if (!all.length) {
     body.innerHTML = '<div class="oncall-empty">当前没有进行中的故障 🎉<br>'
       + '<span style="font-size:12px">任务连续失败触发的事件会出现在这里，并给出影响面与处置建议</span></div>';
     return;
   }
-  body.innerHTML = '<div class="oncall-grid">' + items.map(oncallCard).join('') + '</div>';
+  const chips = '<div class="oncall-chips">' + ONCALL_BUCKETS.map(([k, label, cls]) => {
+    const n = k === 'all' ? all.length : (counts[k] || 0);
+    return '<button class="btn sm ' + (state.oncallFilter === k ? '' : 'ghost') + '"'
+      + ' onclick="oncallFilter(\'' + k + '\')">'
+      + '<span class="badge ' + cls + '">' + n + '</span> ' + label + '</button>';
+  }).join('') + '</div>';
+  body.innerHTML = chips + (items.length
+    ? '<div class="oncall-grid">' + items.map(oncallCard).join('') + '</div>'
+    : '<div class="oncall-empty">该分档下没有卡片<br>'
+      + '<span style="font-size:12px">「沉默/陈旧」表示事件还开着、但我们已经收不到新样本——'
+      + '不代表目标此刻仍在失败，正常的会被后端自动收口。</span></div>');
 }
+
+window.oncallFilter = (k) => { state.oncallFilter = k; paintOncall(); };
 
 /* 旧服务端没有 /api/oncall：如实说明是能力差异，不算页面故障 */
 function renderOncallUnsupported(msg) {
@@ -62,14 +98,27 @@ function renderOncallUnsupported(msg) {
     + '在此期间请用「事件与告警」子页查看事件与告警历史。</span></div>';
 }
 
+const ONCALL_BUCKET_BADGE = {
+  live: ['b-fail', '正在失败'],
+  silent: ['b-warn', '沉默待确认'],
+  stale: ['b-off', '陈旧待收口'],
+};
+
 function oncallCard(it) {
   const scope = it.scope || {};
   const isNodeEv = !it.task_id;                       // 节点离线/节点事件（无目标任务）
   const target = isNodeEv ? '' : (it.url || it.dns || '');
   const dur = it.duration_s != null ? fmtDur(Math.round(it.duration_s))
     : (it.started_at ? fmtDur(Math.max(0, Math.round(Date.now() / 1000 - it.started_at))) : '—');
+  const [bCls, bLabel] = ONCALL_BUCKET_BADGE[it.bucket] || ONCALL_BUCKET_BADGE.live;
   const lastSt = it.last_status === 'ok' ? '<span class="badge b-ok">成功</span>'
     : it.last_status ? '<span class="badge b-fail">' + esc(it.last_status) + '</span>' : '—';
+  // 「最近」优先显示相对时间并 hover 出绝对时间：判断一张卡还可不可信，第一眼看的就是
+  // 「最后一次样本是几分钟前」。原先只给绝对时间戳，值班的人得自己心算。
+  const lastTime = it.last_ts
+    ? '<span title="' + esc(fmtTS(it.last_ts)) + '" style="color:var(--muted)">'
+      + esc(fmtAgo(it.last_ts)) + '</span>'
+    : '<span style="color:var(--muted)">无样本</span>';
   const advice = [it.advice, isNodeEv ? '' : scope.advice].filter(Boolean).join('；');
   const scopeLine = (!isNodeEv && scope.total != null)
     ? ('<span><b>范围</b> ' + esc(scope.verdict || (scope.total === 0 ? '无近期样本（任务停用或节点离线）' : '—'))
@@ -79,6 +128,7 @@ function oncallCard(it) {
   return '<div class="oncall-card' + (it.acked ? ' acked' : '') + '" data-incident="' + esc(it.incident_id ?? '') + '">'
     + '<div class="oc-head">'
     + '<span class="badge ' + (TYPE_BADGE[it.type] || 'b-off') + '">' + esc((it.type || 'NODE').toUpperCase()) + '</span>'
+    + '<span class="badge ' + bCls + '">' + bLabel + '</span>'
     + '<b class="oc-title">' + esc(isNodeEv ? ((it.node_name || it.node_id || '节点') + ' · 节点事件') : (it.task_name || it.task_id || '未命名任务')) + '</b>'
     + (target ? '<span class="oc-target">' + esc(target) + '</span>' : '')
     + (it.error_class ? '<span class="badge b-fail">' + esc(it.error_class) + '</span>' : '')
@@ -88,12 +138,16 @@ function oncallCard(it) {
     + '<span><b>层面</b> ' + esc(it.layer || '—') + '</span>'
     + scopeLine
     + '<span><b>已持续</b> ' + esc(dur) + '</span>'
-    + '<span><b>最近</b> ' + lastSt + ' ' + (it.last_ts ? '<span style="color:var(--muted)">' + fmtTS(it.last_ts) + '</span>' : '') + '</span>'
+    + '<span><b>最近</b> ' + lastSt + ' ' + lastTime + '</span>'
     + '</div>'
     + (advice ? '<div class="oc-advice">建议：' + esc(advice) + '</div>' : '')
     + '<div class="oc-ops">'
     + '<button class="btn sm ghost" onclick="oncallAck(&quot;' + esc(String(it.incident_id ?? '')) + '&quot;)">确认</button>'
-    + '<button class="btn sm" onclick="oncallGoto(&quot;' + esc(String(it.task_id ?? '')) + '&quot;,' + (it.last_ts || 0) + ')">去处理</button>'
+    + (isNodeEv
+        // 节点事件没有 task_id，原先的「去处理」调 oncallGoto('') 直接 return —— 点了毫无反应。
+        // 改成去节点管理页看这台机器的详情（CPU/内存/上线时间）。
+        ? '<button class="btn sm" onclick="show(\'nodes\')">看节点</button>'
+        : '<button class="btn sm" onclick="oncallGoto(&quot;' + esc(String(it.task_id ?? '')) + '&quot;,' + (it.last_ts || 0) + ')">去处理</button>')
     + '</div></div>';
 }
 

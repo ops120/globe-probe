@@ -41,6 +41,29 @@ def _target_valid(task_type: str, target: str) -> bool:
     return validate_target(target or "")
 
 
+def _oncall_bucket(task: dict, node: dict, last_status, last_age_s,
+                    stale_after: int) -> str:
+    """值班卡片分档：让第一屏只显示「现在值不值得动手」的东西。
+
+    live   正在失败：有新鲜失败样本（或节点确实离线）
+    silent 沉默待确认：样本已过期，但还没到陈旧阈值——可能只是任务被停用/节点刚掉线
+    stale  陈旧待收口：无样本或已超 stale_after，正常应被 sweep 自动收口
+
+    「沉默 ≠ 故障」是这一档存在的理由：事件开着不等于现在还在坏，值班的人需要一眼
+    看出「这张卡是新鲜的，还是我们只是没再收到样本」。
+    """
+    if not task:
+        # 节点侧事件：离线就是真在坏；其余（不应出现）按陈旧处理
+        return "live" if str(node.get("status")) == "offline" else "stale"
+    if last_status == "fail" and last_age_s is not None:
+        fresh_window = max(300, int(task.get("interval_seconds") or 60) * 3)
+        if last_age_s <= fresh_window:
+            return "live"
+    if last_age_s is None or (stale_after and last_age_s > stale_after):
+        return "stale"
+    return "silent"
+
+
 def setup_router(app_state) -> APIRouter:
     s = app_state["storage"]
     cfg = app_state["cfg"]
@@ -615,6 +638,8 @@ def setup_router(app_state) -> APIRouter:
                 if cur is None or int(r["ts"]) > cur[0] or (
                         int(r["ts"]) == cur[0] and rank.get(str(r["status"]), -1) > rank.get(cur[1], -1)):
                     by_node[nid_key] = (int(r["ts"]), str(r["status"]))
+        # 陈旧阈值与 sweep 的 close_stale_incidents 保持同一配置，避免「页面说陈旧、后端不认」
+        stale_after = max(0, int(cfg.probe.get("stale_after_seconds", 21600) or 0))
         items = []
         for inc in incs:
             tid = str(inc.get("task_id") or "")
@@ -623,7 +648,13 @@ def setup_router(app_state) -> APIRouter:
             node = nodes.get(nid) or {}
             reason = inc.get("reason") or {}
             error_class = str(reason.get("error_class") or "")
-            layer, advice = classify(error_class)
+            if not tid:
+                # 节点侧事件没有 error_class，classify 只会给出「待定位」——但节点事件本来
+                # 就明确落在「节点侧」这一层，值班的人需要的是「该查什么」，不是一个待定位。
+                layer, advice = ("节点侧",
+                                 "节点心跳中断：查该节点进程/网络/主机资源；节点恢复后自动收口")
+            else:
+                layer, advice = classify(error_class)
             # 范围判定输入：该任务各节点最近一轮（≤10 分钟窗）探测状态。
             # 同节点多条流（多 URL/多线路）取时间戳最新的一轮，轮内按最差状态合并
             # （一个 URL 挂即该节点本轮有失败，与事件的产生口径一致）。
@@ -631,6 +662,9 @@ def setup_router(app_state) -> APIRouter:
                        "status": v[1]} for k, v in recent.get(tid, {}).items()]
             last = s.latest_per_stream(tid, nid, inc.get("dns") or "",
                                        inc.get("url") or "", 1)
+            last_ts = int(last[0]["ts"]) if last else 0
+            last_status = last[0]["status"] if last else None
+            last_age_s = max(0, t_now - last_ts) if last_ts else None
             items.append({
                 "incident_id": inc["id"], "task_id": tid,
                 "task_name": task.get("name") or tid,
@@ -641,8 +675,9 @@ def setup_router(app_state) -> APIRouter:
                 "scope": verdict(states),
                 "started_at": inc.get("started_at"),
                 "duration_s": max(0, t_now - int(inc.get("started_at") or t_now)),
-                "last_status": last[0]["status"] if last else None,
-                "last_ts": last[0]["ts"] if last else 0,
+                "last_status": last_status, "last_ts": last_ts,
+                "last_age_s": last_age_s, "bucket": _oncall_bucket(
+                    task, node, last_status, last_age_s, stale_after),
                 "acked": bool(inc.get("acked_at")),
             })
         return {"ts": t_now, "items": items}
