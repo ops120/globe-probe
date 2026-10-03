@@ -124,8 +124,12 @@ table.tbl{width:100%;border-collapse:collapse}
 .oc-meta b{color:var(--muted);font-weight:400}
 .oc-advice{font-size:12px;color:var(--note-fg);background:var(--accent-bg);border:1px solid var(--accent-bd);border-radius:6px;padding:6px 10px;margin:6px 0 8px;line-height:1.6}
 .oc-ops{display:flex;gap:8px;justify-content:flex-end}
-/* 第四期：值班页顶部的「本平台可信度」与节点资源饱和度 */
-.oc-check{display:flex;gap:8px 22px;flex-wrap:wrap;font-size:12px;color:var(--fg-2);
+/* 第六期：第三方告警的旁证行（折叠在本地卡里）与独立卡 */
+.oc-ext{margin:6px 0 2px;border-top:1px dashed var(--bd);padding-top:6px}
+.oc-ext-lbl{font-size:12px;color:var(--muted);margin-bottom:3px}
+.oc-extrow{display:flex;align-items:center;gap:10px;font-size:12px;padding:3px 0}
+.oc-extt{color:var(--fg-2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.oc-exttime{color:var(--faint);white-space:nowrap}
   background:var(--bg-2);border:1px solid var(--bd);border-radius:8px;padding:7px 12px;margin-bottom:8px}
 .oc-check b{color:var(--fg-strong)}
 .oc-check.bad{border-color:rgba(245,165,36,.45);background:rgba(245,165,36,.08)}
@@ -418,7 +422,8 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           <button data-sub="oncall" class="active">值班总览</button>
           <button data-sub="report">报表</button>
           <button data-sub="events">事件与告警</button>
-          <button data-sub="notify">通知配置</button>
+          <button data-sub="external">第三方告警</button>
+            <button data-sub="notify">通知配置</button>
           <button data-sub="audit">操作审计</button>
         </div>
 
@@ -480,6 +485,32 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           </div>
         </div>
 
+        <div class="subpage hidden" data-subpage="external">
+          <div class="panel">
+            <div class="panel-head">第三方接入 <span class="sub">Grafana / Zabbix / 腾讯云 / GCP 的告警接收；只读——不回写第三方</span>
+              <span style="flex:1"></span>
+              <button class="btn sm ghost" id="ext-off">关闭接收</button>
+              <button class="btn sm" id="ext-save">保存 Token</button></div>
+            <div class="form-row"><label>接入 Token</label>
+              <input type="text" id="ext-token" placeholder="输入新的接入 Token 后保存（接口从不回显 Token）" style="flex:1">
+              <span id="ext-hint" class="sub" style="margin-left:10px;white-space:nowrap"></span></div>
+            <div class="hint" id="ext-recv-hint"></div>
+            <div id="ext-src-state" class="cmp-summary"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">按来源汇总
+              <span style="flex:1"></span>
+              <button class="btn sm ghost" id="ext-correlate">重跑关联</button></div>
+            <table class="tbl" id="ext-sum-tbl"></table>
+          </div>
+          <div class="panel">
+            <div class="panel-head">第三方告警 <span class="sub">未关联到本地事件的会单独进值班总览</span>
+              <span style="flex:1"></span>
+              <select id="ext-filter" style="max-width:160px"></select>
+              <button class="btn sm ghost" id="ext-refresh">刷新</button></div>
+            <table class="tbl" id="ext-tbl"></table>
+          </div>
+        </div>
         <div class="subpage hidden" data-subpage="notify">
           <div class="panel">
             <div class="panel-head">通知深链 <span class="sub">通知里「点击查看」链接的前缀（如 https://gpm.example.com）。留空则通知不带链接——不编造链接</span>
@@ -597,20 +628,21 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=41"></script>
+<script src="/static/echarts.min.js?v=42"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=41"></script>
-<script src="/static/gpm-api.js?v=41"></script>
-<script src="/static/gpm-theme.js?v=41"></script>
-<script src="/static/gpm-charts.js?v=41"></script>
-<script src="/static/gpm-page-overview.js?v=41"></script>
-<script src="/static/gpm-page-task.js?v=41"></script>
-<script src="/static/gpm-page-compare.js?v=41"></script>
-<script src="/static/gpm-page-geo.js?v=41"></script>
-<script src="/static/gpm-page-oncall.js?v=41"></script>
-<script src="/static/gpm-page-alerts.js?v=41"></script>
-<script src="/static/gpm-page-nodes.js?v=41"></script>
-<script src="/static/gpm-page-tasks.js?v=41"></script>
-<script src="/static/gpm-boot.js?v=41"></script>
+<script src="/static/gpm-utils.js?v=42"></script>
+<script src="/static/gpm-api.js?v=42"></script>
+<script src="/static/gpm-theme.js?v=42"></script>
+<script src="/static/gpm-charts.js?v=42"></script>
+<script src="/static/gpm-page-overview.js?v=42"></script>
+<script src="/static/gpm-page-task.js?v=42"></script>
+<script src="/static/gpm-page-compare.js?v=42"></script>
+<script src="/static/gpm-page-geo.js?v=42"></script>
+<script src="/static/gpm-page-external.js?v=42"></script>
+<script src="/static/gpm-page-oncall.js?v=42"></script>
+<script src="/static/gpm-page-alerts.js?v=42"></script>
+<script src="/static/gpm-page-nodes.js?v=42"></script>
+<script src="/static/gpm-page-tasks.js?v=42"></script>
+<script src="/static/gpm-boot.js?v=42"></script>
 </body>
 </html>

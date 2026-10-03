@@ -418,9 +418,9 @@ def main() -> int:
         page.click('nav a[data-page="alerts"]')
         wait_page(page, "alerts")
         page.wait_for_timeout(1500)
-        # 子导航条：五个子 tab，默认落在「值班总览」
-        ck.ok(page.locator("#al-subtabs button[data-sub]").count() == 5,
-              "告警页子导航条有 5 个子 tab（值班总览/报表/事件与告警/通知配置/操作审计）")
+        # 子导航条：六个子 tab，默认落在「值班总览」
+        ck.ok(page.locator("#al-subtabs button[data-sub]").count() == 6,
+              "告警页子导航条有 6 个子 tab（值班总览/报表/事件与告警/第三方告警/通知配置/操作审计）")
         ck.ok("active" in (page.locator('#al-subtabs button[data-sub="oncall"]')
                            .get_attribute("class") or ""), "默认落在「值班总览」子页")
         # —— 值班总览（两分支：旧后端无 /api/oncall → 优雅降级；新后端 → 卡片或空态）——
@@ -528,6 +528,46 @@ def main() -> int:
         page.wait_for_timeout(900)
         ck.ok(wait_count(page, "#al-tbl tbody tr") >= 1, "告警历史有记录")
         ck.ok("告警" in (page.text_content("#al-tbl") or ""), "告警历史显示标题")
+
+        # —— 第三方告警子页（第六期）：接入配置 + 来源汇总 + 告警表 ——
+        page.click('#al-subtabs button[data-sub="external"]')
+        page.wait_for_timeout(1500)
+        ck.ok(page.locator("#ext-token").count() == 1 and page.locator("#ext-save").count() == 1,
+              "第三方接入有 Token 输入与保存入口")
+        _exst = page.evaluate(
+            "async () => await (await fetch('/api/external/settings')).json()")
+        ck.ok(len(_exst["sources"]) == 4, "四家来源都有接入状态（%s）"
+              % [x["source"] for x in _exst["sources"]])
+        ck.ok("Token" in (page.text_content("#ext-recv-hint") or ""),
+              "说明接收地址与鉴权方式（%s）" % (_exst["token_header"]))
+        # Token 绝不能回显：页面输入框与设置接口都不该出现已配置的 Token。
+        # 断言「每个来源只暴露 source + configured 两个键」——比字符串包含判断精确得多
+        # （之前那版写法是错的：token_header/token_query 本来就含 "token"）。
+        ck.ok((page.input_value("#ext-token") or "") == "", "Token 输入框不回显已配置值")
+        _srckeys = sorted({k for x in _exst["sources"] for k in x})
+        ck.ok(_srckeys == ["configured", "source"],
+              "来源状态只暴露「配没配」（字段 %s）" % _srckeys)
+        ck.ok(page.locator("#ext-sum-tbl tbody tr").count() >= 1, "按来源汇总表已渲染")
+        ck.ok(page.locator("#ext-tbl tbody tr").count() >= 1, "第三方告警表已渲染（含空态行）")
+        # 未配置时任何来源都必须被拒绝（安全底线）。
+        # 用 Python 侧发请求而不是浏览器 fetch：浏览器会把 401 记成控制台错误，
+        # 反而污染「无控制台报错 / 无 4xx」这两条本应干净的断言。
+        if not any(x["configured"] for x in _exst["sources"]):
+            _code = 0
+            try:
+                _req = urllib.request.Request(
+                    args.base + "/api/hooks/grafana", data=b"{}", method="POST",
+                    headers={"Content-Type": "application/json"})
+                with urllib.request.urlopen(_req, timeout=10) as _r:
+                    _code = _r.status
+            except urllib.error.HTTPError as _e:
+                _code = _e.code
+            except Exception:  # noqa: BLE001
+                _code = -1
+            ck.ok(_code == 401, "未配置 Token 时拒绝接收（HTTP %s）" % _code)
+        else:
+            ck.ok(True, "（已配置接入 Token，跳过「未配置即拒绝」断言；该分支有单测覆盖）")
+        shot("external-alerts")
 
         # —— 通知配置子页：渠道 / 规则 / 维护窗口 / 巡检推送 / 重投队列 ——
         page.click('#al-subtabs button[data-sub="notify"]')

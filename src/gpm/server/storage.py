@@ -100,6 +100,29 @@ CREATE TABLE IF NOT EXISTS alerts(
 CREATE INDEX IF NOT EXISTS ix_alerts_ts ON alerts(ts);
 CREATE INDEX IF NOT EXISTS ix_alerts_open ON alerts(rule_id, key, status, ts);
 
+-- 第三方告警（Grafana / Zabbix / 腾讯云 / GCP）：只读接入，不回写第三方。
+-- 与本地 incidents **不强行合并**：两套模型各自保留（第三方只有标题+标签，没有我们的
+-- 证据链），通过 external_alert_links 建立关联，页面上呈现为「主卡 + 旁证」。
+CREATE TABLE IF NOT EXISTS external_alerts(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,                 -- grafana | zabbix | tencent | gcp
+  source_id TEXT NOT NULL,              -- 源侧唯一 id（幂等去重键）
+  title TEXT DEFAULT '', severity TEXT DEFAULT '', status TEXT DEFAULT 'firing',
+  started_at INTEGER DEFAULT 0, ended_at INTEGER DEFAULT 0,
+  labels_json TEXT DEFAULT '{}', url TEXT DEFAULT '',
+  raw_json TEXT DEFAULT '{}',           -- 落库**前**已脱敏（去 token/webhook URL/凭据）
+  received_at INTEGER DEFAULT 0, updated_at INTEGER DEFAULT 0,
+  UNIQUE(source, source_id));
+CREATE INDEX IF NOT EXISTS ix_ext_alert_time ON external_alerts(source, started_at);
+CREATE INDEX IF NOT EXISTS ix_ext_alert_status ON external_alerts(status);
+
+-- 第三方告警 ↔ 本地事件的关联（旁证）。去重靠主键，重复关联幂等。
+CREATE TABLE IF NOT EXISTS external_alert_links(
+  alert_id INTEGER, incident_id INTEGER, linked_at INTEGER,
+  reason TEXT DEFAULT '',               -- 关联依据（目标 + 节点 + 时间窗）
+  PRIMARY KEY(alert_id, incident_id));
+CREATE INDEX IF NOT EXISTS ix_ext_link_inc ON external_alert_links(incident_id);
+
 -- 键值设置（巡检推送配置、UI 偏好等服务端可持久化项）
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
 
@@ -938,6 +961,129 @@ class Storage:
             self.db.commit()
             return closed
 
+    # ---------- 第三方告警（第六期）----------
+    @staticmethod
+    def _ext_alert(d: dict) -> dict:
+        d["labels"] = json.loads(d.pop("labels_json") or "{}")
+        d["raw"] = json.loads(d.pop("raw_json") or "{}")
+        return d
+
+    def external_alert_upsert(self, source: str, source_id: str, fields: dict,
+                              ts: int) -> tuple[int, bool]:
+        """幂等写入（同 source+source_id 只有一行）。返回 (id, created)。
+
+        第三方重投同一告警很常见（Alertmanager 会重复推、Zabbix 会 update），
+        所以幂等键放在库里而不是让调用方去重。
+        """
+        if not source or not source_id:
+            raise ValueError("source / source_id 必填")
+        with self.lock:
+            row = self.db.execute(
+                "SELECT id FROM external_alerts WHERE source=? AND source_id=?",
+                (source, source_id)).fetchone()
+            vals = (str(fields.get("title") or "")[:300], str(fields.get("severity") or "")[:40],
+                    str(fields.get("status") or "firing")[:20],
+                    int(fields.get("started_at") or 0), int(fields.get("ended_at") or 0),
+                    json.dumps(fields.get("labels") or {}, ensure_ascii=False),
+                    str(fields.get("url") or "")[:500],
+                    json.dumps(fields.get("raw") or {}, ensure_ascii=False))
+            if row:
+                aid = int(row["id"])
+                self.db.execute(
+                    "UPDATE external_alerts SET title=?,severity=?,status=?,started_at=?,"
+                    "ended_at=?,labels_json=?,url=?,raw_json=?,updated_at=? WHERE id=?",
+                    vals + (ts, aid))
+                self.db.commit()
+                return aid, False
+            cur = self.db.execute(
+                "INSERT INTO external_alerts(source,source_id,title,severity,status,started_at,"
+                "ended_at,labels_json,url,raw_json,received_at,updated_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (source, source_id) + vals + (ts, ts))
+            self.db.commit()
+            return int(cur.lastrowid or 0), True
+
+    def external_alert_get(self, aid: int) -> dict | None:
+        with self.lock:
+            r = self.db.execute("SELECT * FROM external_alerts WHERE id=?", (aid,)).fetchone()
+            return self._ext_alert(dict(r)) if r else None
+
+    def list_external_alerts(self, limit: int = 100, source: str = "", status: str = "",
+                             t_from: int = 0, firing_only: bool = False) -> list[dict]:
+        with self.lock:
+            sql = "SELECT * FROM external_alerts"
+            where: list[str] = []
+            args: list = []          # 混装 str/int，显式标注否则被推断成 list[str]
+            if source:
+                where.append("source=?")
+                args.append(source)
+            if status:
+                where.append("status=?")
+                args.append(status)
+            if firing_only:
+                where.append("status='firing'")
+            if t_from:
+                where.append("COALESCE(NULLIF(started_at,0), received_at) >= ?")
+                args.append(t_from)
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY COALESCE(NULLIF(started_at,0), received_at) DESC LIMIT ?"
+            args.append(max(1, int(limit)))
+            return [self._ext_alert(dict(r)) for r in self.db.execute(sql, args).fetchall()]
+
+    def external_alert_link(self, alert_id: int, incident_id: int, ts: int,
+                            reason: str = "") -> bool:
+        """建立「旁证」关联（幂等：主键冲突即忽略）。"""
+        with self.lock:
+            cur = self.db.execute(
+                "INSERT OR IGNORE INTO external_alert_links(alert_id,incident_id,linked_at,reason)"
+                " VALUES(?,?,?,?)", (alert_id, incident_id, ts, reason[:200]))
+            self.db.commit()
+            return cur.rowcount > 0
+
+    def external_alert_links_for(self, incident_ids: list[int]) -> dict:
+        """一次取齐多条事件的旁证（避免逐条查的 N+1）。"""
+        if not incident_ids:
+            return {}
+        with self.lock:
+            ph = ",".join("?" for _ in incident_ids)
+            rows = self.db.execute(
+                "SELECT l.incident_id, l.linked_at, l.reason, a.* FROM external_alert_links l"
+                " JOIN external_alerts a ON a.id = l.alert_id"
+                " WHERE l.incident_id IN (" + ph + ") ORDER BY l.linked_at DESC",
+                tuple(incident_ids)).fetchall()
+        out: dict = {}
+        for r in rows:
+            d = dict(r)
+            iid = int(d.pop("incident_id"))
+            d.pop("linked_at", None)
+            out.setdefault(iid, []).append(self._ext_alert(d))
+        return out
+
+    def external_alert_summary(self, ts: int, days: int = 1) -> dict:
+        """按来源/状态汇总（报表用）。"""
+        cutoff = ts - max(0, int(days)) * 86400 if days else 0
+        with self.lock:
+            if cutoff:
+                rows = self.db.execute(
+                    "SELECT source, status, COUNT(*) c FROM external_alerts"
+                    " WHERE COALESCE(NULLIF(started_at,0), received_at) >= ?"
+                    " GROUP BY source, status", (cutoff,)).fetchall()
+            else:
+                rows = self.db.execute(
+                    "SELECT source, status, COUNT(*) c FROM external_alerts"
+                    " GROUP BY source, status").fetchall()
+        by_source: dict = {}
+        for r in rows:
+            s = str(r["source"])
+            b = by_source.setdefault(s, {"source": s, "firing": 0, "resolved": 0, "total": 0})
+            n = int(r["c"])
+            b["total"] += n
+            if str(r["status"]) == "resolved":
+                b["resolved"] += n
+            else:
+                b["firing"] += n
+        return {"days": days, "sources": sorted(by_source.values(), key=lambda x: x["source"])}
+
     # ---------- 节点分组（组级任务分配）----------
     def list_groups(self) -> list[dict]:
         with self.lock:
@@ -1594,7 +1740,8 @@ class Storage:
     # ---------- 保留策略 ----------
     def retention(self, raw_days: int, a1m: int, a5m: int, a1h: int, hb_days: int, ts: int,
                   alerts_days: int = 30, audit_days: int = 30,
-                  outbox_days: int = 7, incidents_days: int = 180) -> dict:
+                  outbox_days: int = 7, incidents_days: int = 180,
+                  external_days: int = 30) -> dict:
         """按天数清理过期数据，返回各表删除行数（供日志/测试断言）。
 
         新增的 alerts/audit_log/notify_outbox/incidents 清理带默认值，
@@ -1626,6 +1773,19 @@ class Storage:
                     "DELETE FROM incidents WHERE ended_at IS NOT NULL AND ended_at < ?",
                     (ts - incidents_days * day,))
                 out["incidents"] = cur.rowcount
+            if external_days > 0:
+                # 第三方告警是「提示」不是证据：按最后活动时间清理（先删关联再删主表，
+                # 避免留下悬空的旁证）。不做这件事的话这张表会无限增长。
+                cutoff = ts - external_days * day
+                cur = self.db.execute(
+                    "DELETE FROM external_alert_links WHERE alert_id IN (SELECT id FROM"
+                    " external_alerts WHERE COALESCE(NULLIF(ended_at,0),"
+                    " COALESCE(NULLIF(started_at,0), received_at)) < ?)", (cutoff,))
+                out["external_alert_links"] = cur.rowcount
+                cur = self.db.execute(
+                    "DELETE FROM external_alerts WHERE COALESCE(NULLIF(ended_at,0),"
+                    " COALESCE(NULLIF(started_at,0), received_at)) < ?", (cutoff,))
+                out["external_alerts"] = cur.rowcount
             self.db.commit()
             return out
 

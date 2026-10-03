@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import logging
+import re
 import threading
 import time
 
@@ -14,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from ..common.models import NodeUpdate, TaskCreate, TaskUpdate, validate_params
 from ..common.util import new_id, now, sha256, validate_domain, validate_host_port, \
     validate_target
-from . import alerting, geo
+from . import alerting, geo, hooks
 from .diagnose import classify, runbook_for, verdict
 from .storage import BUCKET_SECONDS
 
@@ -129,7 +130,63 @@ def _oncall_changes(s, items: list, t_now: int) -> dict:
     return out
 
 
-def _oncall_groups(items: list, t_now: int) -> list:
+EXT_LINK_WINDOW = 1800     # 第三方告警 ↔ 本地事件的关联时间窗：±30 分钟
+EXT_LINK_MIN_NAME = 2      # 名字太短不参与匹配（避免节点 n1 命中 n10）
+
+
+def _ext_tokens(a: dict) -> set:
+    """第三方告警的可搜索词元：标题 + 各标签值。
+
+    用 \\w（Unicode）而不是 [0-9a-z]：后者会把**中文名整体切碎**，于是中文任务名/节点名
+    永远匹配不上（线上实测「e2e-关联目标」就是被切成 "e2e-" 的）。本产品的任务名允许中文，
+    这里必须按 Unicode 词字符切。
+    """
+    bits = [str(a.get("title") or "")]
+    labels = a.get("labels") or {}
+    if isinstance(labels, dict):
+        bits += [str(v) for v in labels.values()]
+    return {t for t in re.split(r"[^\w\-\.]+", " ".join(bits).lower()) if t}
+
+
+def _correlate_external(s, alert: dict, t_now: int, window: int = EXT_LINK_WINDOW) -> int:
+    """把第三方告警关联到本地事件（第六期 28）。
+
+    依据：本地事件的**任务名/节点名**出现在第三方告警的标题或标签里，且时间窗重叠。
+    这是「接了第三方反而把第一屏重新塞满」的解药 —— 只有关联不上的外部告警才单独成卡，
+    关联上的折叠成本地卡片的**旁证**。
+
+    用词元匹配而不是子串匹配：否则节点 n1 会命中 n10、任务 t 会命中一切。
+    名字 ≥4 字符时额外允许子串（"win-local" 藏在更长标签值里的情形）。
+    """
+    toks = _ext_tokens(alert)
+    if not toks:
+        return 0
+    tasks = {t["id"]: t for t in s.list_tasks()}
+    nodes = {n["id"]: n for n in s.list_nodes()}
+    start = int(alert.get("started_at") or alert.get("received_at") or t_now)
+    end = int(alert.get("ended_at") or 0) or t_now
+    lo, hi = start - window, end + window
+    text = " ".join(toks)
+    n = 0
+    for inc in s.list_incidents(limit=200, t_from=lo, t_to=hi):
+        tname = str((tasks.get(str(inc.get("task_id") or "")) or {}).get("name") or "")
+        nname = str((nodes.get(str(inc.get("node_id") or "")) or {}).get("name") or "")
+        hits = []
+        for nm in (tname, nname):
+            low = nm.lower()
+            if len(low) < EXT_LINK_MIN_NAME:
+                continue
+            if low in toks or (len(low) >= 4 and low in text):
+                hits.append(nm)
+        if not hits:
+            continue
+        if s.external_alert_link(int(alert["id"]), int(inc["id"]), t_now,
+                                 "目标/节点名匹配：%s" % "/".join(hits)):
+            n += 1
+    return n
+
+
+def _oncall_groups(items: list, t_now: int, ext_orphans: list | None = None) -> list:
     """把逐流事件聚合为「行动项」：同一任务一张卡 + 按节点横切提示。
 
     .docs/ONCALL_OPTIMIZATION_2.md 第二期 7-9。线上实测 11 条事件里同一任务占多条
@@ -178,6 +235,7 @@ def _oncall_groups(items: list, t_now: int) -> list:
                                  if m.get("maintenance")), None),
             "runbook": next((m.get("runbook") for m in members if m.get("runbook")), ""),
             "changes": next((m.get("changes") for m in members if m.get("changes")), []),
+            "external": next((m.get("external") for m in members if m.get("external")), []),
             "subtitle": _oncall_group_subtitle(len(members), nodes, targets),
             "members": members,
         })
@@ -195,7 +253,7 @@ def _oncall_groups(items: list, t_now: int) -> list:
             "last_ts": it.get("last_ts") or 0, "acked": it["acked"],
             "maintenance": it.get("maintenance"), "subtitle": "节点事件",
             "runbook": it.get("runbook") or "", "changes": [],
-            "members": [it],
+            "external": it.get("external") or [], "members": [it],
         })
 
     # 横切：同一节点上 ≥N 个任务同时失败 → 一张置顶的「疑似节点侧」卡。
@@ -229,9 +287,31 @@ def _oncall_groups(items: list, t_now: int) -> list:
             "last_ts": max(int(m["last_ts"] or 0) for m in members),
             "acked": False,
             "maintenance": None,
-            "runbook": runbook_for("节点侧"), "changes": [],
+            "runbook": runbook_for("节点侧"), "changes": [], "external": [],
             "subtitle": "%d 个任务同时失败" % len(tids_set),
             "members": members,
+        })
+
+    # 第六期 28/29：**关联不上**本地事件的第三方 firing 告警单独成卡。关联上的已经
+    # 折叠进本地卡片的旁证里，不会在这里重复出现 —— 这正是「接了第三方不会把第一屏
+    # 重新塞满」的机制。它们没有本地探测数据，所以只给「去源侧看」的入口，不编造层面。
+    for a in (ext_orphans or []):
+        started = int(a.get("started_at") or a.get("received_at") or t_now)
+        groups.append({
+            "key": "ext:%s:%s" % (a.get("source"), a.get("id")), "kind": "external",
+            "task_id": "", "title": str(a.get("title") or a.get("source_id") or "第三方告警"),
+            "type": "", "bucket": "live", "layer": "第三方",
+            "advice": ("来自 %s 的告警：本平台没有该目标的直接探测数据，"
+                       "先用源侧链接看详情；如需本地证据，给该目标建一个探测任务"
+                       % (a.get("source") or "")),
+            "error_class": "", "count": 1, "incident_ids": [],
+            "nodes": [], "targets": [],
+            "node_id": "", "node_name": "",
+            "started_at": started, "duration_s": max(0, t_now - started),
+            "last_ts": int(a.get("received_at") or 0), "acked": False,
+            "maintenance": None, "runbook": "", "changes": [],
+            "subtitle": "%s · 第三方" % (a.get("source") or ""),
+            "external": [a], "members": [],
         })
 
     # 排序（第二期 9）：横切提示置顶 → 分档（正在失败 > 沉默 > 陈旧 > 维护中）
@@ -894,14 +974,25 @@ def setup_router(app_state) -> APIRouter:
             "heartbeat_age_s": ((t_now - int(n["last_heartbeat"]))
                                 if n.get("last_heartbeat") else None),
         } for n in nodes.values()]
+        # 第六期 28/29：本地事件带「旁证」（已关联的第三方告警），未关联的第三方
+        # firing 告警单独成卡。关联上的不会重复占屏 —— 这就是「接了第三方不会把第一屏
+        # 重新塞满」的机制；反过来，关联不上说明本平台没在探这个目标，也值得看见。
+        ext_links = s.external_alert_links_for([it["incident_id"] for it in items])
+        for it in items:
+            it["external"] = ext_links.get(it["incident_id"], [])
+        linked_ids = {a["id"] for lst in ext_links.values() for a in lst}
+        ext_orphans = [a for a in s.list_external_alerts(limit=100, firing_only=True)
+                       if a["id"] not in linked_ids]
         # 聚合后的「行动项」：同一任务一张卡 + 按节点横切（第二期 7-9）。
         # items 保持原样返回，前端与既有验收断言不受影响。
         return {"ts": t_now, "items": items,
-                "groups": _oncall_groups(items, t_now),
+                "groups": _oncall_groups(items, t_now, ext_orphans),
                 "selfcheck": selfcheck, "nodes_health": nodes_health,
+                "external": {"firing": len(ext_orphans), "linked": len(linked_ids)},
                 # 第三期 12：未配置 public_url 时通知里**没有**「点击查看」链接，
                 # 页面上要显著提示，否则运维只会以为「链接坏了」。
                 "public_url": pub, "public_url_configured": bool(pub)}
+
     @router.get("/compare")
     def compare(task_id: str, mode: str = "yesterday", metric: str = "rtt",
                 window_hours: int = 0, node_id: str = "", dns: str = "", url: str = ""):
@@ -1549,6 +1640,107 @@ def setup_router(app_state) -> APIRouter:
     @router.get("/report/digest/settings")
     def digest_settings():
         return _digest_settings()
+
+    # ---------- 第三方告警（第六期 24/25/27/28/29/30）----------
+    @router.post("/hooks/{source}")
+    async def hook_receive(source: str, request: Request):
+        """接收第三方告警（Grafana / Zabbix / 腾讯云 / GCP）。
+
+        安全（第六期 30）：必须配置该来源的接入 Token 并带上；**未配置时拒绝接收**
+        —— 不提供「无鉴权也能往库里写告警」的默认。另有单次 payload 上限与每来源限流。
+        只读：本接口不产生任何对外请求，第三方系统不会被我们回写。
+        """
+        if source not in hooks.SOURCES:
+            raise HTTPException(404, "未知来源：%s（可选：%s）"
+                            % (source, ", ".join(hooks.SOURCES)))
+        try:
+            clen = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            clen = 0
+        if clen > hooks.MAX_BODY_BYTES:
+            raise HTTPException(413, "payload 过大（>%d 字节）" % hooks.MAX_BODY_BYTES)
+        if not hooks.expected_token(s, source):
+            raise HTTPException(401, "未配置该来源的接入 Token，拒绝接收"
+                                     "（到「通知配置 → 第三方接入」设置）")
+        if not hooks.token_ok(s, source, request.headers.get(hooks.TOKEN_HEADER),
+                              request.query_params.get(hooks.TOKEN_QUERY)):
+            raise HTTPException(401, "接入 Token 不匹配")
+        raw = await request.body()
+        if len(raw) > hooks.MAX_BODY_BYTES:
+            raise HTTPException(413, "payload 过大（>%d 字节）" % hooks.MAX_BODY_BYTES)
+        if not hooks.rate_ok(source):
+            raise HTTPException(429, "接收过于频繁，请稍后再试")
+        try:
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(422, "payload 不是合法 JSON")
+        ts = now()
+        alerts = hooks.parse(source, body)
+        ids = []
+        for a in alerts:
+            # raw 落库前脱敏（键名命中敏感词 / URL 里的 token 与 userinfo 一律抹掉）
+            aid, _created = s.external_alert_upsert(
+                source, str(a["source_id"]),
+                dict(a, raw=hooks.redact(a.get("raw") or {})), ts)
+            ids.append(aid)
+            rec = s.external_alert_get(aid)
+            if rec:
+                _correlate_external(s, rec, ts)      # 关联去重：能折进本地卡的就不单独成卡
+        return {"source": source, "received": len(alerts), "ids": ids, "ts": ts}
+
+    @router.get("/external/alerts")
+    def external_alerts(limit: int = 100, source: str = "", status: str = "",
+                        firing_only: bool = False, days: int = 0):
+        t_from = now() - max(0, int(days)) * 86400 if days else 0
+        items = s.list_external_alerts(limit=max(1, min(limit, 500)), source=source,
+                                       status=status, t_from=t_from,
+                                       firing_only=firing_only)
+        # 旁证关系一并返回：前端要知道「哪些已经折进本地卡片了」
+        links = s.external_alert_links_for([i["id"] for i in items])
+        by_alert = {}
+        for iid, lst in links.items():
+            for a in lst:
+                by_alert[a["id"]] = iid
+        for i in items:
+            i["linked_incident"] = by_alert.get(i["id"])
+        return {"items": items, "count": len(items)}
+
+    @router.get("/external/summary")
+    def external_summary(days: int = 1):
+        """按来源汇总（第六期 29）：报表里要能看出「这些告警从哪来、还开着多少」。"""
+        return s.external_alert_summary(now(), max(0, min(int(days), 365)))
+
+    @router.get("/external/settings")
+    def external_settings():
+        """接入配置状态。**不返回 Token 本身**，只说配没配。"""
+        return {"sources": [{"source": src, "configured": bool(hooks.expected_token(s, src))}
+                            for src in hooks.SOURCES],
+                "token_header": hooks.TOKEN_HEADER, "token_query": hooks.TOKEN_QUERY,
+                "hint": ("每家都要配一个接入 Token 才会接收；未配置时该来源一律 401。"
+                         "官方签名校验（GCP OIDC / 腾讯云签名）本期未实现，见文档限制。"),
+                "limits": {"max_body_bytes": hooks.MAX_BODY_BYTES,
+                           "rate_per_min": hooks.RATE_LIMIT_PER_MIN}}
+
+    @router.put("/external/settings")
+    def external_settings_set(body: dict, x_admin_token: str | None = Header(default=None)):
+        """设置接入 Token：`hook_token` 通用，`hook_token_<source>` 覆盖某一家。"""
+        check_write(x_admin_token)
+        for key in ("hook_token",) + tuple("hook_token_%s" % x for x in hooks.SOURCES):
+            if key in body:
+                s.setting_set(key, str(body[key] or "").strip()[:200])
+        return external_settings()
+
+    @router.post("/external/correlate")
+    def external_correlate(days: int = 7, x_admin_token: str | None = Header(default=None)):
+        """手动重跑关联（新增了任务/节点、或改了名字之后用）。"""
+        check_write(x_admin_token)
+        ts = now()
+        t_from = ts - max(1, min(int(days), 90)) * 86400
+        n = linked = 0
+        for a in s.list_external_alerts(limit=500, t_from=t_from):
+            n += 1
+            linked += _correlate_external(s, a, ts)
+        return {"scanned": n, "linked": linked, "ts": ts}
 
     # ---------- 通知深链前缀（第三期 11/12）----------
     @router.get("/settings/public-url")

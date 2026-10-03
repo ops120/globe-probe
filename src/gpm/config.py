@@ -24,6 +24,7 @@ DEFAULTS = {
         "retention_audit_days": 30,    # 操作审计保留
         "retention_outbox_days": 7,    # 通知重投记录（done/failed）保留
         "retention_incidents_days": 180,  # 已关闭事件保留
+        "retention_external_days": 30,   # 第三方告警保留（按最后活动时间；提示型数据不必留久）
         "thread_pool_tokens": 40,     # AnyIO 线程池上限（防线程爆发 MemoryError）
         "tasks_cache_seconds": 15,    # /api/tasks 列表缓存秒数（0=禁用）；config_version 变更立即失效，?fresh=1 绕过
         # 通知里「点击查看」深链的前缀（如 https://gpm.example.com）。留空则通知不带链接——

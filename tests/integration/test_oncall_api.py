@@ -78,8 +78,10 @@ def test_oncall_two_nodes_one_fail(tmp_path):
     #   groups                   第二期：聚合后的「行动项」
     #   selfcheck / nodes_health 第四期：平台可信度三数 + 节点资源饱和度
     #   public_url(_configured)  第三期：通知深链前缀与是否已配置
+    #   external                 第六期：第三方告警的「开着的 / 已关联」计数
     assert set(body) == {"ts", "items", "groups", "selfcheck", "nodes_health",
-                         "public_url", "public_url_configured"} and body["ts"] > 0
+                         "public_url", "public_url_configured",
+                         "external"} and body["ts"] > 0
     items = [i for i in body["items"] if i["task_id"] == tid]
     assert len(items) == 1, body["items"]
     it = items[0]

@@ -77,7 +77,27 @@ const ONCALL_BUCKET_BADGE = {
   stale: ['b-off', '陈旧待收口'],
   maintenance: ['b-warn', '维护中'],
 };
-const ONCALL_KIND_BADGE = { node_suspect: ['b-warn', '根因提示'], node: ['b-off', 'NODE'] };
+const ONCALL_KIND_BADGE = { node_suspect: ['b-warn', '根因提示'], node: ['b-off', 'NODE'],
+                            external: ['b-warn', '第三方'] };
+
+/* 第三方给的链接是外部数据，只放行 http(s)：避免 javascript: 之类的伪协议被当链接渲染 */
+function ocSafeUrl(u) {
+  const s = String(u || '').trim();
+  return /^https?:\/\//i.test(s) ? s : '';
+}
+
+/* 第三方告警的行内展示（旁证 / 独立卡共用） */
+function ocExternalRows(list) {
+  return (list || []).map(x => {
+    const u = ocSafeUrl(x.url);
+    return '<div class="oc-extrow">'
+      + '<span class="badge b-warn">' + esc(String(x.source || '').toUpperCase()) + '</span>'
+      + '<span class="oc-extt" title="' + esc(x.title || '') + '">' + esc(x.title || x.source_id || '') + '</span>'
+      + '<span class="oc-exttime">' + esc(fmtAgo(x.started_at || x.received_at)) + '</span>'
+      + (u ? '<a class="btn sm ghost" href="' + esc(u) + '" target="_blank" rel="noopener">源侧</a>' : '')
+      + '</div>';
+  }).join('');
+}
 
 /* 第四期 17：「本平台可信度」——先排除「监控自己坏了」，再谈故障。
  * 三个数都是可解释的：探测新鲜度（最近样本距今，>10 分钟说明数据可能停更）、
@@ -199,6 +219,7 @@ function oncallCard(g) {
   const members = g.members || [];
   const isNodeEv = g.kind === 'node';
   const isSuspect = g.kind === 'node_suspect';
+  const isExternal = g.kind === 'external';
   const b = groupBucket(g);
   const [bCls, bLabel] = ONCALL_BUCKET_BADGE[b] || ONCALL_BUCKET_BADGE.live;
   const [kCls, kLabel] = ONCALL_KIND_BADGE[g.kind]
@@ -257,6 +278,14 @@ function oncallCard(g) {
         + '<button class="btn sm ghost" onclick="oncallCopy(this,&quot;'
         + esc(g.runbook).replace(/"/g, '&quot;') + '&quot;)">复制</button></div>' : '')
     // 第三期 14：同期变更（±30 分钟内动过这个任务/节点）——「刚改完就炸」最省时间的线索
+    // 第六期 28：已关联的第三方告警作为**旁证**折叠在本地卡里（不再单独占一张卡）
+    // 已关联的第三方告警作为**旁证**折叠进本地卡；第三方独立卡本身就是那条告警，
+    // 不必再把自己的内容标成「旁证」（否则卡里出现一条与标题重复的行）。
+    + ((g.external && g.external.length)
+      ? '<div class="oc-ext">'
+        + (isExternal ? '' : '<div class="oc-ext-lbl">第三方旁证 ' + g.external.length + ' 条</div>')
+        + ocExternalRows(g.external) + '</div>'
+      : '')
     + ((g.changes && g.changes.length)
       ? '<div class="oc-changes">' + g.changes.map(c =>
           '<div class="oc-crow"><span class="oc-cts">' + esc(fmtAgo(c.ts)) + '</span>'
@@ -271,10 +300,15 @@ function oncallCard(g) {
         + members.length + ' 条</button>' : '')
     + (g.acked ? '' : '<button class="btn sm ghost" onclick="oncallAckAll('
         + JSON.stringify(g.incident_ids || []).replace(/"/g, '&quot;') + ')">确认</button>')
-    + (isNodeEv || isSuspect
-        ? '<button class="btn sm" onclick="show(\'nodes\')">看节点</button>'
-        : '<button class="btn sm" onclick="oncallGoto(&quot;' + esc(String(g.task_id))
-          + '&quot;,' + (g.last_ts || 0) + ')">去处理</button>')
+    + (g.kind === 'external'
+        ? ((ocSafeUrl(((g.external || [])[0] || {}).url))
+            ? '<a class="btn sm" href="' + esc(ocSafeUrl(g.external[0].url))
+              + '" target="_blank" rel="noopener">去源侧看</a>'
+            : '<span class="oc-exttime">源侧未提供链接</span>')
+        : (isNodeEv || isSuspect
+            ? '<button class="btn sm" onclick="show(\'nodes\')">看节点</button>'
+            : '<button class="btn sm" onclick="oncallGoto(&quot;' + esc(String(g.task_id))
+              + '&quot;,' + (g.last_ts || 0) + ')">去处理</button>'))
     + '</div></div>';
 }
 

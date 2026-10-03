@@ -392,7 +392,8 @@ async def _retention_loop(state: dict, stop: asyncio.Event):
                             alerts_days=srv.get("retention_alerts_days", 30),
                             audit_days=srv.get("retention_audit_days", 30),
                             outbox_days=srv.get("retention_outbox_days", 7),
-                            incidents_days=srv.get("retention_incidents_days", 180))
+                            incidents_days=srv.get("retention_incidents_days", 180),
+                external_days=srv.get("retention_external_days", 30))
             s.meta_set("last_retention", str(now()))
             if any(n.values()):
                 log.info("保留策略清理完成: %s", n)

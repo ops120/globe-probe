@@ -284,6 +284,7 @@ async function renderAlerts() {
   if (!state.tasks || !state.tasks.length) state.tasks = await api('/api/tasks');
   await Promise.all([renderSla(), renderChannels(), renderRules(), renderWindows()]);
   await renderPublicUrl();
+  await renderExternal();      // 第六期：「第三方告警」子页（来源汇总 + 告警表）
   await renderAlertHistory();
   await renderDigest();
   await renderOutbox();
