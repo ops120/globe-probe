@@ -4,6 +4,13 @@
  * 经 index.html 在 gpm-page-alerts.js 之前按序引入（renderAlerts 运行时会调用 renderOncall），
  * 跨文件共享靠顶层声明（function 挂 window）；fmtDur/TYPE_BADGE 定义在后续模块，运行时可用。
  * 旧版服务端没有 /api/oncall（404）→ 显示「服务端暂不支持」优雅降级，不报错、不弹红。
+ *
+ * 2026-10-03 第二期（聚合降噪，见 .docs/ONCALL_OPTIMIZATION_2.md 第二期 7-10）：
+ *   ① 默认渲染服务端聚合出的 **groups**（同一任务一张卡，卡内可展开每条流），
+ *      而不是逐流平铺——线上 11 条事件里同一任务占多条，值班的人得手动合并；
+ *   ② 「同一节点上 ≥3 个任务同时失败」作为置顶的**横切卡**给出根因提示；
+ *   ③ 卡片按 分档 → 影响面 → 时长 排序，并提供「只看未确认 / 只看某节点」筛选；
+ *   ④ 维护窗口内的事件单列「维护中」分档，不再以「正在失败」占着第一屏。
  */
 'use strict';
 
@@ -44,49 +51,6 @@ async function renderOncall(force) {
   paintOncall();
 }
 
-/* 分档：让第一屏只显示「现在值不值得动手」的东西。
- * 「沉默 ≠ 故障」——事件还开着不代表目标此刻仍在失败，必须一眼能分清。 */
-const ONCALL_BUCKETS = [
-  ['live', '正在失败', 'b-fail'],
-  ['silent', '沉默待确认', 'b-warn'],
-  ['stale', '陈旧待收口', 'b-off'],
-  ['all', '全部', 'b-off'],
-];
-
-function paintOncall() {
-  const body = $('#oncall-body');
-  const d = state.oncallData || {};
-  if (!body) return;
-  const all = d.items || [];
-  const counts = { live: 0, silent: 0, stale: 0 };
-  all.forEach(x => { const b = x.bucket || 'live'; counts[b] = (counts[b] || 0) + 1; });
-  if (!state.oncallFilter) state.oncallFilter = 'live';
-  const items = state.oncallFilter === 'all'
-    ? all : all.filter(x => (x.bucket || 'live') === state.oncallFilter);
-  const other = all.length - counts.live;
-  $('#oncall-sub').textContent = '正在失败 ' + counts.live + ' 条'
-    + (other > 0 ? ' · 另有 ' + other + ' 条沉默/陈旧' : '')
-    + (d.ts ? ' · 数据时间 ' + fmtTS(d.ts) : '');
-  if (!all.length) {
-    body.innerHTML = '<div class="oncall-empty">当前没有进行中的故障 🎉<br>'
-      + '<span style="font-size:12px">任务连续失败触发的事件会出现在这里，并给出影响面与处置建议</span></div>';
-    return;
-  }
-  const chips = '<div class="oncall-chips">' + ONCALL_BUCKETS.map(([k, label, cls]) => {
-    const n = k === 'all' ? all.length : (counts[k] || 0);
-    return '<button class="btn sm ' + (state.oncallFilter === k ? '' : 'ghost') + '"'
-      + ' onclick="oncallFilter(\'' + k + '\')">'
-      + '<span class="badge ' + cls + '">' + n + '</span> ' + label + '</button>';
-  }).join('') + '</div>';
-  body.innerHTML = chips + (items.length
-    ? '<div class="oncall-grid">' + items.map(oncallCard).join('') + '</div>'
-    : '<div class="oncall-empty">该分档下没有卡片<br>'
-      + '<span style="font-size:12px">「沉默/陈旧」表示事件还开着、但我们已经收不到新样本——'
-      + '不代表目标此刻仍在失败，正常的会被后端自动收口。</span></div>');
-}
-
-window.oncallFilter = (k) => { state.oncallFilter = k; paintOncall(); };
-
 /* 旧服务端没有 /api/oncall：如实说明是能力差异，不算页面故障 */
 function renderOncallUnsupported(msg) {
   const sub = $('#oncall-sub'), body = $('#oncall-body');
@@ -98,60 +62,153 @@ function renderOncallUnsupported(msg) {
     + '在此期间请用「事件与告警」子页查看事件与告警历史。</span></div>';
 }
 
+/* 分档：让第一屏只显示「现在值不值得动手」的东西。
+ * 「沉默 ≠ 故障」——事件还开着不代表目标此刻仍在失败，必须一眼能分清。 */
+const ONCALL_BUCKETS = [
+  ['live', '正在失败', 'b-fail'],
+  ['silent', '沉默待确认', 'b-warn'],
+  ['stale', '陈旧待收口', 'b-off'],
+  ['maintenance', '维护中', 'b-warn'],
+  ['all', '全部', 'b-off'],
+];
 const ONCALL_BUCKET_BADGE = {
   live: ['b-fail', '正在失败'],
   silent: ['b-warn', '沉默待确认'],
   stale: ['b-off', '陈旧待收口'],
+  maintenance: ['b-warn', '维护中'],
+};
+const ONCALL_KIND_BADGE = { node_suspect: ['b-warn', '根因提示'], node: ['b-off', 'NODE'] };
+
+/* 一条行动项落在哪个分档：维护窗口优先（计划内维护不该以「正在失败」占屏） */
+function groupBucket(g) { return g.maintenance ? 'maintenance' : (g.bucket || 'live'); }
+
+function paintOncall() {
+  const body = $('#oncall-body');
+  const d = state.oncallData || {};
+  if (!body) return;
+  const all = d.groups || (d.items || []).map(it => Object.assign({}, it, {
+    kind: it.task_id ? 'task' : 'node', count: 1, members: [it], subtitle: '',
+    incident_ids: [it.incident_id], title: it.task_id ? it.task_name : it.node_name,
+  }));
+  const counts = {};
+  all.forEach(g => { const b = groupBucket(g); counts[b] = (counts[b] || 0) + 1; });
+  if (!state.oncallFilter) state.oncallFilter = 'live';
+  const nodes = [...new Set(all.flatMap(g => g.nodes || []).filter(Boolean))].sort();
+  let items = all.filter(g => state.oncallFilter === 'all' || groupBucket(g) === state.oncallFilter);
+  if (state.oncallUnacked) items = items.filter(g => !g.acked);
+  if (state.oncallNode) items = items.filter(g => (g.nodes || []).includes(state.oncallNode));
+
+  const other = all.length - (counts.live || 0);
+  $('#oncall-sub').textContent = '正在失败 ' + (counts.live || 0) + ' 条'
+    + (other > 0 ? ' · 另有 ' + other + ' 条沉默/陈旧/维护' : '')
+    + (d.ts ? ' · 数据时间 ' + fmtTS(d.ts) : '');
+  if (!all.length) {
+    body.innerHTML = '<div class="oncall-empty">当前没有进行中的故障 🎉<br>'
+      + '<span style="font-size:12px">任务连续失败触发的事件会出现在这里，并给出影响面与处置建议</span></div>';
+    return;
+  }
+  const chips = '<div class="oncall-chips">' + ONCALL_BUCKETS.map(([k, label, cls]) => {
+    const n = k === 'all' ? all.length : (counts[k] || 0);
+    return '<button class="btn sm ' + (state.oncallFilter === k ? '' : 'ghost') + '"'
+      + ' onclick="oncallFilter(\'' + k + '\')">'
+      + '<span class="badge ' + cls + '">' + n + '</span> ' + label + '</button>';
+  }).join('')
+    + '<button class="btn sm ' + (state.oncallUnacked ? '' : 'ghost') + '"'
+    + ' onclick="oncallToggleUnacked()">只看未确认</button>'
+    + (nodes.length > 1
+      ? '<select onchange="oncallNodeFilter(this.value)" style="max-width:180px">'
+        + '<option value="">全部节点</option>'
+        + nodes.map(n => '<option value="' + esc(n) + '"'
+          + (state.oncallNode === n ? ' selected' : '') + '>' + esc(n) + '</option>').join('')
+        + '</select>'
+      : '')
+    + '</div>';
+  body.innerHTML = chips + (items.length
+    ? '<div class="oncall-grid">' + items.map(oncallCard).join('') + '</div>'
+    : '<div class="oncall-empty">该筛选下没有卡片<br>'
+      + '<span style="font-size:12px">「沉默/陈旧」表示事件还开着、但我们已经收不到新样本——'
+      + '不代表目标此刻仍在失败，正常的会被后端自动收口。</span></div>');
+}
+
+window.oncallFilter = (k) => { state.oncallFilter = k; paintOncall(); };
+window.oncallToggleUnacked = () => { state.oncallUnacked = !state.oncallUnacked; paintOncall(); };
+window.oncallNodeFilter = (v) => { state.oncallNode = v; paintOncall(); };
+window.oncallExpand = (key) => {
+  const el = document.getElementById('oc-m-' + key);
+  if (el) el.classList.toggle('hidden');
 };
 
-function oncallCard(it) {
-  const scope = it.scope || {};
-  const isNodeEv = !it.task_id;                       // 节点离线/节点事件（无目标任务）
-  const target = isNodeEv ? '' : (it.url || it.dns || '');
-  const dur = it.duration_s != null ? fmtDur(Math.round(it.duration_s))
-    : (it.started_at ? fmtDur(Math.max(0, Math.round(Date.now() / 1000 - it.started_at))) : '—');
-  const [bCls, bLabel] = ONCALL_BUCKET_BADGE[it.bucket] || ONCALL_BUCKET_BADGE.live;
-  const lastSt = it.last_status === 'ok' ? '<span class="badge b-ok">成功</span>'
-    : it.last_status ? '<span class="badge b-fail">' + esc(it.last_status) + '</span>' : '—';
-  // 「最近」优先显示相对时间并 hover 出绝对时间：判断一张卡还可不可信，第一眼看的就是
-  // 「最后一次样本是几分钟前」。原先只给绝对时间戳，值班的人得自己心算。
-  const lastTime = it.last_ts
-    ? '<span title="' + esc(fmtTS(it.last_ts)) + '" style="color:var(--muted)">'
-      + esc(fmtAgo(it.last_ts)) + '</span>'
+function oncallCard(g) {
+  const members = g.members || [];
+  const isNodeEv = g.kind === 'node';
+  const isSuspect = g.kind === 'node_suspect';
+  const b = groupBucket(g);
+  const [bCls, bLabel] = ONCALL_BUCKET_BADGE[b] || ONCALL_BUCKET_BADGE.live;
+  const [kCls, kLabel] = ONCALL_KIND_BADGE[g.kind]
+    || (TYPE_BADGE[g.type] ? [TYPE_BADGE[g.type], (g.type || '').toUpperCase()] : ['b-off', '任务']);
+  const dur = g.duration_s != null ? fmtDur(Math.round(g.duration_s)) : '—';
+  const head = members[0] || {};
+  const lastTime = g.last_ts
+    ? '<span title="' + esc(fmtTS(g.last_ts)) + '" style="color:var(--muted)">'
+      + esc(fmtAgo(g.last_ts)) + '</span>'
     : '<span style="color:var(--muted)">无样本</span>';
-  const advice = [it.advice, isNodeEv ? '' : scope.advice].filter(Boolean).join('；');
-  const scopeLine = (!isNodeEv && scope.total != null)
-    ? ('<span><b>范围</b> ' + esc(scope.verdict || (scope.total === 0 ? '无近期样本（任务停用或节点离线）' : '—'))
-      + (scope.total > 0 ? ' <span class="badge b-off">' + (scope.failed ?? '?') + '/' + scope.total + '</span>' : '')
-      + '</span>')
+  const lastSt = head.last_status === 'ok' ? '<span class="badge b-ok">成功</span>'
+    : head.last_status ? '<span class="badge b-fail">' + esc(head.last_status) + '</span>' : '—';
+  const advice = [g.advice, (!isNodeEv && (head.scope || {}).advice) ? head.scope.advice : '']
+    .filter(Boolean).join('；');
+  // 范围只在探测类卡上成立：节点事件没有目标范围
+  const scopeLine = (!isNodeEv && head.scope && head.scope.total != null)
+    ? ('<span><b>范围</b> ' + esc(head.scope.verdict
+        || (head.scope.total === 0 ? '无近期样本（任务停用或节点离线）' : '—'))
+      + (head.scope.total > 0 ? ' <span class="badge b-off">' + (head.scope.failed ?? '?')
+        + '/' + head.scope.total + '</span>' : '') + '</span>')
     : '';
-  return '<div class="oncall-card' + (it.acked ? ' acked' : '') + '" data-incident="' + esc(it.incident_id ?? '') + '">'
+  const rows = members.length > 1
+    ? '<div id="oc-m-' + esc(g.key) + '" class="oc-members hidden">'
+      + members.map(m => '<div class="oc-mrow">'
+        + '<span class="oc-mnode">' + esc(m.node_name || m.node_id || '') + '</span>'
+        + '<span class="oc-mtgt">' + esc(m.url || m.dns || (m.node_name ? '默认线路' : '')) + '</span>'
+        + '<span class="oc-mbadge"><span class="badge '
+          + (ONCALL_BUCKET_BADGE[groupBucket(m)] || ['b-off', ''])[0] + '">'
+          + (ONCALL_BUCKET_BADGE[groupBucket(m)] || ['', '—'])[1] + '</span></span>'
+        + '<span class="oc-mtime">' + esc(fmtAgo(m.last_ts)) + '</span>'
+        + (m.acked ? '<span class="badge b-off">已确认</span>'
+          : '<button class="btn sm ghost" onclick="oncallAck(&quot;'
+            + esc(String(m.incident_id)) + '&quot;)">确认</button>')
+        + '</div>').join('')
+      + '</div>'
+    : '';
+  return '<div class="oncall-card' + (g.acked ? ' acked' : '') + '" data-group="' + esc(g.key) + '">'
     + '<div class="oc-head">'
-    + '<span class="badge ' + (TYPE_BADGE[it.type] || 'b-off') + '">' + esc((it.type || 'NODE').toUpperCase()) + '</span>'
+    + '<span class="badge ' + kCls + '">' + kLabel + '</span>'
     + '<span class="badge ' + bCls + '">' + bLabel + '</span>'
-    + '<b class="oc-title">' + esc(isNodeEv ? ((it.node_name || it.node_id || '节点') + ' · 节点事件') : (it.task_name || it.task_id || '未命名任务')) + '</b>'
-    + (target ? '<span class="oc-target">' + esc(target) + '</span>' : '')
-    + (it.error_class ? '<span class="badge b-fail">' + esc(it.error_class) + '</span>' : '')
-    + (it.acked ? '<span class="badge b-off" title="已有人确认知晓">已确认</span>' : '')
+    + '<b class="oc-title">' + esc(g.title || '未命名') + '</b>'
+    + (g.subtitle ? '<span class="oc-target">' + esc(g.subtitle) + '</span>' : '')
+    + (g.error_class ? '<span class="badge b-fail">' + esc(g.error_class) + '</span>' : '')
+    + (g.acked ? '<span class="badge b-off" title="已有人确认知晓">已确认</span>' : '')
     + '</div>'
     + '<div class="oc-meta">'
-    + '<span><b>层面</b> ' + esc(it.layer || '—') + '</span>'
+    + '<span><b>层面</b> ' + esc(g.layer || '—') + '</span>'
     + scopeLine
     + '<span><b>已持续</b> ' + esc(dur) + '</span>'
     + '<span><b>最近</b> ' + lastSt + ' ' + lastTime + '</span>'
     + '</div>'
     + (advice ? '<div class="oc-advice">建议：' + esc(advice) + '</div>' : '')
+    + rows
     + '<div class="oc-ops">'
-    + '<button class="btn sm ghost" onclick="oncallAck(&quot;' + esc(String(it.incident_id ?? '')) + '&quot;)">确认</button>'
-    + (isNodeEv
-        // 节点事件没有 task_id，原先的「去处理」调 oncallGoto('') 直接 return —— 点了毫无反应。
-        // 改成去节点管理页看这台机器的详情（CPU/内存/上线时间）。
+    + (members.length > 1
+      ? '<button class="btn sm ghost" onclick="oncallExpand(&quot;' + esc(g.key) + '&quot;)">展开 '
+        + members.length + ' 条</button>' : '')
+    + (g.acked ? '' : '<button class="btn sm ghost" onclick="oncallAckAll('
+        + JSON.stringify(g.incident_ids || []).replace(/"/g, '&quot;') + ')">确认</button>')
+    + (isNodeEv || isSuspect
         ? '<button class="btn sm" onclick="show(\'nodes\')">看节点</button>'
-        : '<button class="btn sm" onclick="oncallGoto(&quot;' + esc(String(it.task_id ?? '')) + '&quot;,' + (it.last_ts || 0) + ')">去处理</button>')
+        : '<button class="btn sm" onclick="oncallGoto(&quot;' + esc(String(g.task_id))
+          + '&quot;,' + (g.last_ts || 0) + ')">去处理</button>')
     + '</div></div>';
 }
 
-/* 确认入口：复用事件详情弹窗同一个确认端点（/api/event/{id}/ack） */
+/* 确认入口（单条）：复用事件详情弹窗同一个确认端点（/api/event/{id}/ack） */
 window.oncallAck = async (iid) => {
   if (!iid) return;
   $('#modal-body').innerHTML = '<span class="m-close" onclick="closeModal()">✕</span>'
@@ -173,7 +230,21 @@ window.oncallAck = async (iid) => {
   };
 };
 
-/* 「去处理」：与深链 /index.html?task=<id>&ts=<ts> 完全同一条路径（openTaskAt，见 gpm-boot.js） */
+/* 确认入口（整张聚合卡）：一次认领该卡代表的所有事件 —— 一张卡就是一个行动项 */
+window.oncallAckAll = async (ids) => {
+  if (!ids || !ids.length) return;
+  try {
+    for (const i of ids) {
+      await api('/api/event/' + i + '/ack', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ note: '值班总览聚合卡一次确认（共 ' + ids.length + ' 条）' }) });
+    }
+    toast('已确认 ' + ids.length + ' 条');
+    renderOncall(true);
+  } catch (e) { toast('失败: ' + e.message); }
+};
+
+/* 「去处理」：与深链 /?task=<id>&ts=<ts> 完全同一条路径（openTaskAt，见 gpm-boot.js） */
 window.oncallGoto = async (taskId, ts) => {
   if (!taskId) return;
   try {

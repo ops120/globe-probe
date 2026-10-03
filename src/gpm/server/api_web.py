@@ -64,6 +64,138 @@ def _oncall_bucket(task: dict, node: dict, last_status, last_age_s,
     return "silent"
 
 
+_BUCKET_RANK = {"live": 0, "silent": 1, "stale": 2, "maintenance": 3}
+
+# 同一节点上多少个任务同时失败，才值得给一张「疑似节点侧」的横切卡。
+# 低于这个数，节点侧解释不如「多个目标各自坏了」可信，提示反而变成噪声。
+NODE_SUSPECT_MIN_TASKS = 3
+
+
+def _oncall_group_subtitle(count: int, nodes: list, targets: list) -> str:
+    """一张聚合卡的副标题：说清「这一条代表了哪些东西」。"""
+    bits = ["%d 条流" % count]
+    if len(nodes) > 1:
+        bits.append("%d 个节点" % len(nodes))
+    elif nodes:
+        bits.append(nodes[0])
+    if len(targets) > 1:
+        bits.append("%d 个目标" % len(targets))
+    return " · ".join(bits)
+
+
+def _oncall_groups(items: list, t_now: int) -> list:
+    """把逐流事件聚合为「行动项」：同一任务一张卡 + 按节点横切提示。
+
+    .docs/ONCALL_OPTIMIZATION_2.md 第二期 7-9。线上实测 11 条事件里同一任务占多条
+    （curl-baidu-multi 3 条 URL、ping-223 2 个节点），值班的人得在第一屏手动合并；
+    而「同一节点上 N 个任务同时失败」这个最有价值的相关性信号完全没有暴露——
+    它往往就是根因提示（节点侧坏了，而不是每个目标各自坏了）。
+
+    分组只做**展示层合并**：底层每条事件都保留在 members 里，可展开、可单独确认。
+    """
+    def b_of(it: dict) -> str:
+        if it.get("maintenance"):
+            return "maintenance"
+        return it.get("bucket") or "live"
+
+    by_task: dict = {}
+    node_events: list = []
+    for it in items:
+        if it["task_id"]:
+            by_task.setdefault(it["task_id"], []).append(it)
+        else:
+            node_events.append(it)
+
+    groups: list = []
+    for tid, members in by_task.items():
+        members = sorted(members, key=lambda x: (x.get("last_ts") or 0), reverse=True)
+        head = members[0]
+        nodes = sorted({m["node_name"] for m in members if m.get("node_name")})
+        targets = sorted({(m["url"] or m["dns"] or "") for m in members
+                          if (m.get("url") or m.get("dns"))})
+        started = min(int(m["started_at"] or t_now) for m in members)
+        groups.append({
+            "key": "task:" + tid, "kind": "task", "task_id": tid,
+            "title": head["task_name"], "type": head["type"],
+            "bucket": min((b_of(m) for m in members),
+                          key=lambda b: _BUCKET_RANK.get(b, 9)),
+            "layer": head["layer"], "advice": head["advice"],
+            "error_class": head["error_class"],
+            "count": len(members),
+            "incident_ids": [m["incident_id"] for m in members],
+            "nodes": nodes, "targets": targets,
+            "node_id": head["node_id"], "node_name": head["node_name"],
+            "started_at": started, "duration_s": max(0, t_now - started),
+            "last_ts": max(int(m["last_ts"] or 0) for m in members),
+            "acked": all(m["acked"] for m in members),
+            "maintenance": next((m.get("maintenance") for m in members
+                                 if m.get("maintenance")), None),
+            "subtitle": _oncall_group_subtitle(len(members), nodes, targets),
+            "members": members,
+        })
+
+    for it in node_events:
+        groups.append({
+            "key": "nodeev:%s" % it["incident_id"], "kind": "node",
+            "task_id": "", "title": (it.get("node_name") or it.get("node_id") or "节点"),
+            "type": "", "bucket": b_of(it), "layer": it["layer"], "advice": it["advice"],
+            "error_class": "", "count": 1, "incident_ids": [it["incident_id"]],
+            "nodes": [it.get("node_name") or ""], "targets": [],
+            "node_id": it["node_id"], "node_name": it["node_name"],
+            "started_at": int(it["started_at"] or t_now),
+            "duration_s": it.get("duration_s") or 0,
+            "last_ts": it.get("last_ts") or 0, "acked": it["acked"],
+            "maintenance": it.get("maintenance"), "subtitle": "节点事件",
+            "members": [it],
+        })
+
+    # 横切：同一节点上 ≥N 个任务同时失败 → 一张置顶的「疑似节点侧」卡。
+    # 只统计「正在失败」的任务：沉默/陈旧本来就没有新样本，不能作为节点侧证据。
+    live_by_node: dict = {}
+    for g in groups:
+        if g["kind"] != "task" or g["bucket"] != "live":
+            continue
+        for m in g["members"]:
+            live_by_node.setdefault(m["node_id"], set()).add(m["task_id"])
+    for nid, tids_set in sorted(live_by_node.items()):
+        if len(tids_set) < NODE_SUSPECT_MIN_TASKS:
+            continue
+        members = [m for g in groups if g["kind"] == "task"
+                   for m in g["members"] if m["node_id"] == nid and m["task_id"] in tids_set]
+        nname = (members[0].get("node_name") if members else "") or nid
+        started = min(int(m["started_at"] or t_now) for m in members)
+        groups.append({
+            "key": "nodesuspect:" + nid, "kind": "node_suspect",
+            "task_id": "", "title": "%s · 疑似节点侧" % nname, "type": "",
+            "bucket": "live",
+            "layer": "节点侧",
+            "advice": ("该节点上 %d 个任务同时失败：优先查节点出口/资源（CPU、内存）"
+                       "与该节点共用的链路，而不是逐个目标排查" % len(tids_set)),
+            "error_class": "",
+            "count": len(members),
+            "incident_ids": [m["incident_id"] for m in members],
+            "nodes": [nname], "targets": sorted({m["task_name"] for m in members}),
+            "node_id": nid, "node_name": nname,
+            "started_at": started, "duration_s": max(0, t_now - started),
+            "last_ts": max(int(m["last_ts"] or 0) for m in members),
+            "acked": False,
+            "maintenance": None,
+            "subtitle": "%d 个任务同时失败" % len(tids_set),
+            "members": members,
+        })
+
+    # 排序（第二期 9）：横切提示置顶 → 分档（正在失败 > 沉默 > 陈旧 > 维护中）
+    # → 影响面（覆盖多少条流）→ 持续时长。原先是按事件开始时间倒序，一屏里
+    # 最重要的「现在真在坏、且影响面大」的那条不一定在最上面。
+    groups.sort(key=lambda g: (
+        0 if g["kind"] == "node_suspect" else 1,
+        _BUCKET_RANK.get(g["bucket"], 9),
+        -int(g["count"] or 0),
+        -int(g["duration_s"] or 0),
+    ))
+    return groups
+
+
 def setup_router(app_state) -> APIRouter:
     s = app_state["storage"]
     cfg = app_state["cfg"]
@@ -680,7 +812,16 @@ def setup_router(app_state) -> APIRouter:
                     task, node, last_status, last_age_s, stale_after),
                 "acked": bool(inc.get("acked_at")),
             })
-        return {"ts": t_now, "items": items}
+        # 维护窗口：in_maintenance() 早已存在，但此前只作用于告警评估——值班页不认它，
+        # 于是计划内维护会以「正在失败」的样子占着第一屏（第二期 10）。
+        for it in items:
+            mw = s.in_maintenance(t_now, task_id=it["task_id"], node_id=it["node_id"])
+            it["maintenance"] = ({"name": mw.get("name") or "维护窗口",
+                                  "ends_at": mw.get("ends_at")} if mw else None)
+        # 聚合后的「行动项」：同一任务一张卡 + 按节点横切（第二期 7-9）。
+        # items 保持原样返回，前端与既有验收断言不受影响。
+        return {"ts": t_now, "items": items,
+                "groups": _oncall_groups(items, t_now)}
 
     @router.get("/compare")
     def compare(task_id: str, mode: str = "yesterday", metric: str = "rtt",

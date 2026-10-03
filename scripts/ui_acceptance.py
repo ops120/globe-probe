@@ -185,7 +185,16 @@ def main() -> int:
                                 color_scheme="dark")
         page.on("console", lambda m: console_errors.append(f"{m.type}: {m.text}")
                 if m.type == "error" else None)
-        page.on("pageerror", lambda e: console_errors.append(f"pageerror: {e}"))
+        # 带上堆栈：页面级 SyntaxError（"Invalid or unexpected token"）光看消息无法定位，
+        # 必须知道是哪个 script/inline handler 抛的
+        def _on_pageerror(e):
+            st = ""
+            try:
+                st = " | " + " <- ".join((getattr(e, "stack", "") or "").strip().splitlines()[:3])
+            except Exception:  # noqa: BLE001
+                pass
+            console_errors.append(f"pageerror: {e}{st}")
+        page.on("pageerror", _on_pageerror)
         # /api/detail 在「该时刻无探测记录」时按设计返回 404（详情弹窗按需查询）；
         # /api/oncall 是新服务端才有的可选接口，前端探测到 404 时值班总览走优雅降级
         # （「服务端暂不支持」）——两者都属于设计内 404，不算失败；其余 4xx/5xx 一律计入失败
@@ -415,33 +424,37 @@ def main() -> int:
         ck.ok("active" in (page.locator('#al-subtabs button[data-sub="oncall"]')
                            .get_attribute("class") or ""), "默认落在「值班总览」子页")
         # —— 值班总览（两分支：旧后端无 /api/oncall → 优雅降级；新后端 → 卡片或空态）——
-        page.click('#al-subtabs button[data-sub="oncall"]')
+        # —— 值班总览（三分支：旧后端无 /api/oncall → 优雅降级；新后端 → 空态 / 分档卡片）——
         on_txt = wait_oncall(page)
         if "服务端暂不支持" in on_txt:
             ck.ok(True, "值班总览：旧后端无 /api/oncall → 「服务端暂不支持」降级说明出现（不算失败）")
         elif "当前没有进行中的故障" in on_txt:
             ck.ok(True, "值班总览：无进行中故障 → 空态说明出现")
         elif page.locator("#oncall-body .oncall-chips").count() >= 1:
-            # 分档口径（ONCALL_OPTIMIZATION_2.md 第一期）：第一屏默认只显示「正在失败」，
-            # 「沉默/陈旧」不混进来——事件开着不等于此刻还在坏。
             on_body = page.text_content("#oncall-body") or ""
-            ck.ok(page.locator("#oncall-body .oncall-chips button").count() == 4,
-                  "值班总览有四个分档 chip（正在失败/沉默待确认/陈旧待收口/全部）")
-            for b in ("正在失败", "沉默待确认", "陈旧待收口"):
-                ck.ok(b in on_body, f"分档口径含「{b}」")
+            # 第二期：分档由三档扩为四档（多一档「维护中」），并新增「只看未确认」筛选
+            ck.ok(page.locator("#oncall-body .oncall-chips button").count() >= 5,
+                  "值班总览有分档 chip（正在失败/沉默待确认/陈旧待收口/维护中/全部）")
+            for b in ("正在失败", "沉默待确认", "陈旧待收口", "维护中"):
+                ck.ok(b in on_body, "分档口径含「%s」" % b)
+            ck.ok(page.locator("#oncall-body .oncall-chips button",
+                               has_text="只看未确认").count() == 1, "有「只看未确认」筛选")
+            # 第二期：服务端聚合出「行动项」，前端按组渲染（同一任务一张卡）
+            ck.ok(page.locator("#oncall-body .oncall-card[data-group]").count() >= 1,
+                  "值班卡按服务端聚合的「行动项」渲染（同一任务一张卡）")
             # 切到「全部」再断言卡片，避免默认档恰好为空导致误判
             page.click('#oncall-body .oncall-chips button:has-text("全部")')
             page.wait_for_timeout(400)
             on_cards = page.locator("#oncall-body .oncall-card").count()
             on_body = page.text_content("#oncall-body") or ""
-            ck.ok(on_cards >= 1, f"「全部」分档下列出卡片（{on_cards} 张）")
+            ck.ok(on_cards >= 1, "「全部」分档下列出卡片（%d 张）" % on_cards)
             # 层面对每张卡都应有；「范围」只对**探测类**事件成立——节点离线事件没有
             # error_class 也没有目标范围，强行要求会出现「只有节点卡时必然失败」的假阴性。
             ck.ok("层面" in on_body, "值班卡片含层面标注")
             _probe_cards = page.locator(
                 "#oncall-body .oncall-card:has(button:has-text('去处理'))").count()
             if _probe_cards > 0:
-                ck.ok("范围" in on_body, f"探测类卡片含范围标注（{_probe_cards} 张探测卡）")
+                ck.ok("范围" in on_body, "探测类卡片含范围标注（%d 张探测卡）" % _probe_cards)
             else:
                 ck.ok(True, "（当前只有节点侧事件卡，跳过「范围」断言：节点事件无目标范围）")
             # 「最近」必须是相对时间：判断这张卡还可不可信的第一依据就是「最后一次样本多久前」
@@ -456,9 +469,9 @@ def main() -> int:
             got_goto = page.locator("#oncall-body button", has_text="去处理").count()
             got_node = page.locator("#oncall-body button", has_text="看节点").count()
             ck.ok(got_goto + got_node >= 1,
-                  f"值班卡片有行动入口（去处理 {got_goto} / 看节点 {got_node}）")
+                  "值班卡片有行动入口（去处理 %d / 看节点 %d）" % (got_goto, got_node))
         else:
-            ck.ok(False, f"值班总览未渲染出预期内容（{on_txt[:80]}）")
+            ck.ok(False, "值班总览未渲染出预期内容（%s）" % on_txt[:80])
         shot("alerts-oncall")
 
         # —— 报表子页：SLA 四卡 + 按任务/按节点 + MTTA/MTTR 分段行 ——
@@ -1196,15 +1209,21 @@ def main() -> int:
             page.click('nav a[data-page="overview"]')
             wait_page(page, "overview")
             try:
+                # 等待窗口必须盖过 /api/tasks 的 15s TTL：偶发时上一次取数可能正好落在缓存命中
+                # 窗口内（实测 6s 会假失败），20s 覆盖 TTL + 一次重画。
+                # 注意：注释必须写在 JS 字符串**外面** —— 之前把 `#` 注释写进了三引号里，
+                # 浏览器拿到的是带 `#` 的 JS → 谓词每次 SyntaxError（「Invalid or unexpected token」），
+                # 表现为「启用后总览徽章未变正常」+ 一条控制台报错，查了很久才发现是自己写的。
                 page.wait_for_function(
                     """(name) => {
                         const r = [...document.querySelectorAll('#ov-task-body tr')]
                             .find(x => x.textContent.includes(name));
                         return r && r.textContent.includes('启用') && !r.textContent.includes('已停用');
-                    }""", arg=dis["name"], timeout=6000)
+                    }""", arg=dis["name"], timeout=20000)
                 row2 = page.locator("#ov-task-body tr", has_text=dis["name"]).first
-                ck.ok(row2.count() > 0, f"启用后总览徽章变正常（{row2.inner_text().splitlines()[:2]}）")
-            except Exception:  # noqa: BLE001
+                ck.ok(row2.count() > 0,
+                      f"启用后总览徽章变正常（{row2.inner_text().splitlines()[:2]}）")
+            except Exception:  # noqa: BLE001 - 超时后如实报出当时的行内容
                 rtxt2 = (page.locator("#ov-task-body tr", has_text=dis["name"]).first
                          .inner_text() if page.locator("#ov-task-body tr",
                                                        has_text=dis["name"]).count() else "（无行）")
