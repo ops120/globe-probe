@@ -383,7 +383,9 @@ def test_sla_reports_external_by_source(tmp_path):
     post_hook(client, "grafana", {"alerts": [
         {"fingerprint": "f1", "status": "firing", "labels": {"alertname": "A"}},
         {"fingerprint": "f2", "status": "resolved", "labels": {"alertname": "B"},
-         "startsAt": "2026-10-03T10:00:00Z", "endsAt": "2026-10-03T10:30:00Z"}]},
+         # 相对 now 生成：曾经硬编码 "2026-10-03T10:00:00Z"，SLA 查询窗却是相对
+         # now 的滑动窗——硬编码日期滑出窗口后测试每天 UTC 10:00 后恒红（时间炸弹）
+         "startsAt": now - 3600, "endsAt": now - 1800}]},
         token="tk")
     post_hook(client, "zabbix", {"event_id": "z1", "trigger": "T", "status": "PROBLEM"},
               token="tk")

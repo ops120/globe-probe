@@ -19,4 +19,3 @@ function chart(id, option, onClick) {
   charts[id].clear(); charts[id].setOption(option);
 }
 function chartOf(id) { return charts[id]; }
-const PCT = ts => fmtHM(ts);

@@ -1,29 +1,97 @@
 # globe-probe 服务端/节点配置示例（复制为 config.yaml 使用）
 # 敏感值优先环境变量：GPM_ADMIN_TOKEN / GPM_REGISTER_TOKEN
+# 全部键与默认值的唯一事实源：src/gpm/config.py 的 DEFAULTS；此处列全量键，
+# 注释只讲运维需要知道的部分，与代码默认值不一致时以 config.py 为准。
 
 server:
+  # 监听「host:port」。**非环回监听（0.0.0.0 / 内网 IP）必须配置 admin_token**：
+  # 未配置时写接口只在环回地址（127.0.0.1/localhost/::1）放行（本机开发模式），
+  # 非环回监听一律 403——这是防「局域网内无鉴权改配置/导密钥」的安全基线，
+  # 服务端启动日志会给出对应 WARNING。
   listen: "0.0.0.0:8620"
   database: "data/gpm.db"
   webui_dir: ""                    # 默认使用包内 webui/static
-  admin_token: ""                  # 设置后写接口要求 X-Admin-Token
+  admin_token: ""                  # 管理写接口的 X-Admin-Token；空=仅环回监听可写
   public_url: ""                   # 通知里「点击查看」深链前缀（如 https://gpm.example.com）。
                                    # 留空则通知**不带**链接（不编造链接），且值班页会显著提示
-                                   # 未配置。也可在 WebUI「通知配置 → 通知深链」里设置。
-  ingest_batch_max: 500
-  late_window_seconds: 300
-  clock_skew_seconds: 120
-  heartbeat_timeout: 60
-  retention_raw_days: 30
-  retention_1m_days: 90
-  retention_5m_days: 180
-  retention_1h_days: 730
-  retention_hb_days: 7
-  retention_alerts_days: 30      # 告警历史保留天数
-  retention_audit_days: 30       # 操作审计保留天数
-  retention_outbox_days: 7       # 通知重投记录（done/failed）保留天数
-  retention_incidents_days: 180  # 已关闭事件保留天数
-  thread_pool_tokens: 40         # AnyIO 线程池上限（/api/health 的 threads 应稳定在此值附近）
-  tasks_cache_seconds: 15        # /api/tasks 列表缓存秒数（0=禁用）；任务/分配变更立即失效，?fresh=1 绕过
+                                   # 未配置。也可在 WebUI「告警与报表 → 通知深链」里设置。
+  ingest_batch_max: 500            # 单次上报条数上限
+  late_window_seconds: 300         # 迟到样本窗口
+  clock_skew_seconds: 120          # 节点时钟偏移容忍
+  heartbeat_timeout: 60            # 节点离线判定（秒）
+  thread_pool_tokens: 40           # AnyIO 线程池上限（/api/health 的 threads 应稳定在此值附近）
+  tasks_cache_seconds: 15          # /api/tasks 列表缓存秒数（0=禁用）；任务/分配变更立即失效，?fresh=1 绕过
+  alert_eval_interval: 30          # 告警规则评估周期（秒）
+  notify_retry_interval: 60        # 通知失败重投的扫描周期（秒）
+  digest_check_interval: 300       # 巡检报告定时推送的检查周期（秒）
+  retention_raw_days: 30           # 原始探测结果保留天数（0=该表不清理，永久保留）
+  retention_1m_days: 90            # 1 分钟聚合桶保留天数（0=不清理）
+  retention_5m_days: 180           # 5 分钟聚合桶保留天数（0=不清理）
+  retention_1h_days: 730           # 1 小时聚合桶保留天数（0=不清理）
+  retention_hb_days: 7             # 节点心跳保留天数（0=不清理）
+  retention_alerts_days: 30        # 告警历史保留天数
+  retention_audit_days: 30         # 操作审计保留天数
+  retention_outbox_days: 7         # 通知重投记录（done/failed）保留天数
+  retention_incidents_days: 180    # 已关闭事件保留天数
+  retention_external_days: 30      # 第三方告警保留天数（按最后活动时间；提示型数据不必留久）
+
+# —— 第三方告警 webhook 接收 ——
+hook:
+  max_body_bytes: 262144           # 单次 payload 上限（256 KB），超出返回 413
+  rate_limit_per_min: 120          # 每来源每分钟接收上限，超出返回 429
+  link_window_seconds: 1800        # 第三方告警 ↔ 本地事件关联时间窗（±秒）
+  link_min_name_len: 2             # 任务/节点名参与关联匹配的最短长度（n1 不应命中 n10）
+
+# —— 第三方告警 API 拉取（Grafana/Zabbix）——
+pull:
+  default_interval_seconds: 300    # 默认轮询周期
+  backoff_base_seconds: 300        # 拉取失败的退避基数
+  backoff_max_seconds: 3600        # 退避上限
+
+# —— JEV 故障判断阈值（证据池由代码切分、规则结论永不被模型覆盖）——
+jev:
+  min_support: 0.5                 # 单假设被判「可能」的支持度下限
+  weak_support: 0.5                # 最高支持度低于此 → 结论标「依据薄弱」
+  disagree_margin: 0.15            # 最高与次高支持度差距小于此 → 「存在分歧」
+  min_confidence: 0.3              # 置信度下限
+
+# —— 值班页/事件详情页口径（两处共用，改这里两页同步变）——
+view:
+  node_suspect_min_tasks: 3        # 同一节点 ≥N 个任务同时失败 → 「疑似节点侧」横切卡
+  changes_pad_seconds: 1800        # 同期变更窗口：事件窗口 ±N 秒内的审计记录
+  changes_per_card: 3              # 值班卡片上最多列 N 条同期变更
+  changes_limit_detail: 8          # 事件详情弹窗里最多 N 条
+  changes_scan_limit: 64           # 查同期变更的审计扫描上限
+  dns_changes_window_seconds: 86400
+  dns_changes_limit: 5
+  blast_scan_limit: 200            # 影响范围一次扫描的事件条数上限
+  matrix_max_cells: 60             # 范围矩阵每节点最多格数
+  matrix_max_nodes: 32             # 范围矩阵节点行数上限
+  dying_window_seconds: 1800       # 离线前资源曲线窗口
+  dying_max_points: 60
+  eventview_pad_seconds: 600       # 事件曲线窗口前后余量
+  bucket_1m_max_seconds: 10800     # 窗口 ≤3h 用 1m 桶
+  bucket_5m_max_seconds: 259200    # 窗口 ≤3d 用 5m 桶，更大用 1h
+
+# —— 通知/告警评估 ——
+alert:
+  scope_window_seconds: 60
+  escalate_max_minutes: 1440       # 升级提醒冷却
+  retry_backoff_seconds: [60, 300, 900]
+  notify_default_timeout_seconds: 8.0   # 单渠道发送超时（SMTP 全流程耗时会超过一个超时额度）
+  notify_default_smtp_port: 587
+
+# —— 报表 ——
+report:
+  flap_min_count: 3
+  flap_window_seconds: 1800
+  metrics_max_output_bytes: 204800       # /metrics 响应体积上限（200 KB）
+  prober_curl_scan_limit_bytes: 524288   # 关键字/正则只扫响应前 512 KB
+  agent_dns_memory_max: 500
+
+# —— 导出 ——
+export:
+  max_rows: 100000                 # 单次导出行数上限（防误操作全量拖库打爆内存）
 
 agent:
   server_url: "http://127.0.0.1:8620"
@@ -32,10 +100,9 @@ agent:
   tags: { region: "cn-north", isp: "telecom" }
   data_dir: "data/agent"
   heartbeat_interval: 15
-  poll_interval: 10
   report_batch_size: 50
   report_interval: 5
-  offline_buffer_max: 5000
+  offline_buffer_max: 5000         # 服务端不可达时本地缓冲条数上限（重启恢复只读尾部）
 
 probe:
   min_interval_seconds: 10         # ping/curl/tcp 间隔下限（需求约束）
@@ -53,11 +120,13 @@ probe:
   dns_cache_max: 300
   fail_threshold: 3                # 连续失败 N 次开启事件
   recover_threshold: 2             # 连续成功 N 次恢复
+  flap_window_seconds: 600         # 抖动合并窗口：关闭后多久内再次失败算同一次事件
+  flap_max_seconds: 21600          # 单次事件合并上限（超过则不再合并，防止无限累积）
   stale_after_seconds: 21600       # 陈旧事件自动收口（6h）：某流超过该时长既无新样本也无
                                    # 恢复样本 → 自动收口。任务停用/节点移除后不再产生结果，
                                    # 状态机永远等不到 ok，否则事件会在值班页无限期挂着；0=关闭
-  jitter_ratio: 0.1
+  jitter_ratio: 0.1                # 探测间隔抖动比例（±10%），打散同节点各流的对齐雷群
 
 logging:
   level: "INFO"
-  file: ""
+  file: ""                         # 非空则同时落文件（建议 logs/gpm.log，目录已 gitignore）

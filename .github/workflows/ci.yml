@@ -26,6 +26,7 @@ jobs:
           node-version: "22"
       - name: Frontend syntax (node --check，零构建也要守语法门)
         run: for f in src/gpm/webui/static/gpm-*.js; do node --check "$f"; done
+        shell: bash   # windows-latest 默认 pwsh，不声明则 for..do..done 直接解析失败（前端门在半数矩阵上名存实亡）
       - name: Lint (ruff，版本 pin 防规则漂移)
         run: |
           pip install ruff==0.16.9

@@ -48,15 +48,20 @@ function renderNodeHints() {
 }
 
 /* ---------- 节点分组 ---------- */
+/* 删除确认弹窗要显示名字：名字由 agent 注册接口写入（外部输入），绝不拼进内联
+ * onclick 的 JS 字符串（属性值先做 HTML 实体解码再执行 JS，实体转义挡不住
+ * 单引号逃逸）——按钮只传 id，名字从最近一次渲染的缓存按 id 反查。 */
+let _groupsCache = [], _tokensCache = [], _nodesCache = [];
 async function renderGroups() {
   const gs = await api('/api/groups');
+  _groupsCache = gs;
   $('#grp-tbl').innerHTML = '<thead><tr><th>分组</th><th>成员</th><th>数量</th><th>操作</th></tr></thead><tbody>' +
     (gs.length ? gs.map(g => {
       const mem = (g.member_names || []).map(n => `<span class="badge b-off" style="margin-right:4px">${esc(n)}</span>`).join('') || '—';
       return `<tr><td style="color:var(--fg-strong2)">${esc(g.name)}${g.note ? ` <span class="sub">${esc(g.note)}</span>` : ''}</td>
         <td>${mem}</td><td class="num">${(g.members || []).length}</td>
         <td><button class="btn sm ghost" onclick="grpModal('${g.id}')">改名</button>
-        <button class="btn sm danger" onclick="delGroup('${g.id}','${esc(g.name)}')">删除</button></td></tr>`;
+        <button class="btn sm danger" onclick="delGroup('${g.id}')">删除</button></td></tr>`;
     }).join('') : '<tr><td colspan="4" style="color:var(--faint)">还没有分组 —— 点右上「+ 新建分组」，然后在「编辑节点」里勾选成员</td></tr>') +
     '</tbody>';
 }
@@ -80,7 +85,9 @@ window.grpModal = async (gid) => {
     } catch (e) { toast('失败: ' + e.message); }
   };
 };
-window.delGroup = async (gid, name) => {
+window.delGroup = async (gid) => {
+  const g = _groupsCache.find(x => x.id === gid);
+  const name = g ? g.name : gid;
   if (!confirm(`确认删除分组「${name}」？\n\n组内节点本身不受影响，但任务里对「g:${name}」的分配会被移除。`)) return;
   try { await api(`/api/groups/${gid}`, { method: 'DELETE' }); toast('已删除'); renderNodes(); }
   catch (e) { toast('失败: ' + e.message); }
@@ -91,6 +98,7 @@ $('#grp-new').addEventListener('click', () => grpModal(''));
 async function renderTokens() {
   const r = await api('/api/tokens');
   const items = r.items || [];
+  _tokensCache = items;
   const fmt = t => t ? fmtTS(t) : '—';
   $('#tok-tbl').innerHTML = '<thead><tr><th>名称</th><th>备注</th><th>状态</th><th>创建</th><th>最近使用</th><th>操作</th></tr></thead><tbody>' +
     (items.length ? items.map(t => `<tr>
@@ -100,7 +108,7 @@ async function renderTokens() {
       <td style="color:var(--muted)">${fmt(t.created_at)}</td>
       <td style="color:var(--muted)">${t.last_used_at ? fmt(t.last_used_at) : '未使用'}</td>
       <td><button class="btn sm ${t.enabled ? 'ghost' : ''}" onclick="toggleToken('${t.id}',${t.enabled ? 0 : 1})">${t.enabled ? '吊销' : '恢复'}</button>
-      <button class="btn sm danger" onclick="delToken('${t.id}','${esc(t.name)}')">删除</button></td></tr>`).join('')
+      <button class="btn sm danger" onclick="delToken('${t.id}')">删除</button></td></tr>`).join('')
       : '<tr><td colspan="6" style="color:var(--faint)">还没有独立 Token —— 当前使用服务端配置里的引导 Token（开发默认 gpm-dev-register）；点右上「+ 新建 Token」可为每批机器发独立凭证</td></tr>') +
     '</tbody>';
 }
@@ -137,7 +145,9 @@ window.toggleToken = async (tid, en) => {
     toast(en ? '已恢复' : '已吊销'); renderTokens();
   } catch (e) { toast('失败: ' + e.message); }
 };
-window.delToken = async (tid, name) => {
+window.delToken = async (tid) => {
+  const t = _tokensCache.find(x => x.id === tid);
+  const name = t ? t.name : tid;
   if (!confirm(`确认删除 Token「${name}」？已注册节点不受影响（除非同时吊销）。`)) return;
   try { await api(`/api/tokens/${tid}`, { method: 'DELETE' }); toast('已删除'); renderTokens(); }
   catch (e) { toast('失败: ' + e.message); }
@@ -146,6 +156,7 @@ $('#tok-new').addEventListener('click', () => newToken());
 
 async function renderNodes() {
   const nodes = await api('/api/nodes');
+  _nodesCache = nodes;
   renderNodeHints();
   renderGroups();
   renderTokens();
@@ -162,7 +173,7 @@ async function renderNodes() {
         <td style="color:var(--muted)">${n.last_heartbeat ? fmtTS(n.last_heartbeat) : '—'}</td>
         <td><button class="btn sm" onclick="nodeDetailModal('${n.id}')">详情</button>
         <button class="btn sm ghost" onclick="editNodeModal('${n.id}')">编辑</button>
-        <button class="btn sm danger" onclick="delNode('${n.id}','${esc(n.name)}')">删除</button></td></tr>`;
+        <button class="btn sm danger" onclick="delNode('${n.id}')">删除</button></td></tr>`;
     }).join('') + '</tbody>';
 }
 /* 时长格式化：3天 2小时 5分 */
@@ -284,7 +295,9 @@ window.editNodeModal = nid => {
     };
   });
 };
-window.delNode = async (nid, name) => {
+window.delNode = async (nid) => {
+  const n = _nodesCache.find(x => x.id === nid);
+  const name = n ? n.name : nid;
   if (!confirm(`确认删除节点「${name}」？\n\n将级联删除其全部探测结果、聚合、心跳与事件记录，并从任务分配中移除。不可恢复！`)) return;
   try { const r = await api(`/api/nodes/${nid}`, { method: 'DELETE' }); toast(`已删除节点 ${r.name}`); renderNodes(); }
   catch (e) { toast('失败: ' + e.message); }

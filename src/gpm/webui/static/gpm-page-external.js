@@ -36,9 +36,9 @@ async function renderExternal() {
       + st.limits.rate_per_min + ' 次每分钟，超出分别 413 / 429。'
       + esc(st.hint);
   }
-  const state = $('#ext-src-state');
-  if (state) {
-    state.innerHTML = (st.sources || []).map(x =>
+  const stateEl = $('#ext-src-state');   // 勿命名 state：会遮蔽全局 state，后加引用即踩雷
+  if (stateEl) {
+    stateEl.innerHTML = (st.sources || []).map(x =>
       '<span>' + esc(x.source.toUpperCase()) + ' <b>' + (x.configured ? '已配置' : '未配置')
       + '</b></span>').join('');
   }
@@ -57,13 +57,15 @@ async function renderExternal() {
   // 来源筛选项按实际出现过的来源生成，避免选了一个永远空的来源
   const sel = $('#ext-filter');
   const cur = sel.value;
-  const all = await api('/api/external/alerts?limit=200');
-  const present = [...new Set((all.items || []).map(x => x.source))].sort();
-  sel.innerHTML = '<option value="">全部来源</option>'
-    + present.map(s => '<option value="' + esc(s) + '"' + (cur === s ? ' selected' : '')
-      + '>' + esc(s.toUpperCase()) + '</option>').join('');
-
-  const d = cur ? await api('/api/external/alerts?limit=200&source=' + encodeURIComponent(cur)) : all;
+  // 已选具体来源时直接带 source 拉一次即可；无脑先拉全量再按来源重拉，等于双倍带宽
+  const d = cur ? await api('/api/external/alerts?limit=200&source=' + encodeURIComponent(cur))
+                : await api('/api/external/alerts?limit=200');
+  if (!cur) {
+    const present = [...new Set((d.items || []).map(x => x.source))].sort();
+    sel.innerHTML = '<option value="">全部来源</option>'
+      + present.map(s => '<option value="' + esc(s) + '"' + (cur === s ? ' selected' : '')
+        + '>' + esc(s.toUpperCase()) + '</option>').join('');
+  }
   const items = d.items || [];
   $('#ext-tbl').innerHTML = '<thead><tr><th>来源</th><th>标题</th><th>严重度</th><th>状态</th>'
     + '<th>开始</th><th>最近收到</th><th>关联</th><th></th></tr></thead><tbody>'
@@ -172,5 +174,6 @@ $('#ext-correlate').addEventListener('click', async () => {
     renderExternal();
   } catch (e) { toast('重跑失败: ' + e.message); }
 });
-$('#ext-filter').addEventListener('change', () => renderExternal());
-$('#ext-refresh').addEventListener('click', () => renderExternal());
+/* 筛选/刷新是读接口调用：失败必须可见（复用 alerts 页的统一兜底），不能静默成空表 */
+$('#ext-filter').addEventListener('change', () => rerender('第三方告警', renderExternal));
+$('#ext-refresh').addEventListener('click', () => rerender('第三方告警', renderExternal));

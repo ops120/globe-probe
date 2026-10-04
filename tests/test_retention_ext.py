@@ -102,9 +102,12 @@ def test_old_six_arg_call_still_works_and_applies_defaults(tmp_path):
     # 旧签名调用（app.py 历史形态）：新表按默认值（30/30/7/180）清理
     out = s.retention(30, 90, 180, 730, 7, NOW)
 
-    # external_* 是第六期新增的表，旧签名调用也要按默认值清理（此处没有数据 → 0）
-    assert out == {"alerts": 1, "audit_log": 1, "notify_outbox": 1, "incidents": 1,
-                   "external_alert_links": 0, "external_alerts": 0, "jev_traces": 0}
+    # external_* 是第六期新增的表，旧签名调用也要按默认值清理（此处没有数据 → 0）；
+    # 主数据表同样报行数（空表 0 行），geo_cache 按固定 7 天兜底清理
+    assert out == {"probe_results": 0, "agg_1m": 0, "agg_5m": 0, "agg_1h": 0,
+                   "node_heartbeats": 0, "alerts": 1, "audit_log": 1, "notify_outbox": 1,
+                   "incidents": 1, "external_alert_links": 0, "external_alerts": 0,
+                   "jev_traces": 0, "geo_cache": 0}
     assert _counts(s, "alerts") == 0 and _counts(s, "incidents") == 0
 
 
@@ -163,6 +166,37 @@ def test_non_positive_days_skip_table(tmp_path):
     out = s.retention(30, 90, 180, 730, 7, NOW, alerts_days=0, audit_days=0,
                       outbox_days=0, incidents_days=0, external_days=0)
 
-    assert out == {}, "days<=0 的表应整体跳过（不出现键）"
+    # days<=0 的表整体跳过（不出现键）；主数据表天数>0 但为空表 → 报 0 行
+    for k in ("alerts", "audit_log", "notify_outbox", "incidents",
+              "external_alerts", "external_alert_links", "jev_traces"):
+        assert k not in out, f"days=0 的 {k} 不应出现键"
+    assert out.get("probe_results") == 0 and out.get("agg_1m") == 0
+    assert out.get("node_heartbeats") == 0
     assert _counts(s, "alerts") == 1 and _counts(s, "audit_log") == 1
     assert _counts(s, "incidents") == 1
+
+
+def test_zero_days_never_purges_main_tables(tmp_path):
+    """P0 回归钉：docstring 承诺 days<=0 = 该表不清理。
+
+    曾经 probe_results/aggregates(1m/5m/1h)/node_heartbeats 的 DELETE 没带 days>0
+    守卫（其它表都有），运维按注释把保留天数配成 0 表达「永久保留」时，下一个
+    保留策略周期会把全部原始探测数据清空——不可恢复的数据丢失。
+    """
+    s = make_storage(tmp_path)
+    old = NOW - 400 * DAY
+    with s.lock:
+        s.db.execute("INSERT INTO probe_results(task_id,node_id,type,ts,status)"
+                     " VALUES('t1','n1','ping',?,'ok')", (old,))
+        s.db.execute("INSERT INTO aggregates(bucket,ts,task_id,node_id,count,ok,fail)"
+                     " VALUES('1m',?,'t1','n1',1,1,0)", (old,))
+        s.db.execute("INSERT INTO node_heartbeats(node_id,ts) VALUES('n1',?)", (old,))
+        s.db.commit()
+
+    out = s.retention(0, 0, 0, 0, 0, NOW)
+
+    for k in ("probe_results", "agg_1m", "agg_5m", "agg_1h", "node_heartbeats"):
+        assert k not in out, f"0 天的 {k} 必须整体跳过"
+    assert _counts(s, "probe_results") == 1
+    assert _counts(s, "aggregates") == 1
+    assert _counts(s, "node_heartbeats") == 1

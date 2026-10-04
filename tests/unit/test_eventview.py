@@ -516,7 +516,9 @@ def test_changes_block_window_order_and_limit():
                         tasks=[{"id": "t1", "name": "ping-223"}],
                         nodes=[{"id": "n1", "name": "北京-1"}], audit=audits)
     out = eventview.detail(store, 1)["changes"]
-    assert len(out) == eventview.CHANGES_LIMIT
+    # 上限 = view.changes_limit_detail（默认 8）。曾经引用 import 期冻结的
+    # eventview.CHANGES_LIMIT 常量——那是 init_cfg 注入前求值的假接口，已删除
+    assert len(out) == 8
     assert [c["ts"] for c in out] == sorted((c["ts"] for c in out), reverse=True)
     assert out[0]["ts"] == BASE + 100 and out[0]["who"] == "admin"
     assert out[0]["action"] == "停用任务" and "t1" in out[0]["detail"] and "curl-A" in out[0]["detail"]

@@ -38,17 +38,46 @@ from __future__ import annotations
 import urllib.parse
 
 from ..common.util import now
+from ..config import Config
 from . import diagnose as _diagnose
 
+# ---------------------------------------------------------------- 配置
+
+#: 模块级 cfg 句柄（由 app.create_app 在启动时通过 init_cfg 注入）。
+#: _cfg 未注入时回落到模块私有默认值，保留测试与离线调用兼容性。
+_cfg: Config | None = None
+
+
+def init_cfg(cfg: Config) -> None:
+    """由 create_app 调用一次；之后模块内函数通过 _v() 读取 cfg.view。"""
+    global _cfg
+    _cfg = cfg
+
+
+def _v(key: str, default):
+    """读 cfg.view[key]；cfg 未注入或键缺失时回落到默认。"""
+    if _cfg is not None:
+        try:
+            return _cfg.view[key]
+        except (KeyError, TypeError, AttributeError):
+            pass
+    return default
+
+
+# —— 口径默认值（运行时一律经 _v() 实时读 cfg.view，禁止在 import 期冻结成模块常量）——
+# 曾经这批值在 import 时就求值成 PAD_SECONDS/CHANGES_PAD_SECONDS 等「公开常量」：
+# init_cfg() 注入发生在 import 之后，那些常量永远是默认值——看起来可配、实际恒默认的
+# 假接口，谁引用谁踩坑。如今只保留带 _ 前缀的默认值，消费方全部走 _v()。
+
 #: 窗口前后各留的余量（秒）：让曲线上能看到事件前后的对照。
-PAD_SECONDS = 600
+_PAD_SECONDS = 600
 
 #: bucket 档位阈值（秒，按补齐后的窗口跨度）：≤3h 用 1m，≤3d 用 5m，更大用 1h。
-BUCKET_1M_MAX = 3 * 3600
-BUCKET_5M_MAX = 3 * 86400
+_BUCKET_1M_MAX = 3 * 3600
+_BUCKET_5M_MAX = 3 * 86400
 
 #: 影响范围一次扫描的事件条数上限（storage.list_incidents 的硬上限）。
-BLAST_SCAN_LIMIT = 200
+_BLAST_SCAN_LIMIT = 200
 
 #: kind → 中文标签（UI 直接展示）。
 KIND_LABELS = {"probe": "探测", "node": "节点侧"}
@@ -56,23 +85,23 @@ KIND_LABELS = {"probe": "探测", "node": "节点侧"}
 # ---------------- 故障快速定位四块的口径 ----------------
 
 #: 同期变更窗口：事件窗口前后各 30 分钟（audit_log）。
-CHANGES_PAD_SECONDS = 1800
+_CHANGES_PAD_SECONDS = 1800
 #: 同期变更最多条数。
-CHANGES_LIMIT = 8
+_CHANGES_LIMIT = 8
 #: 同期变更一次扫描的审计条数上限（storage.audit_list 的 LIMIT）。
-CHANGES_SCAN_LIMIT = 64
+_CHANGES_SCAN_LIMIT = 64
 #: DNS 变更联动窗口（秒）：事件结束前 24 小时。
-DNS_CHANGES_WINDOW = 86400
+_DNS_CHANGES_WINDOW = 86400
 #: DNS 变更联动最多条数。
-DNS_CHANGES_LIMIT = 5
+_DNS_CHANGES_LIMIT = 5
 #: 范围矩阵每节点最多格数（等间隔下采样，保留首尾）。
-MATRIX_MAX_CELLS = 60
+_MATRIX_MAX_CELLS = 60
 #: 范围矩阵节点行数上限（防御异常规模的节点表）。
-MATRIX_MAX_NODES = 32
+_MATRIX_MAX_NODES = 32
 #: 临终曲线窗口：last_heartbeat 前 30 分钟。
-DYING_WINDOW_SECONDS = 1800
+_DYING_WINDOW_SECONDS = 1800
 #: 临终曲线最多点数（30 分钟 × 每分钟 1 点 = 30，留余量）。
-DYING_MAX_POINTS = 60
+_DYING_MAX_POINTS = 60
 
 
 # ---------------------------------------------------------------- 取值工具
@@ -152,9 +181,9 @@ def _task_name(storage, task_id: str, names: dict) -> str:
 def pick_bucket(t_from: int, t_to: int) -> str:
     """按窗口跨度选择聚合档位（供 detail 与 series_for 复用）。"""
     span = int(t_to) - int(t_from)
-    if span <= BUCKET_1M_MAX:
+    if span <= _v("bucket_1m_max_seconds", _BUCKET_1M_MAX):
         return "1m"
-    if span <= BUCKET_5M_MAX:
+    if span <= _v("bucket_5m_max_seconds", _BUCKET_5M_MAX):
         return "5m"
     return "1h"
 
@@ -401,7 +430,8 @@ def blast_radius(storage, inc: dict, t_from: int, t_to: int, limit: int = 10) ->
     node_id = str(_get(inc, "node_id") or "")
     if not task_id and not node_id:
         return []
-    rows = _call(storage, "list_incidents", default=[], limit=BLAST_SCAN_LIMIT,
+    rows = _call(storage, "list_incidents", default=[],
+                 limit=_v("blast_scan_limit", _BLAST_SCAN_LIMIT),
                  t_from=int(t_from), t_to=int(t_to)) or []
     task_names = _names(storage, "list_tasks", "id")
     node_names = _names(storage, "list_nodes", "id")
@@ -497,9 +527,11 @@ def _is_ip(host: str) -> bool:
 
 def _changes(storage, started: int, end: int) -> list[dict]:
     """同期变更：audit_log 在事件窗口 ±30min 内的写操作，≤8 条按 ts 倒序。"""
-    t_from = int(started) - CHANGES_PAD_SECONDS
-    t_to = int(end) + CHANGES_PAD_SECONDS
-    rows = _call(storage, "audit_list", default=[], limit=CHANGES_SCAN_LIMIT,
+    pad = _v("changes_pad_seconds", _CHANGES_PAD_SECONDS)
+    t_from = int(started) - pad
+    t_to = int(end) + pad
+    rows = _call(storage, "audit_list", default=[],
+                 limit=_v("changes_scan_limit", _CHANGES_SCAN_LIMIT),
                  since=t_from) or []
     picked: list[dict] = []
     for r in rows:
@@ -517,7 +549,7 @@ def _changes(storage, started: int, end: int) -> list[dict]:
     if not picked:
         return _empty_changes("事件窗口 ±30 分钟内没有操作审计记录")
     picked.sort(key=lambda x: x["ts"], reverse=True)
-    return picked[:CHANGES_LIMIT]
+    return picked[:_v("changes_limit_detail", _CHANGES_LIMIT)]
 
 
 def _dns_changes(storage, inc, task, end: int) -> list[dict]:
@@ -529,13 +561,15 @@ def _dns_changes(storage, inc, task, end: int) -> list[dict]:
         return _empty_dns_changes("目标不是域名，无 DNS 解析变更可联动")
     if _is_ip(domain):
         return _empty_dns_changes("目标是 IP 地址，不经过域名解析，无 DNS 变更可联动")
-    rows = _call(storage, "dns_answer_changes", domain, int(end) - DNS_CHANGES_WINDOW,
-                 int(end), DNS_CHANGES_LIMIT, default=[]) or []
+    win = _v("dns_changes_window_seconds", _DNS_CHANGES_WINDOW)
+    limit = _v("dns_changes_limit", _DNS_CHANGES_LIMIT)
+    rows = _call(storage, "dns_answer_changes", domain, int(end) - win,
+                 int(end), limit, default=[]) or []
     if not rows:
         return _empty_dns_changes(
             f"近 24 小时内 {domain} 的 DNS 解析无变更（或没有同域名 dns 任务）")
     out = []
-    for r in rows[:DNS_CHANGES_LIMIT]:
+    for r in rows[:limit]:
         answers = _get(r, "answers")
         out.append({"ts": _as_int(_get(r, "ts")) or 0,
                     "answers": [str(a) for a in answers] if isinstance(answers, list) else [],
@@ -547,8 +581,8 @@ def _scope_matrix(storage, inc, task, t_from: int, t_to: int) -> dict:
     """范围矩阵：目标×节点在事件窗口内的状态格 + diagnose.verdict 三档结论。
 
     - 节点行 = 事件所属任务覆盖的节点（nodes 为空视为全部节点，与 blast 同约定），
-      上限 MATRIX_MAX_NODES 行；每行 cells = 该节点窗口内各桶的 ok/fail，
-      超过 MATRIX_MAX_CELLS 格时等间隔下采样（保留首尾）。
+      上限 view.matrix_max_nodes 行；每行 cells = 该节点窗口内各桶的 ok/fail，
+      超过 view.matrix_max_cells 格时等间隔下采样（保留首尾）。
     - verdict 复用 diagnose.verdict：节点状态取「窗内任一格 fail 即 fail」；
       窗口内完全没有数据时 verdict.verdict 给出说明文字。
     """
@@ -580,10 +614,10 @@ def _scope_matrix(storage, inc, task, t_from: int, t_to: int) -> dict:
         nid = str(_get(n, "id") or "")
         if nid and nid not in candidates and _task_has_node(task, nid, node_names.get(nid, nid)):
             candidates.append(nid)
-    for nid in candidates[:MATRIX_MAX_NODES]:
+    for nid in candidates[:_v("matrix_max_nodes", _MATRIX_MAX_NODES)]:
         cells = by_node.get(nid, [])
         cells.sort(key=lambda c: c["ts"])
-        cells = _downsample(cells, MATRIX_MAX_CELLS)
+        cells = _downsample(cells, _v("matrix_max_cells", _MATRIX_MAX_CELLS))
         nodes_out.append({"node_name": node_names.get(nid, nid), "cells": cells})
         if any(c["st"] == "fail" for c in cells):
             st = "fail"
@@ -610,7 +644,8 @@ def _dying(storage, inc, started: int):
     hb = _as_int(_get(reason, "last_heartbeat")) if isinstance(reason, dict) else None
     if not hb:
         hb = int(started) or 0
-    rows = _call(storage, "node_metrics", node_id, hb - DYING_WINDOW_SECONDS, hb, 60,
+    rows = _call(storage, "node_metrics", node_id,
+                 hb - _v("dying_window_seconds", _DYING_WINDOW_SECONDS), hb, 60,
                  default=[]) or []
     pts = []
     for r in rows:
@@ -622,7 +657,7 @@ def _dying(storage, inc, started: int):
     if not pts:
         return _empty_dying("离线前 30 分钟内没有该节点的心跳资源数据")
     pts.sort(key=lambda p: p["ts"])
-    return pts[:DYING_MAX_POINTS]
+    return pts[:_v("dying_max_points", _DYING_MAX_POINTS)]
 
 
 # ---------------------------------------------------------------- 详情
@@ -649,8 +684,9 @@ def detail(storage, iid: int, ts: int | None = None, max_points: int = 120) -> d
     end = ended or ref
     if end < started:
         end = started                    # 时钟回拨/未来 ts 兜底：时长不为负
-    t_from = started - PAD_SECONDS
-    t_to = end + PAD_SECONDS
+    pad = _v("eventview_pad_seconds", _PAD_SECONDS)
+    t_from = started - pad
+    t_to = end + pad
     bucket = pick_bucket(t_from, t_to)
 
     task_id = str(_get(inc, "task_id") or "")

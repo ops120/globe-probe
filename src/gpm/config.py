@@ -92,6 +92,10 @@ DEFAULTS = {
         "prober_curl_scan_limit_bytes": 524288,  # 关键字/正则只扫前 512 KB
         "agent_dns_memory_max": 500,
     },
+    # —— 导出（第九期）——
+    "export": {
+        "max_rows": 100000,   # 单次导出行数上限：防止误操作全量拖库把内存打爆
+    },
     "agent": {
         "server_url": "http://127.0.0.1:8620",
         "register_token": "gpm-dev-register",
@@ -99,7 +103,7 @@ DEFAULTS = {
         "tags": {},
         "data_dir": "data/agent",
         "heartbeat_interval": 15,
-        "poll_interval": 10,
+        # poll_interval 曾是死键（agent 读出后从未使用），已随配置对账移除
         "report_batch_size": 50,
         "report_interval": 5,
         "offline_buffer_max": 5000,   # 本地缓冲条数上限
@@ -194,30 +198,9 @@ class Config:
     def report(self) -> dict:
         return self.raw["report"]
 
-    # —— 以下是按模块拆出来的配置块；调用方读 cfg.hook.xxx / cfg.jev.xxx 等 ——
     @property
-    def hook(self) -> dict:
-        return self.raw["hook"]
-
-    @property
-    def pull(self) -> dict:
-        return self.raw["pull"]
-
-    @property
-    def jev(self) -> dict:
-        return self.raw["jev"]
-
-    @property
-    def view(self) -> dict:
-        return self.raw["view"]
-
-    @property
-    def alert(self) -> dict:
-        return self.raw["alert"]
-
-    @property
-    def report(self) -> dict:
-        return self.raw["report"]
+    def export(self) -> dict:
+        return self.raw["export"]
 
 
 def load_config(path: str | None) -> Config:

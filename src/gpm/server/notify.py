@@ -38,8 +38,12 @@ import urllib.parse
 import urllib.request
 from email.message import EmailMessage
 
+from ..config import Config
+
 CHANNEL_TYPES = ("webhook", "wecom", "dingtalk", "feishu", "smtp")
 
+# —— 以下阈值由 cfg.alert.* 提供；保留模块级同名常量供旧调用按属性名直接读取。
+# 默认值与 src/gpm/config.py DEFAULTS["alert"] 对齐；运行期 init(cfg) 会覆盖。
 DEFAULT_TIMEOUT = 8.0
 DEFAULT_SMTP_PORT = 587
 _BODY_LIMIT = 200
@@ -47,6 +51,22 @@ _ERR_LIMIT = 120
 _USER_AGENT = "gpm-notify/1.0"
 _JSON_CT = "application/json; charset=utf-8"
 _TEXT_CT = "text/plain; charset=utf-8"
+
+_cfg: Config | None = None
+
+
+def init(cfg) -> None:
+    """由 app 在启动时注入 cfg；同步 DEFAULT_TIMEOUT / DEFAULT_SMTP_PORT 到 cfg.alert.*。"""
+    global _cfg, DEFAULT_TIMEOUT, DEFAULT_SMTP_PORT
+    _cfg = cfg
+    try:
+        DEFAULT_TIMEOUT = float(cfg.alert.get("notify_default_timeout_seconds", DEFAULT_TIMEOUT) or DEFAULT_TIMEOUT)
+    except Exception:
+        pass
+    try:
+        DEFAULT_SMTP_PORT = int(cfg.alert.get("notify_default_smtp_port", DEFAULT_SMTP_PORT) or DEFAULT_SMTP_PORT)
+    except Exception:
+        pass
 
 # markdown 变体：整行就是一个 http(s) 链接 → 转可点链接
 _MD_URL_RE = re.compile(r"^https?://\S+$")
@@ -500,14 +520,19 @@ def _send_smtp(channel, title, text, timeout):
     return True, f"SMTP 已发送至 {', '.join(rcpts)}"
 
 
-def send(channel: dict, title: str, text: str, timeout: float = DEFAULT_TIMEOUT) -> tuple:
-    """发送一条通知，返回 (是否成功, 说明/错误摘要)；任何异常都被吞掉转成 (False, 摘要)。"""
+def send(channel: dict, title: str, text: str, timeout: float | None = None) -> tuple:
+    """发送一条通知，返回 (是否成功, 说明/错误摘要)；任何异常都被吞掉转成 (False, 摘要)。
+
+    timeout=None 表示用 DEFAULT_TIMEOUT——必须运行时读取：init() 会按
+    alert.notify_default_timeout_seconds 重绑模块级默认值，若写成
+    `timeout: float = DEFAULT_TIMEOUT`，默认参在函数定义期就绑死了，配置旋钮失效
+    （「配了没用」的死旋钮，实测踩坑）。"""
     try:
         err = validate(channel)
         if err:
             return False, f"渠道配置非法: {err}"
         try:
-            tmo = float(timeout)
+            tmo = float(DEFAULT_TIMEOUT if timeout is None else timeout)
         except (TypeError, ValueError):
             return False, f"timeout 非法: {timeout!r}"
         if tmo <= 0:

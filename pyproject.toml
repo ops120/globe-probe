@@ -1,10 +1,15 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpm"
-version = "0.1.0"
+# 版本号由 setuptools_scm 从 git tag/提交动态生成：
+#   打了 tag:  v0.2.0（strip 自动去 v）
+#   未打 tag:  0.2.0.devNN+gSHA（最近 tag + N 个提交 + 短 hash）
+#   - 没有 git 仓库时回退到 DEFAULT_VERSION。
+# 在运行时由 gpm.__init__ 读取 PKG-INFO 或 fallback，**避免到处硬编码版本号**。
+dynamic = ["version"]
 description = "globe-probe - 全球拨测监控平台 (distributed synthetic monitoring: ping/curl/mtr)"
 authors = [{ name = "ops120", email = "ops120@users.noreply.github.com" }]
 readme = "README.md"
@@ -28,6 +33,12 @@ stats = ["psutil>=5.9"]
 
 [project.scripts]
 gpm = "gpm.cli:main"
+
+[tool.setuptools_scm]
+# 起始版本：没有 tag 时从这里起算
+fallback_version = "0.1.0"
+# 允许 0.x.y 在没有 git tag 时直接读 fallback_version
+local_scheme = "no-local-version"
 
 [tool.setuptools.packages.find]
 where = ["src"]

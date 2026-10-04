@@ -8,10 +8,11 @@ import random
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 from ..common.dnsres import DnsCache, DnsError, is_fake_ip, resolve_a, resolve_aaaa
-from ..common.util import IS_WINDOWS, is_ip, now, run_cmd
+from ..common.util import IS_WINDOWS, is_ip, now
 from ..probers.curl import run_curl
 from ..probers.dnsmon import run_dnsmon
 from ..probers.mtr import run_mtr
@@ -274,8 +275,6 @@ class Agent:
                 for u in urls:
                     key = (t["id"], d or "", u or "")
                     old = self.jobs.get(key)
-                    jitter = 1 + random.uniform(-probe.get("jitter_ratio", 0.1),
-                                                probe.get("jitter_ratio", 0.1))
                     jobs[key] = {
                         "task": t, "dns": d or "", "url": u or "",
                         "interval": interval,
@@ -376,7 +375,11 @@ class Agent:
         r.update({"task_id": task["id"], "type": task["type"], "node_id": self.node_id,
                   "dns": dns, "url": url, "config_version": self.config_version})
         self.buffer.append(r)
-        job["next_at"] = ts + job["interval"]
+        # 间隔抖动（probe.jitter_ratio）：每轮在 ±ratio 内随机推进 next_at，
+        # 否则同节点的各流首轮对齐后会逐步变成整齐的雷群（同时探测同时上报，
+        # 服务端 ingest 承受脉冲负载）。曾经这里算出的 jitter 直接被丢弃，配置形同虚设。
+        jr = max(0.0, min(1.0, float(self.cfg.probe.get("jitter_ratio", 0.1) or 0)))
+        job["next_at"] = ts + max(1, int(round(job["interval"] * (1 + random.uniform(-jr, jr)))))
 
     # ---------- 上报 ----------
     def _flush_buffer_to_disk(self):
@@ -386,27 +389,49 @@ class Agent:
                 for r in self.buffer:
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
             self.buffer = []
+            self._trim_buffer_file()
             log.warning("上报持续失败，%d 条结果已写入本地缓冲", n)
         except OSError as e:
             log.error("本地缓冲写入失败: %s", e)
 
+    def _trim_buffer_file(self):
+        """把磁盘缓冲钉在尾部水印内（offline_buffer_max 条）。
+
+        磁盘缓冲只为「重启不丢」。ingest 持续 5xx/429 而心跳健康时，探测不停、
+        每攒满一批就追加一次——不封顶的话文件按探测速率无限增长，重启时全量
+        读入内存再截断，等于双倍内存峰值（可能 MemoryError）。"""
+        max_b = int(self.cfg.agent.get("offline_buffer_max", 5000) or 5000)
+        try:
+            with open(self.buffer_file, "r", encoding="utf-8") as f:
+                tail = deque(f, maxlen=max_b)   # 流式读，只留尾部 max_b 行
+            if len(tail) < max_b:
+                return                          # 未到水印，无需重写
+            tmp = self.buffer_file.with_suffix(".jsonl.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(tail)
+            tmp.replace(self.buffer_file)
+        except OSError as e:
+            log.error("本地缓冲截断失败（保留原文件）: %s", e)
+
     def _load_disk_buffer(self):
         if not self.buffer_file.exists():
             return
-        lines = self.buffer_file.read_text(encoding="utf-8").splitlines()
+        max_b = self.cfg.agent.get("offline_buffer_max", 5000)
         loaded = 0
-        for ln in lines:
-            try:
-                self.buffer.append(json.loads(ln))
-                loaded += 1
-            except json.JSONDecodeError:
-                continue
+        try:
+            with open(self.buffer_file, "r", encoding="utf-8") as f:
+                lines = deque(f, maxlen=max_b)  # 流式读尾部，不再整文件进内存
+            for ln in lines:
+                try:
+                    self.buffer.append(json.loads(ln))
+                    loaded += 1
+                except json.JSONDecodeError:
+                    continue
+        except OSError as e:
+            log.error("本地缓冲读取失败: %s", e)
         if loaded:
             log.info("从本地缓冲恢复 %d 条结果", loaded)
         self.buffer_file.unlink(missing_ok=True)
-        max_b = self.cfg.agent.get("offline_buffer_max", 5000)
-        if len(self.buffer) > max_b:
-            self.buffer = self.buffer[-max_b:]
 
     async def report_once(self):
         if not self.buffer or not self.node_id:
@@ -439,20 +464,23 @@ class Agent:
         self.load_creds()
         self._load_disk_buffer()
         hb_i = self.cfg.agent.get("heartbeat_interval", 15)
-        poll_i = self.cfg.agent.get("poll_interval", 10)
         rep_i = self.cfg.agent.get("report_interval", 5)
         last_hb = last_rep = 0
+        next_sync_try = 0.0     # 同步失败后的退避重试时点（只限流 sync，绝不停探测）
         while True:
             t0 = now()
-            try:
-                if t0 - last_hb >= hb_i or not self.config_version:
+            # 心跳+配置同步。失败时只退避重试 sync 本身——服务端宕机恰恰是最需要
+            # 本地数据连续性的时刻，调度与上报必须照常走（探测→内存缓冲→落盘），
+            # 否则「离线运行」变成全线哑火，离线缓冲机制成为不可达死路径。
+            if (t0 - last_hb >= hb_i or not self.config_version) and t0 >= next_sync_try:
+                try:
                     await self.sync_once()
                     last_hb = t0
-            except Exception as e:  # noqa
-                self.backoff = min(max(self.backoff * 2, 2), 60)
-                log.warning("同步失败(离线运行): %s —— %.0fs 后重试", e, self.backoff)
-                await asyncio.sleep(self.backoff)
-                continue
+                    self.backoff = 1
+                except Exception as e:  # noqa
+                    self.backoff = min(max(self.backoff * 2, 2), 60)
+                    next_sync_try = t0 + self.backoff
+                    log.warning("同步失败(离线运行): %s —— 探测继续，%.0fs 后重试同步", e, self.backoff)
             # 调度到期的探测任务
             for key, job in list(self.jobs.items()):
                 if not job["running"] and now() >= job["next_at"]:

@@ -6,15 +6,25 @@ import io
 import json
 import logging
 import re
+import secrets
+import sqlite3
 import threading
 import time
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from .. import __version__
 from ..common.models import NodeUpdate, TaskCreate, TaskUpdate, validate_params
-from ..common.util import new_id, now, sha256, validate_domain, validate_host_port, \
-    validate_target
+from ..common.util import (
+    listen_is_loopback,
+    new_id,
+    now,
+    sha256,
+    validate_domain,
+    validate_host_port,
+    validate_target,
+)
 from . import alerting, geo, hooks
 from .diagnose import classify, runbook_for, verdict
 from .storage import BUCKET_SECONDS
@@ -67,9 +77,16 @@ def _oncall_bucket(task: dict, node: dict, last_status, last_age_s,
 
 _BUCKET_RANK = {"live": 0, "silent": 1, "stale": 2, "maintenance": 3}
 
-# 同一节点上多少个任务同时失败，才值得给一张「疑似节点侧」的横切卡。
-# 低于这个数，节点侧解释不如「多个目标各自坏了」可信，提示反而变成噪声。
-NODE_SUSPECT_MIN_TASKS = 3
+
+# 「同一节点上多少个任务同时失败才给一张『疑似节点侧』横切卡」与「同期变更窗口」
+# 是产品口径旋钮，从 cfg.view 读（view.node_suspect_min_tasks / changes_pad_seconds /
+# changes_per_card）。曾经这里各放一份硬编码常量，与 eventview 的同名配置各管各的——
+# 改配置只影响事件详情页、值班页纹丝不动，两页口径被改裂。
+def _view_int(cfg_view: dict, key: str, default: int) -> int:
+    try:
+        return max(0, int(cfg_view.get(key, default) or default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _oncall_group_subtitle(count: int, nodes: list, targets: list) -> str:
@@ -88,8 +105,9 @@ CHANGES_PAD_SECONDS = 1800      # 事件窗口 ±30 分钟
 CHANGES_PER_CARD = 3            # 卡片上只留最有用的几条（完整清单仍在事件详情弹窗里）
 
 
-def _oncall_changes(s, items: list, t_now: int) -> dict:
-    """同期变更（第三期 14）：事件窗口 ±30 分钟内、**动过这个东西**的写操作。
+def _oncall_changes(s, items: list, t_now: int, pad_seconds: int = 1800,
+                    per_card: int = 3) -> dict:
+    """同期变更（第三期 14）：事件窗口 ±pad_seconds 内、**动过这个东西**的写操作。
 
     原先只有事件详情弹窗里有——值班的人要先点开弹窗才知道「这期间有人改过配置」，
     而「刚改完就炸」是排查时最省时间的线索之一。
@@ -101,7 +119,7 @@ def _oncall_changes(s, items: list, t_now: int) -> dict:
     probe = [it for it in items if it["task_id"]]
     if not probe:
         return {}
-    pad = CHANGES_PAD_SECONDS
+    pad = pad_seconds
     t_from = min(int(it["started_at"] or t_now) for it in probe) - pad
     rows = s.audit_list(limit=500, since=t_from) or []
     out: dict = {}
@@ -126,12 +144,33 @@ def _oncall_changes(s, items: list, t_now: int) -> dict:
                            "detail": " · ".join(x for x in (head, detail) if x)})
         if picked:
             picked.sort(key=lambda x: x["ts"], reverse=True)
-            out[it["incident_id"]] = picked[:CHANGES_PER_CARD]
+            out[it["incident_id"]] = picked[:per_card]
     return out
 
 
-EXT_LINK_WINDOW = 1800     # 第三方告警 ↔ 本地事件的关联时间窗：±30 分钟
-EXT_LINK_MIN_NAME = 2      # 名字太短不参与匹配（避免节点 n1 命中 n10）
+# 第三方告警 ↔ 本地事件的关联口径：从 cfg.hook 读（hook.link_window_seconds /
+# link_min_name_len）。这两个配置键曾经是死键——仓库里只有这里的硬编码常量在生效，
+# 改配置毫无作用。cfg 经 app 启动的 init() 注入（与 hooks/pullers 等模块同模式）。
+_CFG = None
+
+
+def init(cfg) -> None:
+    global _CFG
+    _CFG = cfg
+
+
+def _ext_link_window() -> int:
+    try:
+        return max(0, int((_CFG.hook.get("link_window_seconds") if _CFG else None) or 1800))
+    except (TypeError, ValueError):
+        return 1800
+
+
+def _ext_link_min_name() -> int:
+    try:
+        return max(1, int((_CFG.hook.get("link_min_name_len") if _CFG else None) or 2))
+    except (TypeError, ValueError):
+        return 2
 
 
 def _ext_tokens(a: dict) -> set:
@@ -148,7 +187,7 @@ def _ext_tokens(a: dict) -> set:
     return {t for t in re.split(r"[^\w\-\.]+", " ".join(bits).lower()) if t}
 
 
-def _correlate_external(s, alert: dict, t_now: int, window: int = EXT_LINK_WINDOW) -> int:
+def _correlate_external(s, alert: dict, t_now: int, window: int | None = None) -> int:
     """把第三方告警关联到本地事件（第六期 28）。
 
     依据：本地事件的**任务名/节点名**出现在第三方告警的标题或标签里，且时间窗重叠。
@@ -158,6 +197,7 @@ def _correlate_external(s, alert: dict, t_now: int, window: int = EXT_LINK_WINDO
     用词元匹配而不是子串匹配：否则节点 n1 会命中 n10、任务 t 会命中一切。
     名字 ≥4 字符时额外允许子串（"win-local" 藏在更长标签值里的情形）。
     """
+    window = _ext_link_window() if window is None else int(window)
     toks = _ext_tokens(alert)
     if not toks:
         return 0
@@ -174,7 +214,7 @@ def _correlate_external(s, alert: dict, t_now: int, window: int = EXT_LINK_WINDO
         hits = []
         for nm in (tname, nname):
             low = nm.lower()
-            if len(low) < EXT_LINK_MIN_NAME:
+            if len(low) < _ext_link_min_name():
                 continue
             if low in toks or (len(low) >= 4 and low in text):
                 hits.append(nm)
@@ -186,7 +226,8 @@ def _correlate_external(s, alert: dict, t_now: int, window: int = EXT_LINK_WINDO
     return n
 
 
-def _oncall_groups(items: list, t_now: int, ext_orphans: list | None = None) -> list:
+def _oncall_groups(items: list, t_now: int, ext_orphans: list | None = None,
+                   node_suspect_min_tasks: int = 3) -> list:
     """把逐流事件聚合为「行动项」：同一任务一张卡 + 按节点横切提示。
 
     .docs/ONCALL_OPTIMIZATION_2.md 第二期 7-9。线上实测 11 条事件里同一任务占多条
@@ -265,7 +306,7 @@ def _oncall_groups(items: list, t_now: int, ext_orphans: list | None = None) -> 
         for m in g["members"]:
             live_by_node.setdefault(m["node_id"], set()).add(m["task_id"])
     for nid, tids_set in sorted(live_by_node.items()):
-        if len(tids_set) < NODE_SUSPECT_MIN_TASKS:
+        if len(tids_set) < node_suspect_min_tasks:
             continue
         members = [m for g in groups if g["kind"] == "task"
                    for m in g["members"] if m["node_id"] == nid and m["task_id"] in tids_set]
@@ -331,10 +372,22 @@ def setup_router(app_state) -> APIRouter:
     cfg = app_state["cfg"]
     router = APIRouter(prefix="/api")  # 每次调用独立 router，避免跨 app 闭包污染
 
+    # 写口鉴权（安全基线）：admin_token 未配置时曾是 fail-open——配合示例配置的
+    # 0.0.0.0 监听等于局域网内任何人可建任务/导入配置/改通知渠道。收敛为：
+    # 配了 token → 常量时间比较；没配 token → 仅环回监听放行（本机开发模式），
+    # 非环回监听一律 403（app 启动时会打 WARNING 指引配置 token）。
+    _admin_token = str(cfg.server.get("admin_token") or "")
+    _loopback_listen = listen_is_loopback(str(cfg.server.get("listen") or ""))
+
     def check_write(x_admin_token: str | None):
-        token = cfg.server.get("admin_token") or ""
-        if token and x_admin_token != token:
-            raise HTTPException(403, "需要 X-Admin-Token")
+        if _admin_token:
+            if not secrets.compare_digest(str(x_admin_token or "").encode(),
+                                          _admin_token.encode()):
+                raise HTTPException(403, "需要 X-Admin-Token")
+        elif not _loopback_listen:
+            raise HTTPException(
+                403, "未配置 server.admin_token 且监听在非环回地址，写接口已拒绝"
+                     "（配置 admin_token 后重启服务端开放）")
 
     # ---------- 任务 ----------
     # /api/tasks 进程内 TTL 缓存（欠账-4）：该接口逐任务算 streams + 24h 可用率（逐流 SQL），
@@ -356,7 +409,7 @@ def setup_router(app_state) -> APIRouter:
             streams = s.result_streams(t["id"])
             # 最近状态：各流最近一条
             last_status, last_ts = None, 0
-            ok_n = fail_n = total_n = 0
+            ok_n = total_n = 0
             day_ago = now() - 86400
             for st in streams:
                 rows = s.agg_read("1m", t["id"], st["node_id"], st["dns"], st["url"],
@@ -397,6 +450,15 @@ def setup_router(app_state) -> APIRouter:
             _tasks_cache.update(ver=ver, at=time.monotonic(), data=data)
         return data
 
+    def _invalidate_tasks_cache() -> None:
+        """任务 CRUD 后调用：让「我刚改完就看到」生效，而不是等最多 15s。
+
+        写路径上无 24h 可用率 / streams / current_status 的缓存，因此这里只清
+        任务列表缓存；TTL 仍按 cfg.server["tasks_cache_seconds"] 走。
+        """
+        with _tasks_lock:
+            _tasks_cache["ver"] = None
+
     @router.post("/tasks")
     def create_task(body: TaskCreate, x_admin_token: str | None = Header(default=None)):
         check_write(x_admin_token)
@@ -406,10 +468,10 @@ def setup_router(app_state) -> APIRouter:
         try:
             t = s.create_task(tid, body.name, body.type, body.target, body.urls, body.params,
                               body.dns, interval, now(), nodes=body.nodes)
-        except Exception as e:
-            if "UNIQUE" in str(e):
-                raise HTTPException(409, f"任务名已存在: {body.name}")
-            raise
+        except sqlite3.IntegrityError:
+            # 曾经用 "UNIQUE" in str(e) 判重——sqlite 报错文案不可契约，撞名/主键冲突应按类型捕
+            raise HTTPException(409, f"任务名已存在: {body.name}")
+        _invalidate_tasks_cache()
         return t
 
     @router.put("/tasks/{tid}")
@@ -460,12 +522,14 @@ def setup_router(app_state) -> APIRouter:
                              action=act)
             except Exception as e:  # noqa: BLE001 - 审计失败绝不影响业务
                 log.debug("启停审计跳过: %s", e)
+        _invalidate_tasks_cache()
         return updated
 
     @router.delete("/tasks/{tid}")
     def delete_task(tid: str, x_admin_token: str | None = Header(default=None)):
         check_write(x_admin_token)
         s.delete_task(tid, now())
+        _invalidate_tasks_cache()
         return {"deleted": tid}
 
     # ---------- 节点 ----------
@@ -664,7 +728,7 @@ def setup_router(app_state) -> APIRouter:
                     cells.append({"ts": b, "st": 2, "rtt": None})
                 else:
                     avail = c["ok"] / c["count"]
-                    st = 0 if avail >= 1 else (1 if avail == 0 else 1)  # 部分失败按失败展示
+                    st = 0 if avail >= 1 else 1  # 部分失败按失败展示（曾写成恒真的内层三元）
                     cells.append({"ts": b, "st": st, "rtt": None})
                 b += step
             label = nodes.get(nid, nid) + (f" · {dns}" if dns else "") + (f" · {url}" if url else "")
@@ -949,7 +1013,11 @@ def setup_router(app_state) -> APIRouter:
             it["maintenance"] = ({"name": mw.get("name") or "维护窗口",
                                   "ends_at": mw.get("ends_at")} if mw else None)
         # 第三期 13/14：卡片上直接给「可粘贴的命令」与「同期变更」。
-        chg = _oncall_changes(s, items, t_now)
+        # 口径从 cfg.view 读，与事件详情页（eventview）同一套配置键
+        view_cfg = cfg.view
+        chg = _oncall_changes(s, items, t_now,
+                              pad_seconds=_view_int(view_cfg, "changes_pad_seconds", 1800),
+                              per_card=_view_int(view_cfg, "changes_per_card", 3))
         for it in items:
             it["changes"] = chg.get(it["incident_id"], [])
             it["runbook"] = runbook_for(it["layer"])
@@ -986,7 +1054,8 @@ def setup_router(app_state) -> APIRouter:
         # 聚合后的「行动项」：同一任务一张卡 + 按节点横切（第二期 7-9）。
         # items 保持原样返回，前端与既有验收断言不受影响。
         return {"ts": t_now, "items": items,
-                "groups": _oncall_groups(items, t_now, ext_orphans),
+                "groups": _oncall_groups(items, t_now, ext_orphans,
+                                         node_suspect_min_tasks=_view_int(cfg.view, "node_suspect_min_tasks", 3)),
                 "selfcheck": selfcheck, "nodes_health": nodes_health,
                 "external": {"firing": len(ext_orphans), "linked": len(linked_ids)},
                 # 第三期 12：未配置 public_url 时通知里**没有**「点击查看」链接，
@@ -1183,6 +1252,32 @@ def setup_router(app_state) -> APIRouter:
             raise HTTPException(404, "该时刻无探测记录（可能被去重或未产生）")
         return r
 
+    def _dl(payload: str, media_type: str, base: str, ext: str) -> StreamingResponse:
+        return StreamingResponse(io.StringIO(payload), media_type=media_type,
+                                 headers={"Content-Disposition":
+                                          f'attachment; filename="{base}.{ext}"'})
+
+    def _csv_or_json(rows: list[dict], columns: list[str], base: str,
+                     fmt: str) -> StreamingResponse:
+        """CSV/JSON 双格式导出。CSV 统一前置 UTF-8 BOM——否则 Excel 打开中文必乱码。"""
+        if fmt == "json":
+            return _dl(json.dumps(rows, ensure_ascii=False, indent=1),
+                       "application/json", base, "json")
+        buf = io.StringIO()
+        buf.write("\ufeff")                  # UTF-8 BOM：Excel 中文兼容
+        w = csv.writer(buf)
+        w.writerow(columns)
+        for d in rows:
+            w.writerow([json.dumps(d[c], ensure_ascii=False)
+                        if isinstance(d.get(c), (dict, list)) else d.get(c, "")
+                        for c in columns])
+        return _dl(buf.getvalue(), "text/csv;charset=utf-8", base, "csv")
+
+    def _export_cap(limit: int) -> int:
+        """cfg.export.max_rows 是硬上限；调用方可用 limit 再收紧，但不能放大。"""
+        cap = max(1, int(cfg.export.get("max_rows", 100000) or 100000))
+        return min(max(1, int(limit or cap)), cap)
+
     @router.get("/export")
     def export(task_id: str, t_from: int = 0, t_to: int = 0, fmt: str = "csv"):
         t_to = t_to or now()
@@ -1191,29 +1286,239 @@ def setup_router(app_state) -> APIRouter:
             rows = s.db.execute(
                 "SELECT ts,task_id,node_id,type,dns,url,status,error_class,error,dns_server,"
                 "resolved_ip,dns_time_ms,metrics_json FROM probe_results WHERE task_id=? "
-                "AND ts>=? AND ts<=? ORDER BY ts", (task_id, t_from, t_to)).fetchall()
-        if fmt == "json":
-            data = []
-            for r in rows:
-                d = dict(r)
-                d["metrics"] = json.loads(d.pop("metrics_json") or "{}")
-                data.append(d)
-            return StreamingResponse(io.StringIO(json.dumps(data, ensure_ascii=False, indent=1)),
-                                     media_type="application/json",
-                                     headers={"Content-Disposition":
-                                              f'attachment; filename="export_{task_id}.json"'})
-        buf = io.StringIO()
-        w = csv.writer(buf)
-        w.writerow(["ts", "task_id", "node_id", "type", "dns", "url", "status", "error_class",
-                    "error", "dns_server", "resolved_ip", "dns_time_ms", "metrics"])
+                "AND ts>=? AND ts<=? ORDER BY ts LIMIT ?",
+                (task_id, t_from, t_to, _export_cap(0))).fetchall()
+        data = []
         for r in rows:
-            w.writerow([r["ts"], r["task_id"], r["node_id"], r["type"], r["dns"], r["url"],
-                        r["status"], r["error_class"], r["error"], r["dns_server"],
-                        r["resolved_ip"], r["dns_time_ms"], r["metrics_json"]])
-        buf.seek(0)
-        return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
-                                 headers={"Content-Disposition":
-                                          f'attachment; filename="export_{task_id}.csv"'})
+            d = dict(r)
+            d["metrics"] = json.loads(d.pop("metrics_json") or "{}")
+            data.append(d)
+        return _csv_or_json(data, ["ts", "task_id", "node_id", "type", "dns", "url", "status",
+                                   "error_class", "error", "dns_server", "resolved_ip",
+                                   "dns_time_ms", "metrics"], f"export_{task_id}", fmt)
+
+    # ---------- 导出：记录类（GET 开放，与查询端点同一信任模型；行数受 cfg.export.max_rows 约束） ----------
+
+    @router.get("/export/incidents")
+    def export_incidents(t_from: int = 0, t_to: int = 0, fmt: str = "csv", limit: int = 0):
+        """事件导出（复盘/周报用）。默认最近 7 天，按开始时间倒序；open=是否仍未恢复。"""
+        t_to = t_to or now()
+        t_from = t_from or (t_to - 7 * 86400)
+        with s.lock:
+            rows = s.db.execute(
+                "SELECT * FROM incidents WHERE started_at>=? AND started_at<=?"
+                " ORDER BY started_at DESC LIMIT ?",
+                (t_from, t_to, _export_cap(limit))).fetchall()
+        data = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["reason"] = json.loads(d.pop("reason_json") or "{}")
+            except Exception:
+                d["reason"] = {}
+            d["open"] = 1 if not d.get("ended_at") else 0
+            data.append(d)
+        return _csv_or_json(data, ["id", "task_id", "node_id", "dns", "url", "kind", "open",
+                                   "started_at", "ended_at", "duration_ms", "last_ts",
+                                   "reopen_count", "note", "reason"], "gpm-incidents", fmt)
+
+    @router.get("/export/alerts")
+    def export_alerts(t_from: int = 0, t_to: int = 0, rule_id: str = "", fmt: str = "csv",
+                      limit: int = 0):
+        """告警发送记录导出（alerts 表：规则命中 + 投递结果）。默认最近 7 天。"""
+        t_to = t_to or now()
+        t_from = t_from or (t_to - 7 * 86400)
+        with s.lock:
+            sql = "SELECT * FROM alerts WHERE ts>=? AND ts<=?"
+            args: list = [t_from, t_to]
+            if rule_id:
+                sql += " AND rule_id=?"
+                args.append(rule_id)
+            sql += " ORDER BY ts DESC LIMIT ?"
+            args.append(_export_cap(limit))
+            rows = s.db.execute(sql, args).fetchall()
+        return _csv_or_json([dict(r) for r in rows],
+                            ["ts", "rule_id", "rule_name", "metric", "key", "status", "severity",
+                             "title", "text", "target_json", "delivered", "n_channels", "n_ok",
+                             "detail"], "gpm-alerts", fmt)
+
+    @router.get("/export/external_alerts")
+    def export_external_alerts(source: str = "", status: str = "", t_from: int = 0,
+                               fmt: str = "csv", limit: int = 0):
+        """第三方告警导出（库里已按 source+source_id 幂等去重后的形态）。"""
+        items = s.list_external_alerts(limit=_export_cap(limit), source=source, status=status,
+                                       t_from=t_from)
+        return _csv_or_json(items, ["id", "source", "source_id", "title", "severity", "status",
+                                    "started_at", "ended_at", "received_at", "updated_at",
+                                    "url", "labels"], "gpm-external-alerts", fmt)
+
+    # ---------- 配置备份：导入导出（换库/迁移不用手工重建任务与通知链路） ----------
+
+    @router.get("/export/config")
+    def export_config():
+        """配置备份 JSON：任务/分组/渠道/规则/维护窗口。
+
+        故意不含 tokens（agent 凭据）与 nodes（运行时注册产物，agent 会自己回来）。
+        渠道 config 含 webhook 密钥——可见性与通知配置页一致（内网信任模型），备份文件请妥善保管。
+        """
+        task_keys = ("id", "name", "type", "target", "urls", "params", "dns",
+                     "interval_seconds", "enabled", "nodes")
+        return {
+            "kind": "gpm-config-backup",
+            "gpm_version": __version__,
+            "exported_at": now(),
+            "config_version": s.config_version(),
+            "tasks": [{k: t.get(k) for k in task_keys} for t in s.list_tasks()],
+            "groups": [{"id": g["id"], "name": g["name"], "note": g.get("note") or "",
+                        "members": g.get("members") or []} for g in s.list_groups()],
+            "channels": [{k: c.get(k) for k in ("id", "name", "type", "config", "enabled")}
+                         for c in s.list_channels()],
+            "rules": [{k: r.get(k) for k in ("id", "name", "metric", "op", "threshold",
+                                             "window_seconds", "task_id", "node_id",
+                                             "group_id", "severity", "channel_ids",
+                                             "silence_seconds", "escalate_minutes", "enabled")}
+                      for r in s.list_rules()],
+            "windows": [{k: w.get(k) for k in ("id", "name", "starts_at", "ends_at",
+                                               "task_id", "node_id", "note")}
+                        for w in s.list_windows()],
+        }
+
+    @router.post("/import/config")
+    def import_config(body: dict, x_admin_token: str | None = Header(default=None)):
+        """配置导入：upsert 语义（同 id 已存在 → 更新；不存在 → 创建，保留原 id）。
+
+        任务 id 保留是为了让规则里的 task_id 引用在迁移后仍然成立。
+        单项失败不拖垮整体：错误逐条收集在返回值里，其余照常导入。
+        """
+        check_write(x_admin_token)
+        if not isinstance(body, dict) or not any(
+                isinstance(body.get(k), list)
+                for k in ("tasks", "groups", "channels", "rules", "windows")):
+            raise HTTPException(status_code=400,
+                                detail="不像 gpm 配置备份（缺 tasks/groups/channels/rules/windows 数组）")
+        ts = now()
+        res: dict = {}
+
+        def bucket(name: str) -> dict:
+            return res.setdefault(name, {"created": 0, "updated": 0, "errors": []})
+
+        for t in body.get("tasks") or []:
+            b = bucket("tasks")
+            try:
+                tid = str(t.get("id") or "").strip()
+                if not tid:
+                    raise ValueError("缺 id")
+                ttype = str(t.get("type") or "http")
+                params = t.get("params") or {}
+                validate_params(ttype, params)
+                interval = max(int(t.get("interval_seconds") or 30),
+                               _interval_floor(cfg.probe, ttype))
+                urls = t.get("urls") or []
+                dns = t.get("dns") or []
+                nodes = t.get("nodes") or []
+                if s.get_task(tid):
+                    s.update_task(tid, {"name": t.get("name") or tid,
+                                        "target": t.get("target") or "", "urls": urls,
+                                        "params": params, "dns": dns, "nodes": nodes,
+                                        "interval_seconds": interval,
+                                        "enabled": 1 if t.get("enabled", True) else 0}, ts)
+                    b["updated"] += 1
+                else:
+                    s.create_task(tid, str(t.get("name") or tid), ttype,
+                                  str(t.get("target") or ""), urls, params, dns, interval, ts,
+                                  nodes=nodes)
+                    if not t.get("enabled", True):     # create_task 恒为启用，停用态需补一刀
+                        s.update_task(tid, {"enabled": 0}, ts)
+                    b["created"] += 1
+            except Exception as e:
+                b["errors"].append(f"任务 {t.get('id') or '?'}: {e}")
+
+        for g in body.get("groups") or []:
+            b = bucket("groups")
+            try:
+                gid = str(g.get("id") or "").strip()
+                if not gid:
+                    raise ValueError("缺 id")
+                if any(x["id"] == gid for x in s.list_groups()):
+                    s.update_group(gid, {"name": g.get("name") or gid,
+                                         "note": g.get("note") or ""}, ts)
+                    b["updated"] += 1
+                else:
+                    s.create_group(gid, g.get("name") or gid, g.get("note") or "", ts)
+                    b["created"] += 1
+                s.set_group_members(gid, [str(m) for m in (g.get("members") or [])], ts)
+            except Exception as e:
+                b["errors"].append(f"分组 {g.get('id') or '?'}: {e}")
+
+        for c in body.get("channels") or []:
+            b = bucket("channels")
+            try:
+                cid = str(c.get("id") or "").strip()
+                if not cid:
+                    raise ValueError("缺 id")
+                fields = {"name": c.get("name") or cid, "type": c.get("type") or "webhook",
+                          "config": c.get("config") or {}}
+                if any(x["id"] == cid for x in s.list_channels()):
+                    if "enabled" in c:
+                        fields["enabled"] = 1 if c.get("enabled") else 0
+                    s.update_channel(cid, fields, ts)
+                    b["updated"] += 1
+                else:
+                    s.create_channel(cid, fields["name"], fields["type"], fields["config"], ts)
+                    if "enabled" in c and not c.get("enabled"):
+                        s.update_channel(cid, {"enabled": 0}, ts)
+                    b["created"] += 1
+            except Exception as e:
+                b["errors"].append(f"渠道 {c.get('id') or '?'}: {e}")
+
+        for w in body.get("windows") or []:
+            b = bucket("windows")
+            try:
+                wid = str(w.get("id") or "").strip()
+                if not wid:
+                    raise ValueError("缺 id")
+                fields = {"name": w.get("name") or "维护窗口",
+                          "starts_at": int(w.get("starts_at") or 0),
+                          "ends_at": int(w.get("ends_at") or 0),
+                          "task_id": w.get("task_id") or "",
+                          "node_id": w.get("node_id") or "", "note": w.get("note") or ""}
+                if any(x["id"] == wid for x in s.list_windows()):
+                    s.delete_window(wid)
+                    s.create_window(wid, fields, ts)
+                    b["updated"] += 1
+                else:
+                    s.create_window(wid, fields, ts)
+                    b["created"] += 1
+            except Exception as e:
+                b["errors"].append(f"维护窗口 {w.get('id') or '?'}: {e}")
+
+        for r in body.get("rules") or []:
+            b = bucket("rules")
+            try:
+                rid = str(r.get("id") or "").strip()
+                if not rid:
+                    raise ValueError("缺 id")
+                fields = {"name": r.get("name") or rid, "metric": r.get("metric") or "",
+                          "op": r.get("op") or "", "threshold": r.get("threshold"),
+                          "window_seconds": r.get("window_seconds"),
+                          "task_id": r.get("task_id") or "", "node_id": r.get("node_id") or "",
+                          "group_id": r.get("group_id") or "",
+                          "severity": r.get("severity") or "warning",
+                          "channel_ids": r.get("channel_ids") or [],
+                          "silence_seconds": r.get("silence_seconds"),
+                          "escalate_minutes": r.get("escalate_minutes"),
+                          "enabled": 1 if r.get("enabled", True) else 0}
+                if any(x["id"] == rid for x in s.list_rules()):
+                    s.update_rule(rid, fields, ts)
+                    b["updated"] += 1
+                else:
+                    s.create_rule(rid, fields, ts)
+                    b["created"] += 1
+            except Exception as e:
+                b["errors"].append(f"规则 {r.get('id') or '?'}: {e}")
+
+        _invalidate_tasks_cache()      # 任务可能被改/建，让任务列表立刻生效而不是等 TTL
+        return {"ok": True, "imported": res, "config_version": s.config_version()}
 
     # ---------- 节点分组 ----------
     @router.get("/groups")

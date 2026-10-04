@@ -13,6 +13,8 @@ from __future__ import annotations
 import math
 import time
 
+from ..config import Config
+
 #: /metrics 响应头使用的内容类型（Prometheus text exposition format 0.0.4）。
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
@@ -20,7 +22,20 @@ CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 VERSION = "0.1.0"
 
 #: 单次渲染的字节上限（约 200 KiB）；超出后按序截断。
+# —— 由 cfg.report["metrics_max_output_bytes"] 提供；保留模块级同名常量供 tests / api_web.py 直接读取。
 MAX_OUTPUT_BYTES = 200 * 1024
+
+_cfg: Config | None = None
+
+
+def init(cfg) -> None:
+    """由 app 在启动时注入 cfg；同步 MAX_OUTPUT_BYTES 到 cfg.report.*。"""
+    global _cfg, MAX_OUTPUT_BYTES
+    _cfg = cfg
+    try:
+        MAX_OUTPUT_BYTES = int(cfg.report.get("metrics_max_output_bytes", MAX_OUTPUT_BYTES) or MAX_OUTPUT_BYTES)
+    except Exception:
+        pass
 
 #: 为截断注释预留的字节数，保证最终输出不超过 MAX_OUTPUT_BYTES。
 _TRUNCATION_RESERVE = 256

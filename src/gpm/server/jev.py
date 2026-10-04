@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import time
 
+from ..config import Config
 from .diagnose import classify, runbook_for
 
 # ---------------------------------------------------------------- 控制流常量（都在代码里）
@@ -30,10 +31,37 @@ from .diagnose import classify, runbook_for
 HYPOTHESES = ("DNS", "网络", "端口", "TLS", "服务端", "应用内容", "节点侧",
               "第三方依赖", "我方平台自身")
 
+# —— 以下阈值由 cfg.jev.* 提供；保留模块级同名常量供 tests / 旧调用按属性名直接读取。
+# 默认值与 src/gpm/config.py DEFAULTS["jev"] 对齐；运行期 init(cfg) 会覆盖。
 MIN_SUPPORT = 0.5
 WEAK_SUPPORT = 0.5
 DISAGREE_MARGIN = 0.15
 MIN_CONFIDENCE = 0.3
+
+_cfg: Config | None = None
+
+
+def init(cfg) -> None:
+    """由 app 在启动时注入 cfg；之后 MIN_SUPPORT / WEAK_SUPPORT / DISAGREE_MARGIN /
+    MIN_CONFIDENCE 同步到 cfg.jev.*。tests 仍可临时改这几个模块级属性。"""
+    global _cfg, MIN_SUPPORT, WEAK_SUPPORT, DISAGREE_MARGIN, MIN_CONFIDENCE
+    _cfg = cfg
+    try:
+        MIN_SUPPORT = float(cfg.jev.get("min_support", MIN_SUPPORT))
+    except Exception:
+        pass
+    try:
+        WEAK_SUPPORT = float(cfg.jev.get("weak_support", WEAK_SUPPORT))
+    except Exception:
+        pass
+    try:
+        DISAGREE_MARGIN = float(cfg.jev.get("disagree_margin", DISAGREE_MARGIN))
+    except Exception:
+        pass
+    try:
+        MIN_CONFIDENCE = float(cfg.jev.get("min_confidence", MIN_CONFIDENCE))
+    except Exception:
+        pass
 
 EVIDENCE_HINT = {
     "error_class": ("DNS", "网络", "端口", "TLS", "服务端", "应用内容"),
@@ -203,23 +231,42 @@ def normalize_judgments(raw, hypotheses: tuple, evidence_ids: list) -> tuple:
     return good, rejected
 
 
-def decide(judgments: list, rule_hint: dict) -> dict:
-    """**代码拥有控制流**：阈值、结论、分歧、依据强弱全在这里，模型不参与。"""
+def decide(judgments: list, rule_hint: dict, cfg=None) -> dict:
+    """**代码拥有控制流**：阈值、结论、分歧、依据强弱全在这里，模型不参与。
+
+    cfg 留空时用模块级常量（由 init(cfg) 同步为 cfg.jev.*）。
+    """
+    weak_support = WEAK_SUPPORT
+    min_confidence = MIN_CONFIDENCE
+    disagree_margin = DISAGREE_MARGIN
+    if cfg is not None:
+        try:
+            weak_support = float(cfg.jev.get("weak_support", weak_support))
+        except Exception:
+            pass
+        try:
+            min_confidence = float(cfg.jev.get("min_confidence", min_confidence))
+        except Exception:
+            pass
+        try:
+            disagree_margin = float(cfg.jev.get("disagree_margin", disagree_margin))
+        except Exception:
+            pass
     if not judgments:
         return {"state": "weak", "root_cause": None,
                 "note": "判据没有给出任何有效判断，证据不足，人工判读"}
     ranked = sorted(judgments, key=lambda x: (-x["support"], -x["confidence"]))
     top, second = ranked[0], (ranked[1] if len(ranked) > 1 else None)
-    if top["support"] < WEAK_SUPPORT or top["confidence"] < MIN_CONFIDENCE:
+    if top["support"] < weak_support or top["confidence"] < min_confidence:
         return {"state": "weak", "root_cause": None,
                 "note": "最高支持度 %.2f / 置信度 %.2f 低于阈值（%.2f / %.2f），"
                         "证据不足，人工判读 —— 不编根因"
-                        % (top["support"], top["confidence"], WEAK_SUPPORT, MIN_CONFIDENCE)}
+                        % (top["support"], top["confidence"], weak_support, min_confidence)}
     margin = top["support"] - (second["support"] if second else 0.0)
-    if second and margin < DISAGREE_MARGIN:
+    if second and margin < disagree_margin:
         return {"state": "diverge", "root_cause": top["hypothesis"],
                 "note": "最高与次高支持度只差 %.2f（< %.2f），存在分歧，建议人工复核"
-                        % (margin, DISAGREE_MARGIN)}
+                        % (margin, disagree_margin)}
     return {"state": "agree", "root_cause": top["hypothesis"],
             "note": "最高支持度 %.2f、置信度 %.2f，且领先次高 %.2f"
                     % (top["support"], top["confidence"], margin)}
@@ -239,11 +286,13 @@ def consistency(rule_root: str, decision: dict) -> str:
 
 # ---------------------------------------------------------------- 主流程
 
-def run(detail: dict, judge=None, ts: int | None = None) -> dict:
+def run(detail: dict, judge=None, ts: int | None = None, cfg=None) -> dict:
     """对一个事件跑一次 JEV 判断，返回可回放的轨迹。
 
     **前置门禁（第七期 38）**：调用方必须先确认「不可信事件数 = 0」，
     否则输入本身是僵尸/陈旧证据，模型只会把噪声包装成结论。
+
+    cfg 留空时使用模块级常量（由 init(cfg) 同步为 cfg.jev.*）。
     """
     t0 = int(ts or time.time())
     evidence = build_evidence(detail)
@@ -255,8 +304,21 @@ def run(detail: dict, judge=None, ts: int | None = None) -> dict:
     judgments, rejected = normalize_judgments(
         j.judge(evidence, HYPOTHESES, {"rule_root": rule_root}),
         HYPOTHESES, [e["id"] for e in evidence])
-    decision = decide(judgments, {"rule_root": rule_root})
+    decision = decide(judgments, {"rule_root": rule_root}, cfg=cfg)
     state = consistency(rule_root, decision)
+
+    # rule 字段回显当前生效的阈值（取自 cfg 或模块级常量）
+    rule_dict = {"min_support": MIN_SUPPORT, "weak_support": WEAK_SUPPORT,
+                 "disagree_margin": DISAGREE_MARGIN, "min_confidence": MIN_CONFIDENCE,
+                 "model_can_override_rule": False}
+    if cfg is not None:
+        try:
+            rule_dict["min_support"] = float(cfg.jev.get("min_support", MIN_SUPPORT))
+            rule_dict["weak_support"] = float(cfg.jev.get("weak_support", WEAK_SUPPORT))
+            rule_dict["disagree_margin"] = float(cfg.jev.get("disagree_margin", DISAGREE_MARGIN))
+            rule_dict["min_confidence"] = float(cfg.jev.get("min_confidence", MIN_CONFIDENCE))
+        except Exception:
+            pass
 
     return {
         "incident_id": inc.get("id"),
@@ -264,9 +326,7 @@ def run(detail: dict, judge=None, ts: int | None = None) -> dict:
         "evidence": evidence,
         "judgments": judgments,
         "rejected": rejected,
-        "rule": {"min_support": MIN_SUPPORT, "weak_support": WEAK_SUPPORT,
-                 "disagree_margin": DISAGREE_MARGIN, "min_confidence": MIN_CONFIDENCE,
-                 "model_can_override_rule": False},
+        "rule": rule_dict,
         "verdict": {
             "state": state,
             "rule_conclusion": {"layer": rule_layer, "advice": rule_advice,

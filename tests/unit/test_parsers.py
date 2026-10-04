@@ -196,6 +196,46 @@ def test_validate_target():
     assert not validate_url("https://www.baidu.com/health; rm")
 
 
+def test_metadata_and_link_local_targets_blocked():
+    """P0 安全回归：云元数据/链路本地/未指定地址不作为服务端外呼目标（SSRF 跳板）。
+
+    拨测平台探测内网与环回是本职，保持放行；被拒的是没有任何合法拨测语义、
+    只用于窃取宿主机云凭据的地址段。"""
+    from gpm.common.util import listen_is_loopback, validate_target, validate_url
+    # 云厂商元数据（AWS/GCP/Azure/阿里云都在 169.254.0.0/16）
+    assert not validate_target("169.254.169.254")
+    assert not validate_url("http://169.254.169.254/latest/meta-data/")
+    assert not validate_url("http://169.254.169.254:80/meta")
+    assert not validate_url("http://user@169.254.169.254/x")   # userinfo 不绕过
+    # 链路本地 v4/v6 与未指定地址
+    assert not validate_target("169.254.1.1")
+    assert not validate_target("fe80::1")
+    assert not validate_target("0.0.0.0")
+    assert not validate_url("http://0.0.0.0:8620/")
+    assert not validate_url("http://[fe80::1]/")
+    # 本职场景不受影响：内网、环回、公网、域名
+    assert validate_target("10.0.0.5") and validate_target("192.168.1.1")
+    assert validate_target("127.0.0.1") and validate_target("223.5.5.5")
+    assert validate_url("http://127.0.0.1:8620/api/health")
+    # 域名形态不在此解析（DNS rebinding 是已记录的残余风险）
+    assert validate_target("metadata.example.internal")
+
+
+def test_listen_is_loopback():
+    """写口 fail-closed 的判定基础：只有环回监听才算本机开发模式。"""
+    from gpm.common.util import listen_is_loopback
+    assert listen_is_loopback("127.0.0.1:8620")
+    assert listen_is_loopback("localhost:8620")
+    assert listen_is_loopback("127.0.0.1:0")
+    assert listen_is_loopback("[::1]:8620")
+    assert listen_is_loopback("::1")
+    assert not listen_is_loopback("0.0.0.0:8620")
+    assert not listen_is_loopback("*:8620")
+    assert not listen_is_loopback("192.168.1.10:8620")
+    assert not listen_is_loopback("")
+    assert not listen_is_loopback(":8620")
+
+
 # ---- mtr：fake-ip 如实跳过 + 命令超时下限 ----
 
 def test_mtr_fake_ip_is_skipped(monkeypatch):

@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS aggregates(
   rtt_avg REAL, rtt_p50 REAL, rtt_p95 REAL, rtt_max REAL,
   loss_rate REAL, avail_rate REAL, http_code_json TEXT DEFAULT '{}',
   PRIMARY KEY(bucket, ts, task_id, node_id, dns, url));
+-- 业务查询：按 task_id / node_id 范围查时若只命中 PRIMARY KEY 左部，
+-- 必须按 (bucket, task_id, ts) 顺序才能走索引。早期漏建，已补。
+CREATE INDEX IF NOT EXISTS ix_agg_bucket_task_ts ON aggregates(bucket, task_id, ts);
+CREATE INDEX IF NOT EXISTS ix_agg_bucket_node_ts ON aggregates(bucket, node_id, ts);
 
 CREATE TABLE IF NOT EXISTS incidents(
   id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, node_id TEXT, dns TEXT, url TEXT,
@@ -1799,11 +1803,23 @@ class Storage:
         with self.lock:
             day = 86400
             out: dict[str, int] = {}
-            self.db.execute("DELETE FROM probe_results WHERE ts < ?", (ts - raw_days * day,))
-            self.db.execute("DELETE FROM aggregates WHERE bucket='1m' AND ts < ?", (ts - a1m * day,))
-            self.db.execute("DELETE FROM aggregates WHERE bucket='5m' AND ts < ?", (ts - a5m * day,))
-            self.db.execute("DELETE FROM aggregates WHERE bucket='1h' AND ts < ?", (ts - a1h * day,))
-            self.db.execute("DELETE FROM node_heartbeats WHERE ts < ?", (ts - hb_days * day,))
+            # 主数据表同样必须带 days>0 守卫：按 docstring「0=不清理」配置是运维表达
+            # 「永久保留」的正常写法，缺守卫时 0 天会把整张表清空（不可恢复的数据丢失）
+            if raw_days > 0:
+                cur = self.db.execute("DELETE FROM probe_results WHERE ts < ?", (ts - raw_days * day,))
+                out["probe_results"] = cur.rowcount
+            if a1m > 0:
+                cur = self.db.execute("DELETE FROM aggregates WHERE bucket='1m' AND ts < ?", (ts - a1m * day,))
+                out["agg_1m"] = cur.rowcount
+            if a5m > 0:
+                cur = self.db.execute("DELETE FROM aggregates WHERE bucket='5m' AND ts < ?", (ts - a5m * day,))
+                out["agg_5m"] = cur.rowcount
+            if a1h > 0:
+                cur = self.db.execute("DELETE FROM aggregates WHERE bucket='1h' AND ts < ?", (ts - a1h * day,))
+                out["agg_1h"] = cur.rowcount
+            if hb_days > 0:
+                cur = self.db.execute("DELETE FROM node_heartbeats WHERE ts < ?", (ts - hb_days * day,))
+                out["node_heartbeats"] = cur.rowcount
             if alerts_days > 0:
                 cur = self.db.execute("DELETE FROM alerts WHERE ts < ?", (ts - alerts_days * day,))
                 out["alerts"] = cur.rowcount
@@ -1841,6 +1857,10 @@ class Storage:
                 cur = self.db.execute(
                     "DELETE FROM jev_traces WHERE ts < ?", (ts - incidents_days * day,))
                 out["jev_traces"] = cur.rowcount
+            # geo_cache 是外呼查询的缓存（成功 TTL 24h），只按固定 7 天兜底清理；
+            # 它没有「值得永久保留」的业务语义，不给配置旋钮
+            cur = self.db.execute("DELETE FROM geo_cache WHERE ts < ?", (ts - 7 * day,))
+            out["geo_cache"] = cur.rowcount
             self.db.commit()
             return out
 

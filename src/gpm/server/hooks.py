@@ -22,6 +22,8 @@ import json
 import re
 import time
 
+from ..config import Config
+
 SOURCES = ("grafana", "zabbix", "tencent", "gcp")
 
 # 接入 Token 的请求头与查询参数名（两家都能配：Grafana 有自定义 header，
@@ -29,8 +31,26 @@ SOURCES = ("grafana", "zabbix", "tencent", "gcp")
 TOKEN_HEADER = "X-GPM-Hook-Token"
 TOKEN_QUERY = "token"
 
-MAX_BODY_BYTES = 256 * 1024          # 单次 payload 上限
-RATE_LIMIT_PER_MIN = 120             # 每来源每分钟接收上限（防被打爆）
+# —— 以下阈值由 cfg.hook.* 提供；保留模块级同名常量供 api_web.py 直接读取。
+# 默认值与 src/gpm/config.py DEFAULTS["hook"] 对齐；运行期 init(cfg) 会覆盖。
+MAX_BODY_BYTES = 262144             # 单次 payload 上限（256 KB）
+RATE_LIMIT_PER_MIN = 120            # 每来源每分钟接收上限（防被打爆）
+
+_cfg: Config | None = None
+
+
+def init(cfg) -> None:
+    """由 app 在启动时注入 cfg；之后 MAX_BODY_BYTES / RATE_LIMIT_PER_MIN 同步到 cfg.hook.*。"""
+    global _cfg, MAX_BODY_BYTES, RATE_LIMIT_PER_MIN
+    _cfg = cfg
+    try:
+        MAX_BODY_BYTES = int(cfg.hook.get("max_body_bytes", MAX_BODY_BYTES) or MAX_BODY_BYTES)
+    except Exception:
+        pass
+    try:
+        RATE_LIMIT_PER_MIN = int(cfg.hook.get("rate_limit_per_min", RATE_LIMIT_PER_MIN) or RATE_LIMIT_PER_MIN)
+    except Exception:
+        pass
 
 _SENSITIVE = ("token", "secret", "password", "passwd", "passphrase", "apikey", "api_key",
               "authorization", "auth", "sign", "signature", "credential", "private_key",
@@ -292,8 +312,13 @@ def token_ok(storage, source: str, header_token: "str | None",
 _RATE: dict = {}          # source -> (window_start, count)
 
 
-def rate_ok(source: str, ts: int | None = None, limit: int = RATE_LIMIT_PER_MIN) -> bool:
-    """每来源每分钟的简单窗口限流（进程内；重启即清零，够用作防打爆）。"""
+def rate_ok(source: str, ts: int | None = None, limit: int | None = None) -> bool:
+    """每来源每分钟的简单窗口限流（进程内；重启即清零，够用作防打爆）。
+
+    limit 留空时取模块级 RATE_LIMIT_PER_MIN（由 init(cfg) 同步为 cfg.hook.rate_limit_per_min）。
+    """
+    if limit is None:
+        limit = RATE_LIMIT_PER_MIN
     now_s = int(ts or time.time())
     win = now_s // 60
     cur = _RATE.get(source)

@@ -1,0 +1,25 @@
+# 构建上下文只该有源码：本地数据（监控目标/审计记录）、日志、缓存一律不进镜像构建
+.git/
+.github/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+data/
+logs/
+*.log
+*.log.*
+artifacts/
+e2e-data/
+.docs/
+dist/
+build/
+tests/
+scripts/
+deploy/
+config.yaml
+.env
+*.db
+*.db-wal
+*.db-shm

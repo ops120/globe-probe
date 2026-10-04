@@ -47,7 +47,11 @@ async function show(page) {
   $$('.page').forEach(p => p.classList.add('hidden'));
   $('#page-' + page).classList.remove('hidden');
   $('#crumb').textContent = PAGENAMES[page];
-  if (page === 'tasks' || page === 'overview') state.tasks = await api('/api/tasks');
+  // 切页本身的取数也要兜底：服务端瞬断时页面壳已切过去，取数失败若无提示，
+  // 用户看到的就是「空白页 + 控制台报错」——「假死加固」建立的信任又被新入口漏掉
+  try {
+    if (page === 'tasks' || page === 'overview') state.tasks = await api('/api/tasks');
+  } catch (e) { toast('加载任务列表失败: ' + e.message); }
   if ((page === 'task' || page === 'compare') && !state.task && state.tasks.length) state.task = state.tasks[0].id;
   fillTaskSelects();
   try { await (RENDER[page] || (() => { }))(); } catch (e) { toast('加载失败: ' + e.message); }

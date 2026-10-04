@@ -187,11 +187,11 @@ $('#geo-lines').addEventListener('click', () => {
   state.geoLines = !state.geoLines;
   const c = chartOf('chart-geo');
   if (c) c.clear();       // 关掉时清掉动画层，避免残留
-  renderGeo();
+  rerender('全球地图', renderGeo);
 });
 $$('#geo-metric button').forEach(b => b.onclick = () => {
   $$('#geo-metric button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   state.geoMetric = b.dataset.k;
-  renderGeo();
+  rerender('全球地图', renderGeo);
 });

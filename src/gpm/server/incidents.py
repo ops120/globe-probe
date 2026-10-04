@@ -1,7 +1,8 @@
 """通断事件状态机（粒度 task×node×dns×url）。"""
 from __future__ import annotations
 
-from ..common.util import now
+import threading
+
 
 
 class IncidentMachine:
@@ -17,6 +18,11 @@ class IncidentMachine:
         # key -> {"fail_streak":int,"ok_streak":int,"incident_id":int|None,"no_open":bool}
         # no_open：已向库里确认过「该流当前没有未恢复事件」，避免每条 ok 结果都回查一次库
         self.state: dict[tuple, dict] = {}
+        # /api/agent/results 是线程池里的 sync 端点，同一流的两批结果可并发到达
+        # （agent 超时重试即可触发）。_apply 是跨多次持锁事务的 check-then-act
+        # （查库确认无事件 → 开单），无锁时会丢失连续计数、同一流双开事件——
+        # 恢复时只关内存里记的那条，另一条变成僵尸事件。单机内存锁足够串行化。
+        self._lock = threading.Lock()
 
     @staticmethod
     def key(task_id: str, node_id: str, dns: str, url: str) -> tuple:
@@ -121,8 +127,10 @@ class IncidentMachine:
 
     def on_result(self, task_id: str, node_id: str, dns: str, url: str,
                   status: str, ts: int, error_class: str):
-        self._apply(self.key(task_id, node_id, dns, url), status, ts, error_class)
+        with self._lock:
+            self._apply(self.key(task_id, node_id, dns, url), status, ts, error_class)
 
     def counts(self) -> dict:
-        open_n = sum(1 for st in self.state.values() if st["incident_id"])
-        return {"tracked_streams": len(self.state), "open": open_n}
+        with self._lock:
+            open_n = sum(1 for st in self.state.values() if st["incident_id"])
+            return {"tracked_streams": len(self.state), "open": open_n}

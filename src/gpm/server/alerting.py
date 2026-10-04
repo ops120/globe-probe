@@ -20,7 +20,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 
+from ..config import Config
 from . import diagnose as _diagnose
 
 try:  # 通知模块由独立模块提供；缺失时降级为「仅记录、不发送」
@@ -41,9 +43,33 @@ METRICS = {
 OPS = {"lt": "<", "gt": ">", "eq": "=", "ne": "!="}
 
 # 范围判定的「最近一轮」窗口（秒）：契约要求 ≤60s，storage 侧同样钳制
+# —— 由 cfg.alert.scope_window_seconds 提供；保留模块级同名常量供旧调用按属性名读取。
 SCOPE_WINDOW_SECONDS = 60
-# 升级链阈值上限（分钟）
+# 升级链阈值上限（分钟）—— 由 cfg.alert.escalate_max_minutes 提供。
 ESCALATE_MAX_MINUTES = 1440
+
+_cfg: Config | None = None
+
+
+def init(cfg) -> None:
+    """由 app 在启动时注入 cfg；同步 SCOPE_WINDOW_SECONDS / ESCALATE_MAX_MINUTES /
+    RETRY_BACKOFF 到 cfg.alert.*。"""
+    global _cfg, SCOPE_WINDOW_SECONDS, ESCALATE_MAX_MINUTES, RETRY_BACKOFF
+    _cfg = cfg
+    try:
+        SCOPE_WINDOW_SECONDS = int(cfg.alert.get("scope_window_seconds", SCOPE_WINDOW_SECONDS) or SCOPE_WINDOW_SECONDS)
+    except Exception:
+        pass
+    try:
+        ESCALATE_MAX_MINUTES = int(cfg.alert.get("escalate_max_minutes", ESCALATE_MAX_MINUTES) or ESCALATE_MAX_MINUTES)
+    except Exception:
+        pass
+    try:
+        v = cfg.alert.get("retry_backoff_seconds", RETRY_BACKOFF)
+        if isinstance(v, (list, tuple)) and all(isinstance(x, (int, float)) for x in v):
+            RETRY_BACKOFF = tuple(int(x) for x in v)
+    except Exception:
+        pass
 
 
 
@@ -144,13 +170,17 @@ def _time_text(ts: int) -> str:
 # ---------------------------------------------------------------- 告警即诊断
 
 def _safe_call(storage, name: str, *args, default=None, **kw):
-    """只读调用的容错边界：storage 方法缺失或抛错时返回 default（与 eventview 同约定）。"""
+    """只读调用的容错边界：storage 方法缺失或抛错时返回 default（与 eventview 同约定）。
+
+    诊断段落缺失绝不能影响告警主流程，但也不能完全无痕——否则发出的告警看似完整，
+    【证据】【范围】却悄悄消失，值班的人无从知道那块为什么空了。"""
     fn = getattr(storage, name, None)
     if not callable(fn):
         return default
     try:
         return fn(*args, **kw)
-    except Exception:  # noqa: BLE001 - 诊断段落缺失绝不影响告警主流程
+    except Exception as e:  # noqa: BLE001 - 诊断段落缺失绝不影响告警主流程
+        log.warning("告警诊断数据 %s 读取失败（该段落将以空态出现在告警文本里）: %s", name, e)
         return default
 
 
@@ -313,7 +343,8 @@ def flatten(channel: dict) -> dict:
 
 
 # 失败重投退避（秒）：第 1/2/3 次重试分别等这么久
-RETRY_BACKOFF = (60, 300, 900)
+# —— 由 cfg.alert.retry_backoff_seconds 提供；保留模块级同名常量供旧调用按属性名读取。
+RETRY_BACKOFF: tuple[int, ...] = (60, 300, 900)
 
 
 def _dispatch(storage, channels: list[dict], title: str, text: str, ts: int):
@@ -398,6 +429,7 @@ def push_digest(storage, hours: int = 24, channel_ids: list[str] | None = None,
                 ts: int = 0) -> dict:
     """生成巡检摘要并推送（定时调度与 UI 手动推送共用）。"""
     import time
+
     from . import report
     ts = ts or int(time.time())
     title, text = report.digest_text(storage, hours, ts)
@@ -411,8 +443,19 @@ def push_digest(storage, hours: int = 24, channel_ids: list[str] | None = None,
     return {"title": title, "channels": n_ch, "ok": n_ok, "delivered": delivered, "error": err}
 
 
+# 评估串行化：evaluate 有两个入口（后台 30s 循环 + POST /api/alerts/evaluate 手动触发），
+# 内部「读告警最新行 → 算 → 写告警行」跨多次独立持锁事务，并发同刻会对同一规则+目标
+# 发两条 firing/写两行 alerts（silence 期只隔开两次完整评估，拦不住并发同刻）。
+_EVAL_LOCK = threading.Lock()
+
+
 def evaluate(storage, ts: int = 0) -> list[dict]:
     """评估一轮全部启用规则；返回本轮产生的事件列表（firing / remind / resolved）。"""
+    with _EVAL_LOCK:
+        return _evaluate_impl(storage, ts)
+
+
+def _evaluate_impl(storage, ts: int = 0) -> list[dict]:
     import time
     ts = ts or int(time.time())
     out: list[dict] = []

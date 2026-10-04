@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 import secrets
 import subprocess
@@ -43,7 +44,7 @@ def run_cmd(args: list[str], timeout: float) -> tuple[int, str, str]:
         )
     except FileNotFoundError:
         raise ToolMissing(f"工具不存在: {args[0]}")
-    except subprocess.TimeoutExpired as e:
+    except subprocess.TimeoutExpired:
         raise ToolTimeout(f"命令超时({timeout}s): {' '.join(args[:3])}...")
     return p.returncode, decode_output(p.stdout or b""), decode_output(p.stderr or b"")
 
@@ -61,6 +62,60 @@ _DOMAIN_RE = re.compile(r"^(?=.{1,253}\Z)([a-zA-Z0-9_]([a-zA-Z0-9_-]{0,61}[a-zA-
 _IPV4_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$")
 _BAD_CHARS = set(";|&`$><\\'\"\n\r")
 
+# 服务端外呼目标的默认禁区：未指定地址 / 链路本地（含 AWS/GCP/Azure/阿里云的
+# 169.254.169.254 元数据地址）/ IPv6 链路本地。探测内网（RFC1918、环回）是拨测平台
+# 的本职，不在此列；但云元数据地址没有任何合法拨测语义，只有一种用途——借服务端
+# 外呼窃取宿主机云凭据（经典 SSRF 跳板）。域名不在此解析（DNS rebinding 是残余风险）。
+_BLOCKED_NETS = tuple(ipaddress.ip_network(n) for n in
+                      ("0.0.0.0/8", "169.254.0.0/16", "fe80::/10"))
+
+
+def _ip_blocked(host: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return any(ip in net for net in _BLOCKED_NETS)
+
+
+def _url_ip_blocked(url: str) -> bool:
+    """URL 的 host 是 IP 字面量且落在禁区 → True。userinfo/端口/括号 v6 都要剥掉。"""
+    m = re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://([^/?#]+)", url)
+    if not m:
+        return False
+    auth = m.group(1)
+    if auth.startswith("["):                       # [v6]:port
+        host = auth[1:auth.find("]")] if "]" in auth else auth[1:]
+    elif auth.count(":") > 1:                      # 裸 v6（无端口写法）
+        host = auth
+    else:
+        host = auth.rsplit(":", 1)[0]              # host[:port]
+    host = host.rsplit("@", 1)[-1]                 # 带 userinfo 时取 @ 后的主机
+    return _ip_blocked(host)
+
+
+def listen_is_loopback(listen: str) -> bool:
+    """listen 形如 host:port / [v6]:port / 裸 v6，监听在环回地址时为 True。
+
+    用于写口鉴权的「本机开发模式」判定：未配置 admin_token 时只有环回监听
+    才允许无鉴权写（见 api_web.check_write）。"""
+    s = (listen or "").strip()
+    if s.startswith("["):
+        host = s[1:s.find("]")] if "]" in s else s[1:]
+    elif s.count(":") > 1:
+        host = s                                   # 裸 v6（无端口）
+    else:
+        host = s.rsplit(":", 1)[0]
+    host = host.strip()
+    if not host or host in ("*", "0.0.0.0", "::"):
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
 
 def validate_target(target: str) -> bool:
     if not target or any(c in _BAD_CHARS for c in target):
@@ -69,12 +124,19 @@ def validate_target(target: str) -> bool:
         return True
     m = _IPV4_RE.match(target)
     if m and all(0 <= int(g) <= 255 for g in m.groups()):
-        return True
+        return not _ip_blocked(target)
     if ":" not in target:
         return False
     if target.startswith("[") and target.endswith("]"):   # [v6 字面量] 括号形式
         target = target[1:-1]
-    return re.match(r"^[0-9a-fA-F:.]{2,45}$", target) is not None
+    if re.match(r"^[0-9a-fA-F:.]{2,45}$", target) is None:
+        return False
+    # v6 形状合法但不一定是可解析字面量（保持旧行为交给系统工具判定）；可解析时套用禁区
+    try:
+        ipaddress.ip_address(target)
+    except ValueError:
+        return True
+    return not _ip_blocked(target)
 
 
 def validate_host_port(target: str) -> bool:
@@ -138,7 +200,10 @@ def validate_dns_spec(spec: str) -> bool:
 def validate_url(url: str) -> bool:
     if any(c in _BAD_CHARS for c in url):
         return False
-    return re.match(r"^https?://[^\s/'\"]+(/\S*)?$", url) is not None
+    if re.match(r"^https?://[^\s/'\"]+(/\S*)?$", url) is None:
+        return False
+    # 禁区 IP 字面量（云元数据/链路本地/未指定地址）不作为服务端外呼 URL
+    return not _url_ip_blocked(url)
 
 
 def is_ip(target: str) -> bool:

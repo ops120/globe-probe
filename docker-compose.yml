@@ -5,6 +5,8 @@ services:
     ports:
       - "8620:8620"
     environment:
+      # 安全基线：容器内监听 0.0.0.0，GPM_ADMIN_TOKEN 不配时所有写接口 403。
+      # 部署前必须 export GPM_ADMIN_TOKEN=<强随机值>（echo "GPM_ADMIN_TOKEN=$(openssl rand -hex 24)" >> .env）
       - GPM_ADMIN_TOKEN=${GPM_ADMIN_TOKEN:-}
       - GPM_REGISTER_TOKEN=${GPM_REGISTER_TOKEN:-gpm-change-me}
     volumes:

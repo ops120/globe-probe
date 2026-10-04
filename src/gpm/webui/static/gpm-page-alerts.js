@@ -130,18 +130,19 @@ window.toggleEvGroup = (gi) => {
 
 function slaCsv() {
   const d = state.slaData; if (!d) return '';
-  const lines = ['# gpm SLA 报表', 'window_from,' + fmtTS(d.window.from), 'window_to,' + fmtTS(d.window.to),
+  const q = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';   // 任务名可含逗号：统一引号包裹，与操作审计导出同一口径
+  const lines = ['# gpm SLA 报表', 'window_from,' + q(fmtTS(d.window.from)), 'window_to,' + q(fmtTS(d.window.to)),
     'overall_avail,' + (d.overall.avail == null ? '' : d.overall.avail),
     'overall_count,' + d.overall.count, 'overall_fail,' + d.overall.fail,
     'incidents,' + d.incidents.total, 'mttr_seconds,' + (d.incidents.mttr_seconds == null ? '' : Math.round(d.incidents.mttr_seconds)), ''];
   lines.push('task_id,task,type,count,ok,fail,avail,rtt_avg,rtt_p95');
-  (d.tasks || []).forEach(t => lines.push([t.task_id, t.name, t.type, t.count, t.ok, t.fail,
+  (d.tasks || []).forEach(t => lines.push([t.task_id, q(t.name), t.type, t.count, t.ok, t.fail,
     t.avail == null ? '' : t.avail, t.rtt_avg == null ? '' : t.rtt_avg, t.rtt_p95 == null ? '' : t.rtt_p95].join(',')));
   lines.push('', 'node_id,node,status,count,ok,fail,avail,uptime_seconds');
-  (d.nodes || []).forEach(n => lines.push([n.node_id, n.name, n.status, n.count, n.ok, n.fail,
+  (d.nodes || []).forEach(n => lines.push([n.node_id, q(n.name), n.status, n.count, n.ok, n.fail,
     n.avail == null ? '' : n.avail, n.uptime_seconds == null ? '' : n.uptime_seconds].join(',')));
   lines.push('', 'incident_id,kind,task,node,started_at,ended_at,duration_ms');
-  ((d.incidents && d.incidents.items) || []).forEach(i => lines.push([i.id, i.kind, i.task_name || '', i.node_name || '',
+  ((d.incidents && d.incidents.items) || []).forEach(i => lines.push([i.id, i.kind, q(i.task_name || ''), q(i.node_name || ''),
     i.started_at, i.ended_at || '', i.duration_ms || ''].join(',')));
   return lines.join('\n');
 }
@@ -297,36 +298,50 @@ window.toggleAlGroup = (gi) => {
   $$('#al-tbl tr.al-oc').forEach(tr => { if (tr.dataset.g === String(gi)) tr.classList.toggle('hidden'); });
 };
 
+/* 子块容错渲染：告警页有 9 个互相独立的子块，任何一个接口 404/失败
+ * （典型：旧版服务端没有 /api/external/*）不能把后面的子页全部拖成空白——
+ * 每块失败只在本块提示，其余照常渲染。 */
+async function guard(name, fn) {
+  try { await fn(); }
+  catch (e) { toast(name + '加载失败: ' + (e.message || e)); }
+}
+
 async function renderAlerts() {
   const nodes = await api('/api/nodes');
   state.nodeMap = nodes;
   if (!state.tasks || !state.tasks.length) state.tasks = await api('/api/tasks');
-  await Promise.all([renderSla(), renderChannels(), renderRules(), renderWindows()]);
-  await renderPublicUrl();
-  await renderExternal();      // 第六期：「第三方告警」子页（来源汇总 + 告警表）
-  await renderAlertHistory();
-  await renderDigest();
-  await renderOutbox();
-  await renderAudit();
+  await Promise.all([guard('SLA', renderSla), guard('通知渠道', renderChannels),
+    guard('告警规则', renderRules), guard('维护窗口', renderWindows)]);
+  await guard('通知深链', renderPublicUrl);
+  await guard('第三方告警', renderExternal);   // 第六期：「第三方告警」子页（来源汇总 + 告警表）
+  await guard('告警历史', renderAlertHistory);
+  await guard('巡检推送', renderDigest);
+  await guard('重投队列', renderOutbox);
+  await guard('操作审计', renderAudit);
   // 值班总览只在子页可见时请求（默认子页）：旧版服务端无 /api/oncall，避免隐藏页也打接口产生 404 噪声
-  if (state.alertsSub === 'oncall') await renderOncall();
+  if (state.alertsSub === 'oncall') await guard('值班总览', renderOncall);
+}
+
+/* 筛选/子页切换类按钮的读接口调用统一兜底：失败给 toast，不再静默吞成空表 */
+function rerender(name, fn) {
+  Promise.resolve().then(fn).catch(e => toast(name + '刷新失败: ' + (e.message || e)));
 }
 
 $$('#sla-range button').forEach(b => b.onclick = () => {
   $$('#sla-range button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   state.slaHours = +b.dataset.h;
-  renderSla();
+  rerender('SLA', renderSla);
 });
 $$('#al-fold button').forEach(b => b.onclick = () => {
   state.alFold = b.dataset.f === '1';
-  renderAlertHistory();
+  rerender('告警历史', renderAlertHistory);
 });
 $$('#al-filter button').forEach(b => b.onclick = () => {
   $$('#al-filter button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   state.alFilter = b.dataset.s;
-  renderAlertHistory();
+  rerender('告警历史', renderAlertHistory);
 });
 $('#sla-export').addEventListener('click', () => {
   const csv = slaCsv();
@@ -662,13 +677,13 @@ async function renderAudit() {
 }
 $$('#inc-fold button').forEach(b => b.onclick = () => {
   state.evFold = b.dataset.f === '1';
-  if (state.slaData) renderSlaIncidents(state.slaData);
+  if (state.slaData) renderSlaIncidents(state.slaData);   // 纯内存重画，无需兜底
 });
 $$('#au-filter button').forEach(b => b.onclick = () => {
   $$('#au-filter button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   state.auTarget = b.dataset.t;
-  renderAudit();
+  rerender('操作审计', renderAudit);
 });
 $('#au-export').addEventListener('click', () => {
   const rows = state.auditRows || [];
@@ -684,6 +699,48 @@ $('#au-export').addEventListener('click', () => {
   el.click();
   URL.revokeObjectURL(el.href);
   toast('已导出 ' + rows.length + ' 条');
+});
+
+/* ---------- 第九期：导入导出（记录类 CSV 导出 + 配置备份/导入） ----------
+ * 记录类导出直接 GET（服务端 CSV 统一带 UTF-8 BOM，Excel 打开中文不乱码），带子页已有的筛选：
+ * 事件走 SLA 报表同款窗口；第三方告警带来源筛选；告警发送记录接口无状态筛选 → 用默认最近 7 天。
+ * 配置导入与页面其他写操作一致：从不带 x-admin-token。 */
+$('#ev-export').addEventListener('click', () => {
+  const to = Math.floor(Date.now() / 1000), from = to - (state.slaHours || 24) * 3600;
+  window.open('/api/export/incidents?t_from=' + from + '&t_to=' + to);
+});
+$('#al-export').addEventListener('click', () => window.open('/api/export/alerts'));
+$('#ext-export').addEventListener('click', () => {
+  const src = ($('#ext-filter') || {}).value || '';
+  window.open('/api/export/external_alerts' + (src ? '?source=' + encodeURIComponent(src) : ''));
+});
+$('#cfg-backup').addEventListener('click', () => {
+  window.open('/api/export/config');
+  toast('已下载配置备份');
+});
+$('#cfg-import').addEventListener('click', () => $('#cfg-import-file').click());
+$('#cfg-import-file').addEventListener('change', () => {
+  const f = $('#cfg-import-file').files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = async () => {
+    $('#cfg-import-file').value = '';      // 清掉选择，同一文件可重复导入
+    try { JSON.parse(rd.result); }
+    catch (e) { toast('文件不是合法 JSON: ' + e.message); return; }
+    try {
+      const r = await api('/api/import/config', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: rd.result });
+      const imp = r.imported || {};
+      const sname = { tasks: '任务', groups: '分组', channels: '渠道', rules: '规则', windows: '窗口' };
+      const parts = Object.keys(imp).map(k => (sname[k] || k)
+        + ' 建' + ((imp[k] || {}).created || 0) + '改' + ((imp[k] || {}).updated || 0));
+      const errs = Object.keys(imp).reduce((n, k) => n + ((imp[k] || {}).errors || []).length, 0);
+      toast('导入完成：' + (parts.join('；') || '空备份') + '；失败 ' + errs + ' 项');
+      renderAlerts();      // 导入可能改了渠道/规则/任务，整页重画
+    } catch (e) { toast('导入失败: ' + e.message); }
+  };
+  rd.onerror = () => toast('读取文件失败');
+  rd.readAsText(f);
 });
 
 /* 事件详情弹窗新增诊断块（服务端可选键，缺失/为空 → 简短空态说明，不报错）：
@@ -753,37 +810,84 @@ function evExtraBlocks(d) {
  * 规则结论来自 diagnose.classify（确定性）；模型判断永远带置信度，
  * **永不覆盖规则结论**（rule.model_can_override_rule 恒为 false）。
  * 判据拒绝输出 / 证据不可信时这里明确降级，不假装有判断。 */
-function jevHtml(tr) {
-  if (!tr) return '<div style="color:var(--faint)">该事件还没有 JEV 判断</div>';
+/* JEV 判断的人话翻译（代码侧模板渲染，不是 JEV 输出）
+ *
+ * 默认折叠：值班卡一眼能看到「一致/分歧/依据薄弱」「倾向」「下一步命令」——
+ * 文案代码侧写死，模型侧（JEV）只回类型化判断（support/confidence/引用 id）。
+ * 展开：候选证据 + 逐假设独立判断 + 被拒项 + 阈值元数据（人需要时按需查）。
+ */
+function jevHuman(tr) {
   const v = tr.verdict || {}, rc = v.rule_conclusion || {}, jc = v.jev_conclusion || {};
-  const stateCls = { '一致': 'b-ok', '存在分歧': 'b-warn', '依据薄弱': 'b-off' }[v.state] || 'b-off';
-  const evRows = (tr.evidence || []).map(e => '<div style="font-size:12px;padding:2px 0">'
-    + '<span class="badge b-off">' + esc(e.id) + '</span> '
-    + '<span style="color:var(--fg-2)">' + esc(e.text) + '</span></div>').join('')
-    || '<div style="color:var(--faint)">没有候选证据（证据池由代码切分）</div>';
-  const jRows = (tr.judgments || []).map(j => '<div style="font-size:12px;padding:2px 0">'
-    + '<b>' + esc(j.hypothesis) + '</b> 支持度 <b>' + j.support + '</b> · 置信度 <b>' + j.confidence + '</b>'
-    + '</div>').join('') || '<div style="color:var(--faint)">判据没有给出有效判断</div>';
+  // 把 judgments 按 support 排序取前 2，便于人话里点出主要依据
+  const ranked = (tr.judgments || []).slice().sort((a, b) => b.support - a.support);
+  const top1 = ranked[0], top2 = ranked[1];
+  const stateBadge = function(s) {
+    return '<span class="badge ' + (s === '一致' ? 'b-ok' : s === '存在分歧' ? 'b-warn' : 'b-off')
+      + '">' + esc(s || '—') + '</span>';
+  };
+  // 三态文案 + 下一步命令（命令从 runbook_for 拿，文案代码侧写死）
+  var headline;
+  if (v.state === '依据薄弱' || !jc.root_cause) {
+    headline = '<b>依据薄弱</b>：'
+      + (top1 ? '最高支持度 ' + esc(top1.hypothesis) + ' ' + top1.support : '判据未给出有效判断')
+      + ' · 证据不足以判断根因，建议人工判读';
+  } else if (v.state === '存在分歧') {
+    headline = '<b>倾向 ' + esc(jc.root_cause) + '</b>，但与 ' + esc(top2 ? top2.hypothesis : '次高')
+      + ' 支持度差距小（<' + (tr.rule || {}).disagree_margin + '）· 存在分歧，建议人工复核';
+  } else {
+    headline = '<b>一致</b> · 倾向 <b>' + esc(jc.root_cause) + '</b>'
+      + (top1 && top1.support ? '（支持度 ' + top1.support + '）' : '')
+      + ' · 规则链亦判为 <b>' + esc(rc.layer || '—') + '</b>';
+  }
+  var action = '<code class="jev-code">' + esc(rc.runbook || '无命令建议') + '</code>';
+
+  // 默认折叠只显示一行人话 + 「查看详细」按钮
   return '<div class="jev">'
+    + '<div class="jev-summary" style="padding:8px 10px;background:var(--bg-2);border:1px solid var(--bd);border-radius:8px">'
+    + stateBadge(v.state)
+    + ' ' + headline
+    + (action ? '<div style="margin-top:6px;color:var(--muted);font-size:11px">下一步：</div>' + action : '')
+    + '</div>'
+    + '<details class="jev-details" style="margin-top:8px"><summary style="cursor:pointer;color:var(--muted);font-size:11px">查看详细（候选证据 / 逐假设 / 阈值）</summary>'
+    + '<div style="padding:6px 0">' + jevDetailed(tr) + '</div></details>'
+    + '</div>';
+}
+
+function jevDetailed(tr) {
+  const v = tr.verdict || {}, rc = v.rule_conclusion || {}, jc = v.jev_conclusion || {};
+  const evRows = (tr.evidence || []).map(function(e) {
+    return '<div style="font-size:12px;padding:2px 0"><span class="badge b-off">'
+      + esc(e.id) + '</span> <span style="color:var(--fg-2)">' + esc(e.text) + '</span></div>';
+  }).join('') || '<div style="color:var(--faint)">没有候选证据（证据池由代码切分）</div>';
+  const jRows = (tr.judgments || []).map(function(j) {
+    return '<div style="font-size:12px;padding:2px 0"><b>' + esc(j.hypothesis)
+      + '</b> 支持度 <b>' + j.support + '</b> · 置信度 <b>' + j.confidence + '</b></div>';
+  }).join('') || '<div style="color:var(--faint)">判据没有给出有效判断</div>';
+  return ''
     + '<div class="jev-row"><div class="jev-col"><div class="jev-lbl">规则结论（确定性）</div>'
     + '<div><span class="badge b-ok">' + esc(rc.layer || '—') + '</span> '
-    + esc(rc.advice || '') + '</div>'
-    + (rc.runbook ? '<code class="jev-code">' + esc(rc.runbook) + '</code>' : '') + '</div>'
+    + esc(rc.advice || '') + '</div></div>'
     + '<div class="jev-col"><div class="jev-lbl">模型判断（概率 · 不覆盖规则结论）</div>'
-    + '<div><span class="badge ' + stateCls + '">' + esc(v.state || '—') + '</span> '
-    + (jc.root_cause ? '<b>倾向 ' + esc(jc.root_cause) + '</b>' : '')
+    + '<div><span class="badge ' + (v.state === '一致' ? 'b-ok' : v.state === '存在分歧' ? 'b-warn' : 'b-off') + '">'
+    + esc(v.state || '—') + '</span> '
+    + (jc.root_cause ? '<b>倾向 ' + esc(jc.root_cause) + '</b>' : '无')
     + '</div><div style="color:var(--faint);font-size:11px">' + esc(v.note || '') + '</div></div></div>'
     + '<div class="jev-lbl">候选证据（E 编号由代码切分，模型只能引用池内 id）</div>' + evRows
     + '<div class="jev-lbl">逐假设独立判断（只回 support / confidence）</div>' + jRows
     + (tr.rejected && tr.rejected.length
       ? '<div class="jev-lbl" style="color:var(--warn-fg)">被拒判断（幻觉闸）</div>'
-        + tr.rejected.map(x => '<div style="font-size:11px;color:var(--warn-fg)">· ' + esc(x) + '</div>').join('')
+        + tr.rejected.map(function(x) { return '<div style="font-size:11px;color:var(--warn-fg)">· ' + esc(x) + '</div>'; }).join('')
       : '')
     + '<div style="color:var(--faint);font-size:11px;margin-top:6px">'
     + '判据：' + esc(tr.judge) + ' · 阈值在代码里（weak=' + (tr.rule || {}).weak_support
     + '，分歧=' + (tr.rule || {}).disagree_margin + '）· 模型可覆盖规则结论：'
     + ((tr.rule || {}).model_can_override_rule ? '是' : '否')
-    + ' · 判断耗时 ' + (tr.total_ms || 0) + ' ms</div></div>';
+    + ' · 判断耗时 ' + (tr.total_ms || 0) + ' ms</div>';
+}
+
+function jevHtml(tr) {
+  if (!tr) return '<div style="color:var(--faint)">该事件还没有 JEV 判断</div>';
+  return jevHuman(tr);
 }
 
 /* 事件详情：时间线 / 影响范围 / 指标曲线 / 确认备注 */
@@ -819,7 +923,7 @@ window.eventModal = async (iid) => {
     + '<div class="sub" style="margin:14px 0 4px">时间线</div><div>' + tl + '</div>'
     + '<div class="sub" style="margin:14px 0 4px">影响范围（同期异常）</div>' + blast
     + evExtraBlocks(d)
-    + '<details class="ev-x" id="ev-x-jev"><summary>JEV 故障判断（规则结论 vs 模型判断）'
+    + '<details class="ev-x" id="ev-x-jev"><summary>JEV 故障判断（人话翻译 + 详细）'
       + ' <button class="btn sm" id="ev-jev-run" style="margin-left:8px">跑一次 JEV 判断</button></summary>'
       + '<div id="ev-jev-body"><div style="color:var(--faint)">点「跑一次 JEV 判断」开始</div></div></details>'
     + '<div class="form-row" style="align-items:flex-start;margin-top:14px"><label>确认/备注</label>'

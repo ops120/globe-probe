@@ -27,14 +27,17 @@ async function renderTasks() {
       <td>${t.enabled ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-warn">停用</span>'}</td>
       <td><button class="btn sm" onclick="editTask('${t.id}')">编辑</button>
       <button class="btn sm ${t.enabled ? 'ghost' : ''}" onclick="toggleTask('${t.id}',${t.enabled ? 0 : 1})">${t.enabled ? '停用' : '启用'}</button>
-      <button class="btn sm danger" onclick="delTask('${t.id}','${esc(t.name)}')">删除</button></td></tr>`).join('') + '</tbody>';
+      <button class="btn sm danger" onclick="delTask('${t.id}')">删除</button></td></tr>`).join('') + '</tbody>';
 }
 window.editTask = id => { const t = state.tasks.find(x => x.id === id); if (t) taskModal(t); };
 window.toggleTask = async (id, en) => {
   try { await api(`/api/tasks/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: en }) }); toast('已更新，节点将在 15s 内生效'); renderTasks(); }
   catch (e) { toast('失败: ' + e.message); }
 };
-window.delTask = async (id, name) => {
+/* 任务名是外部输入（建任务时自由填写），不拼进内联 onclick 的 JS 字符串——按钮只传 id */
+window.delTask = async (id) => {
+  const t = state.tasks.find(x => x.id === id);
+  const name = t ? t.name : id;
   if (!confirm(`确认删除任务「${name}」？该操作不可恢复。`)) return;
   try { await api(`/api/tasks/${id}`, { method: 'DELETE' }); toast('已删除'); renderTasks(); }
   catch (e) { toast('失败: ' + e.message); }

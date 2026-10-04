@@ -27,14 +27,45 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 
+from ..config import Config
+
+log = logging.getLogger("gpm.report")
+
 DAY = 86400
+# —— BUCKETS 由 cfg.report[*] 提供；保留模块级同名元组供 tests / api_web.py 直接读取。
+# 默认值与项目既有约定一致（聚合桶白名单），运行期 init(cfg) 会覆盖（暂仅保留兼容壳）。
 BUCKETS = ("1m", "5m", "1h", "1d")
 # list_incidents 没有时间过滤参数，只能按「最近 N 条」扫描后在内存里按窗口裁剪。
 _INCIDENT_SCAN_LIMIT = 500
 
-__all__ = ["sla", "daily_series", "digest_text", "DAY", "BUCKETS"]
+# —— FLAP_* 由 cfg.report.* 提供；保留模块级同名常量供旧调用按属性名读取。
+FLAP_MIN_COUNT = 3
+FLAP_WINDOW_SECONDS = 1800
+
+_cfg: Config | None = None
+
+
+def init(cfg) -> None:
+    """由 app 在启动时注入 cfg；同步 FLAP_MIN_COUNT / FLAP_WINDOW_SECONDS 到 cfg.report.*。
+
+    BUCKETS 是聚合桶白名单，当前保持模块级常量（项目硬约定，未在 cfg 中暴露）。
+    """
+    global _cfg, FLAP_MIN_COUNT, FLAP_WINDOW_SECONDS
+    _cfg = cfg
+    try:
+        FLAP_MIN_COUNT = int(cfg.report.get("flap_min_count", FLAP_MIN_COUNT) or FLAP_MIN_COUNT)
+    except Exception:
+        pass
+    try:
+        FLAP_WINDOW_SECONDS = int(cfg.report.get("flap_window_seconds", FLAP_WINDOW_SECONDS) or FLAP_WINDOW_SECONDS)
+    except Exception:
+        pass
+
+__all__ = ["sla", "daily_series", "digest_text", "DAY", "BUCKETS",
+           "FLAP_MIN_COUNT", "FLAP_WINDOW_SECONDS", "init"]
 
 
 # ---------------------------------------------------------------- 通用工具
@@ -136,7 +167,10 @@ def _read_window(storage, task_id: str, t_from: int, t_to: int, bucket: str):
 def _streams(storage, task_id: str) -> int:
     try:
         return len(storage.result_streams(task_id) or [])
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        # 存储故障伪装成「该任务零流」违反本模块红线（无数据给 None 绝不给 0）：
+        # 至少把原因留下，别让 SLA 页看起来像任务自己没流
+        log.warning("result_streams(%s) 读取失败，SLA 报表按 0 流展示: %s", task_id, e)
         return 0
 
 
@@ -146,7 +180,9 @@ def _node_avail(storage, node_id: str, t_from: int, task_ids, t_to: int = 0) -> 
         r = storage.node_avail(node_id, t_from, task_ids, t_to)
     except TypeError:            # 兼容没有 t_to 的旧实现
         r = storage.node_avail(node_id, t_from, task_ids)
-    except Exception:
+    except Exception as e:  # noqa: BLE001
+        # 同 _streams：存储故障不能伪装成「该节点零样本」还不留痕迹
+        log.warning("node_avail(%s) 读取失败，SLA 报表按 0 样本展示: %s", node_id, e)
         r = None
     if not r:
         return {"count": 0, "ok": 0}
@@ -209,8 +245,7 @@ def _collect_incidents(storage, t_from: int, t_to: int,
 # ---------------------------------------------------------------- 事件折叠
 
 # 抖动判定：同一目标在这么长的窗口内出现这么多次，就标记为抖动（仍然全部保留，可展开）
-FLAP_MIN_COUNT = 3
-FLAP_WINDOW_SECONDS = 1800
+# FLAP_MIN_COUNT / FLAP_WINDOW_SECONDS 见模块顶部定义（可由 cfg.report.* 覆盖）。
 
 
 def _group_incidents(items: list[dict]) -> list[dict]:

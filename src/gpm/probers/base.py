@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from ..common.util import IS_WINDOWS, run_cmd, ToolMissing, ToolTimeout
+from ..common.util import IS_WINDOWS
 
 
 def make_result(ts: int, status: str, error_class: str = "", error: str = "",

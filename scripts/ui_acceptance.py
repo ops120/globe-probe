@@ -624,6 +624,45 @@ def main() -> int:
         ck.ok(("任务" in au_txt) or ("告警" in au_txt) or ("节点" in au_txt), "审计表显示中文动作")
         shot("alerts-audit")
 
+        # —— 第九期：导入导出（导出按钮可见性 + 后端导出接口契约）——
+        print("→ 导入导出（第九期）")
+        # 按钮「存在且可见」必须切到对应子页再查（.hidden 切换语义，复用上面的子页模式）
+        page.click('#al-subtabs button[data-sub="events"]')
+        page.wait_for_timeout(400)
+        for _bid, _lbl in (("ev-export", "导出事件 CSV"), ("al-export", "导出告警 CSV")):
+            ck.ok(page.locator("#" + _bid).count() == 1 and page.locator("#" + _bid).is_visible(),
+                  f"事件与告警子页有「{_lbl}」按钮（#{_bid}）且可见")
+        page.click('#al-subtabs button[data-sub="external"]')
+        page.wait_for_timeout(400)
+        ck.ok(page.locator("#ext-export").count() == 1 and page.locator("#ext-export").is_visible(),
+              "第三方告警子页有「导出 CSV」按钮（#ext-export）且可见")
+        page.click('#al-subtabs button[data-sub="notify"]')
+        page.wait_for_timeout(400)
+        for _bid, _lbl in (("cfg-backup", "配置备份"), ("cfg-import", "导入配置")):
+            ck.ok(page.locator("#" + _bid).count() == 1 and page.locator("#" + _bid).is_visible(),
+                  f"通知配置子页有「{_lbl}」按钮（#{_bid}）且可见")
+        ck.ok(page.locator("#cfg-import-file").count() == 1 and page.locator("#cfg-import-file").is_hidden(),
+              "导入配置的隐藏文件选择框（#cfg-import-file）存在")
+        # 后端导出接口契约：与「未配置 Token 时拒绝接收」同款做法，Python 侧直发，
+        # 不经过浏览器 fetch——避免下载响应/异常污染控制台与 4xx 断言。
+        # CSV 必须以 UTF-8 BOM 开头（Excel 打开中文不乱码），配置备份必须是 gpm-config-backup JSON。
+        for _ep, _kind in (("/api/export/incidents", "csv"), ("/api/export/alerts", "csv"),
+                           ("/api/export/external_alerts", "csv"), ("/api/export/config", "json")):
+            try:
+                with urllib.request.urlopen(args.base + _ep, timeout=10) as _r:
+                    _body = _r.read()
+                if _kind == "csv":
+                    ck.ok(_r.status == 200 and _body[:3] == b"\xef\xbb\xbf",
+                          f"{_ep} 返回 200 且 CSV 以 UTF-8 BOM 开头")
+                else:
+                    _bak = json.loads(_body.decode("utf-8"))
+                    ck.ok(_r.status == 200 and _bak.get("kind") == "gpm-config-backup"
+                          and all(isinstance(_bak.get(k), list)
+                                  for k in ("tasks", "groups", "channels", "rules", "windows")),
+                          f"{_ep} 返回 200 且配置备份 kind=gpm-config-backup（五段齐全）")
+            except Exception as _e:  # noqa: BLE001 - 接口不可达/格式错都要如实报失败
+                ck.ok(False, f"{_ep} 导出契约失败：{_e!r}")
+
         # —— 回到事件与告警子页：事件详情弹窗（含新增诊断块）——
         page.click('#al-subtabs button[data-sub="events"]')
         page.wait_for_timeout(600)
@@ -661,20 +700,34 @@ def main() -> int:
         ck.ok(page.locator("#ev-ack").count() == 1, "事件详情有「确认并保存备注」入口")
         ck.ok(all(page.locator("#ev-x-" + b).count() == 1 for b in ("changes", "dnsc", "scope")),
               "事件详情含 同期变更 / DNS 答案变更 / 范围矩阵 三个新折叠块")
-        # 第七期 36/37：JEV 判断块 —— 规则结论与模型判断**分栏**，模型永不覆盖规则结论
+        # 第七期：JEV 默认折叠一行人话，展开可见候选证据 / 逐假设 / 阈值元数据。
+        # JEV 本身只出类型化判断（support/confidence/引用 id）；人话翻译是前端代码侧模板。
         ck.ok(page.locator("#ev-x-jev").count() == 1, "事件详情含 JEV 故障判断块")
         ck.ok(page.locator("#ev-jev-run").count() == 1, "有「跑一次 JEV 判断」入口")
         page.click("#ev-jev-run")
         page.wait_for_timeout(2500)
-        _jev_html = page.evaluate("() => (document.getElementById('ev-jev-body')||{}).innerHTML || ''")
-        ck.ok("规则结论（确定性）" in _jev_html, "JEV 显示规则结论（确定性）")
-        ck.ok("模型判断（概率 · 不覆盖规则结论）" in _jev_html,
-              "JEV 显示模型判断，且标注不覆盖规则结论")
-        ck.ok("候选证据" in _jev_html and "E1" in _jev_html,
-              "JEV 显示代码切分的候选证据（E 编号）")
-        ck.ok("逐假设独立判断" in _jev_html, "JEV 显示逐假设独立判断（support/confidence）")
-        ck.ok("模型可覆盖规则结论：否" in _jev_html,
-              "轨迹明确标注模型不可覆盖规则结论")
+        # 默认折叠下：人话翻译 + 下一步命令
+        _summary_html = page.evaluate(
+            "() => (document.querySelector('.jev-summary')||{}).innerHTML || ''")
+        _state_hit = next((s for s in ("一致", "存在分歧", "依据薄弱") if s in _summary_html), None)
+        ck.ok(_state_hit is not None,
+              "JEV 人话翻译含一致性三态之一（%s）" % _state_hit)
+        ck.ok("下一步：" in _summary_html, "JEV 人话翻译给出「下一步」")
+        ck.ok('class="jev-code"' in _summary_html or "jev-code" in _summary_html,
+              "JEV 人话翻译里含可粘贴命令（runbook）")
+        # 展开详细可见结构化 JEV 数据（候选证据 / 逐假设 / 阈值）
+        page.evaluate("() => { const d=document.querySelector('.jev-details'); if(d) d.open=true; }")
+        page.wait_for_timeout(400)
+        _detail_html = page.evaluate("() => (document.querySelector('.jev-details')||{}).innerHTML || ''")
+        ck.ok("规则结论（确定性）" in _detail_html, "JEV 详细显示规则结论（确定性）")
+        ck.ok("模型判断（概率 · 不覆盖规则结论）" in _detail_html,
+              "JEV 详细显示模型判断，且标注不覆盖规则结论")
+        ck.ok("候选证据" in _detail_html and "E1" in _detail_html,
+              "JEV 详细显示代码切分的候选证据（E 编号）")
+        ck.ok("逐假设独立判断" in _detail_html, "JEV 详细显示逐假设独立判断（support/confidence）")
+        ck.ok("模型可覆盖规则结论：否" in _detail_html,
+              "JEV 详细明确标注模型不可覆盖规则结论")
+        # 接口契约与三态
         _jev_api = page.evaluate(
             "async (iid) => await (await fetch('/api/jev/' + iid)).json()", m_iid.group(1))
         ck.ok(_jev_api["rule"]["model_can_override_rule"] is False,

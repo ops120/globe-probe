@@ -15,7 +15,9 @@ const state = {
 function fmtTS(ts) { const d = new Date(ts * 1000); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`; }
 function fmtHM(ts) { const d = new Date(ts * 1000); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; }
 function fmtMDHM(ts) { const d = new Date(ts * 1000); return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')} ${fmtHM(ts)}`; }
-function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+/* 转义覆盖 & < > " '：单引号必须转义——名字会被拼进 onclick='…' 的单引号
+ * JS 字符串里（如 delTask('${esc(t.name)}')），漏掉它既是语法破坏也是注入口。 */
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 /* 相对时间：值班排障时「多久之前」比绝对时间戳有用得多——判断一张卡还可不可信，
  * 第一眼看的就是「最后一次样本是几分钟前」（见 .docs/ONCALL_OPTIMIZATION_2.md）。 */
 function fmtAgo(ts) {

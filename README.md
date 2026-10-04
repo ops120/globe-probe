@@ -200,12 +200,14 @@ docker run -d --name gpm-agent-node --add-host=host.docker.internal:host-gateway
 
 0. **静态检查**（与 CI 同一命令：只查语法错误/未定义名/无效转义这类致命问题）
    ```bash
-   pip install ruff
+   pip install ruff==0.16.9
    ruff check src/ --select E9,F63,F7,F82 --ignore E402
+   python -m mypy src/gpm                # 版本 pin 见 ci.yml（零禁用项）
+   for f in src/gpm/webui/static/gpm-*.js; do node --check "$f"; done   # 前端语法门
    ```
 1. **单元 + 集成测试**
    ```bash
-   python -m pytest tests/ -q          # 105 passed
+   python -m pytest tests/ -q            # 用例数随版本增长，以实际输出为准
    ```
 2. **端到端真实数据实测**（独立端口 8621 + 独立库，真实跑 ping/curl/mtr）
    ```bash
@@ -329,7 +331,9 @@ IDC 内网段（如 `10.10.10.0/24` 在上海）直接在全球地图页「IP �
 - **mtr 仅 Linux**：Windows 节点自动降级 `tracert`（每跳仅 3 探针，丢包率粒度比 mtr 粗）
 - **代理 TUN / 企业 NAT 环境**：UDP53 可能被劫持返回 fake-ip —— 解析器会自动升级 DoH；主机名 + ICMP 场景建议给任务指定 DNS 线路
 - **历史对比需要历史**：不足 24h 时「昨日同期」无数据，页面会用自适应窗口的「前一时段」替代并说明原因
-- **未做**：告警通知（Webhook/邮件/钉钉）、多租户、GeoIP 离线库（当前用在线查询 + 自定义网段）
+- **写口鉴权**：`server.admin_token` 未配置时，写接口仅在环回监听（127.0.0.1 等）放行；非环回监听一律 403（安全基线）。读接口维持内网信任模型
+- **探测目标安全基线**：链路本地/云元数据地址（169.254.0.0/16、fe80::/10、0.0.0.0/8）不作为服务端外呼目标；域名解析发生在探测时刻，DNS rebinding 不在防护范围
+- **未做**：多租户、GeoIP 离线库（当前用在线查询 + 自定义网段）、第三方 webhook 的官方签名校验（当前共享 Token + 限流 + 落库脱敏，代码内已如实声明）
 - **Linux 实机 systemd**：仅在容器内用 shim 验证过单元渲染，上生产前请在目标发行版抽样确认（部署细节见本地 `.docs/DEPLOY.md`，不入库）
 
 ## 许可证

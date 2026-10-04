@@ -1,10 +1,17 @@
 """Agent API：注册（幂等）、心跳+配置同步、批量结果上报。"""
 from __future__ import annotations
 
+import secrets
+
 from fastapi import APIRouter, HTTPException, Request
 
 from ..common.models import HeartbeatIn, RegisterIn, ResultsIn
 from ..common.util import now, sha256
+
+
+def _token_eq(a: str, b: str) -> bool:
+    """常量时间比较：节点凭据本身就是 sha256 哈希，逐字节计时恢复哈希=直接冒充节点。"""
+    return secrets.compare_digest(a.encode(), b.encode())
 
 
 def _match_token(app_state, raw: str) -> tuple[bool, str]:
@@ -18,7 +25,7 @@ def _match_token(app_state, raw: str) -> tuple[bool, str]:
     if row:
         s.token_touch(row["id"], now())
         return True, row["id"]
-    if cfg_token and raw == cfg_token:
+    if cfg_token and _token_eq(raw, cfg_token):
         return True, ""
     return False, ""
 
@@ -57,7 +64,7 @@ def setup_router(app_state) -> APIRouter:
     @router.post("/sync")
     def sync(body: HeartbeatIn, request: Request):
         n = s.node_by_id(body.node_id)
-        if not n or n["token_hash"] != body.token:
+        if not n or not _token_eq(n["token_hash"], body.token):
             raise HTTPException(401, "节点未注册或凭据失效")
         if not _node_allowed(s, n):
             raise HTTPException(401, "该节点使用的注册 Token 已被吊销，请用新 Token 重新注册")
@@ -74,7 +81,7 @@ def setup_router(app_state) -> APIRouter:
     @router.post("/results")
     def results(body: ResultsIn):
         n = s.node_by_id(body.node_id)
-        if not n or n["token_hash"] != body.token:
+        if not n or not _token_eq(n["token_hash"], body.token):
             raise HTTPException(401, "节点未注册或凭据失效")
         if not _node_allowed(s, n):
             raise HTTPException(401, "该节点使用的注册 Token 已被吊销")

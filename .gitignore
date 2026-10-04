@@ -10,6 +10,9 @@ e2e-data/
 # 本地文档目录（架构/数据模型/算法/部署/进展记录等仅本地保留，不入库）
 .docs/
 
+# 本地开发脚本（临时回归脚本/浏览器实测等，仅本机）
+.dev/
+
 # 文档类文件不入库（Word/PDF/PPT 等），需要分享时走 release 附件
 *.doc
 *.docx
@@ -25,6 +28,11 @@ e2e-data/
 *.db-wal
 *.db-shm
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+dist/
+build/
 .env
 config.yaml
-.coverage

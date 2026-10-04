@@ -341,7 +341,9 @@ async function renderMtr(t) {
     chart('chart-mtrhm', {
       grid: { left: 110, right: 14, top: 14, bottom: 40 },
       tooltip: Object.assign({}, TIP, {
-        formatter: p => ylab[p.value[1]] + '<br>' + xs[p.value[0]] + '<br>丢包率：<b>' + p.value[2] + '%</b>',
+        // 节点名是 agent 注册接口写入的外部输入：tooltip 是 HTML 上下文必须转义
+        // （y 轴类目是纯文本渲染，直接用原值，转义反而会把实体显示出来）
+        formatter: p => esc(ylab[p.value[1]]) + '<br>' + xs[p.value[0]] + '<br>丢包率：<b>' + p.value[2] + '%</b>',
       }),
       xAxis: Object.assign({}, AXC, { type: 'category', data: xs, axisLabel: { color: C('--muted'), fontSize: 10, interval: 0, rotate: 30 } }),
       yAxis: Object.assign({}, AXC, { type: 'category', data: ylab, axisLabel: { color: C('--chart-label'), fontSize: 11, interval: 0 } }),

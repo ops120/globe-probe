@@ -7,7 +7,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .common.util import IS_WINDOWS, now, run_cmd
+from .common.util import now, run_cmd
 
 
 def setup_logging(cfg_logging: dict, verbose: bool):

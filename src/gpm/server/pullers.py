@@ -18,6 +18,7 @@ import time
 import urllib.error
 import urllib.request
 
+from ..config import Config
 from . import hooks
 
 
@@ -25,9 +26,33 @@ class NotSupported(Exception):
     """该来源的 API 拉取未实现（需要官方签名 / OAuth，本期不做）。"""
 
 
+# —— 以下阈值由 cfg.pull.* 提供；保留模块级同名常量供外部（包括 tests/ 与
+# api_web.py）按属性名直接读取。默认值与 src/gpm/config.py DEFAULTS["pull"] 对齐；
+# 运行期 init(cfg) 会覆盖。
 DEFAULT_INTERVAL = 300          # 默认轮询周期（秒）
 BACKOFF_BASE = 300              # 失败退避基数
 BACKOFF_MAX = 3600              # 退避上限
+
+_cfg: Config | None = None
+
+
+def init(cfg) -> None:
+    """由 app 在启动时注入 cfg；之后 DEFAULT_INTERVAL / BACKOFF_BASE / BACKOFF_MAX
+    同步到 cfg.pull.*。"""
+    global _cfg, DEFAULT_INTERVAL, BACKOFF_BASE, BACKOFF_MAX
+    _cfg = cfg
+    try:
+        DEFAULT_INTERVAL = int(cfg.pull.get("default_interval_seconds", DEFAULT_INTERVAL) or DEFAULT_INTERVAL)
+    except Exception:
+        pass
+    try:
+        BACKOFF_BASE = int(cfg.pull.get("backoff_base_seconds", BACKOFF_BASE) or BACKOFF_BASE)
+    except Exception:
+        pass
+    try:
+        BACKOFF_MAX = int(cfg.pull.get("backoff_max_seconds", BACKOFF_MAX) or BACKOFF_MAX)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------- 适配器
@@ -181,7 +206,7 @@ def poll_source(storage, source: str, ts: int | None = None, fetch=None,
         updated += 0 if is_new else 1
         rec = storage.external_alert_get(aid)
         if rec:
-            from .api_web import _correlate_external      # 延迟导入，避免模块级循环依赖
+            from .api_web import _correlate_external  # 延迟导入，避免模块级循环依赖
             _correlate_external(storage, rec, now_s)
     storage.meta_set("pull_%s_fail" % source, "0")
     storage.meta_set("pull_%s_last_ok" % source, str(now_s))

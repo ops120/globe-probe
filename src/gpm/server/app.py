@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from .. import __version__
-from ..common.util import now
+from ..common.util import listen_is_loopback, now
 from . import jsonlog
 from .api_agent import setup_router as agent_router
 from .api_web import setup_router as web_router
@@ -88,13 +88,31 @@ def create_app(cfg, storage: Storage | None = None):
             log.debug("sd_notify 未启用: %s", e)
         jsonlog.setup()   # 见 create_app 顶部说明：覆盖 uvicorn.run 重置过的 handler
         log.info("服务端启动: %s (db=%s)", cfg.server["listen"], cfg.server["database"])
+        # 写口鉴权形态提示：api_web.check_write 对「未配 token + 非环回监听」已 fail-closed，
+        # 这里把原因讲清楚，避免运维以为是服务坏了
+        try:
+            if not (cfg.server.get("admin_token") or "") and not listen_is_loopback(
+                    str(cfg.server.get("listen") or "")):
+                log.warning("server.admin_token 未配置且监听在非环回地址：所有写接口返回 403。"
+                            "配置 server.admin_token（或环境变量 GPM_ADMIN_TOKEN）后重启开放。")
+        except Exception:  # noqa: BLE001 - 提示失败不影响启动
+            pass
         yield
         stop.set()
         for t in tasks:
             t.cancel()
         log.info("服务端停止")
 
-    app = FastAPI(title="gpm · 全球拨测监控平台", version="0.1.0", lifespan=lifespan)
+    # 把 cfg 注入到所有持有「模块级 _cfg」的组件。它们启动时就读 cfg.*，
+    # 之后所有函数调用都从 _cfg 拿新值；不依赖入参下传，调用方零改动。
+    from . import alerting, api_web, eventview, hooks, jev, metrics, notify, pullers, report
+    for _mod in (hooks, pullers, jev, alerting, notify, report, metrics, api_web):
+        if hasattr(_mod, "init"):
+            _mod.init(cfg)
+    if hasattr(eventview, "init_cfg"):
+        eventview.init_cfg(cfg)
+
+    app = FastAPI(title="gpm · 全球拨测监控平台", version=__version__, lifespan=lifespan)
     app.include_router(agent_router(state))
     app.include_router(web_router(state))
 
@@ -263,7 +281,8 @@ async def _pull_loop(state: dict, stop: asyncio.Event):
         try:
             from . import pullers
             for src in pullers.due_sources(s, now()):
-                r = pullers.poll_source(s, src)
+                # poll_source 是阻塞网络调用（HTTP 拉取）→ 丢线程池，别卡事件循环
+                r = await asyncio.to_thread(pullers.poll_source, s, src)
                 if r.get("error"):
                     log.warning("拉取 %s 失败：%s", src, r["error"])
                 elif r.get("fetched"):
@@ -308,7 +327,9 @@ async def _alert_loop(state: dict, stop: asyncio.Event):
     while not stop.is_set():
         try:
             from . import alerting
-            events = alerting.evaluate(s, now())
+            # evaluate 内部含告警派发（notify.send 是阻塞网络调用，SMTP/HTTP 可达数十秒）
+            # → 丢线程池。直接跑会停摆整个事件循环（/api/health 一并假死），假死复发路径。
+            events = await asyncio.to_thread(alerting.evaluate, s, now())
             if events:
                 log.warning("告警评估产生 %d 条事件（firing/remind/resolved）", len(events))
         except Exception as e:  # noqa
@@ -347,7 +368,8 @@ async def _retry_loop(state: dict, stop: asyncio.Event):
     while not stop.is_set():
         try:
             from . import alerting
-            done = alerting.retry_pending(s, now(), limit=10)
+            # 重投内部走 notify.send（阻塞网络调用）→ 丢线程池，别卡事件循环
+            done = await asyncio.to_thread(alerting.retry_pending, s, now(), 10)
             if done:
                 log.info("通知重投：%d 条（成功 %d）", len(done),
                          sum(1 for d in done if d["status"] == "done"))
@@ -371,7 +393,8 @@ async def _digest_loop(state: dict, stop: asyncio.Event):
                 if now() - last >= max(1, hours) * 3600:
                     from . import alerting
                     ids = [c for c in (s.setting_get("digest_channel_ids", "") or "").split(",") if c]
-                    r = alerting.push_digest(s, hours, ids, now())
+                    # push_digest 汇总报表并对每渠道做阻塞网络发送 → 丢线程池
+                    r = await asyncio.to_thread(alerting.push_digest, s, hours, ids, now())
                     log.warning("巡检报告已推送：%s（渠道 %d/%d 成功）", r["title"], r["ok"], r["channels"])
         except Exception as e:  # noqa: BLE001
             log.error("巡检报告推送失败: %s", e)
@@ -397,7 +420,8 @@ async def _agg_loop(state: dict, stop: asyncio.Event):
                     continue
                 # 重算窗口向前多覆盖一个桶（迟到数据窗口）
                 b_from = max(0, b_from - step)
-                s.agg_recompute(bucket, b_from, complete_to + step)
+                # 聚合重算可能整段读 probe_results（停机数天后追赶）→ 丢线程池
+                await asyncio.to_thread(s.agg_recompute, bucket, b_from, complete_to + step)
                 s.meta_set(f"agg_cursor_{bucket}", str(complete_to))
         except Exception as e:  # noqa
             log.error("聚合 sweep 失败: %s", e)
@@ -412,13 +436,17 @@ async def _retention_loop(state: dict, stop: asyncio.Event):
     srv = state["cfg"].server
     while not stop.is_set():
         try:
-            n = s.retention(srv.get("retention_raw_days", 30), srv.get("retention_1m_days", 90),
-                            srv.get("retention_5m_days", 180), srv.get("retention_1h_days", 730),
-                            srv.get("retention_hb_days", 7), now(),
-                            alerts_days=srv.get("retention_alerts_days", 30),
-                            audit_days=srv.get("retention_audit_days", 30),
-                            outbox_days=srv.get("retention_outbox_days", 7),
-                            incidents_days=srv.get("retention_incidents_days", 180),
+            # retention 是持全局锁的多表大批量 DELETE（首次清 30 天原始数据可达分钟级）
+            # → 丢线程池，别把事件循环一起拖死
+            n = await asyncio.to_thread(
+                s.retention,
+                srv.get("retention_raw_days", 30), srv.get("retention_1m_days", 90),
+                srv.get("retention_5m_days", 180), srv.get("retention_1h_days", 730),
+                srv.get("retention_hb_days", 7), now(),
+                alerts_days=srv.get("retention_alerts_days", 30),
+                audit_days=srv.get("retention_audit_days", 30),
+                outbox_days=srv.get("retention_outbox_days", 7),
+                incidents_days=srv.get("retention_incidents_days", 180),
                 external_days=srv.get("retention_external_days", 30))
             s.meta_set("last_retention", str(now()))
             if any(n.values()):
