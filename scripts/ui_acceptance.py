@@ -352,7 +352,23 @@ def main() -> int:
               "接口报告覆盖度（可比 %d/%d 格，本时段 %d 格 · 对比期 %d 格）"
               % (_cov["overlap"], _cov["total"], _cov["today"], _cov["other"]))
         _sum = page.text_content("#cmp-summary") or ""
-        ck.ok("Δ" in _sum and "可比" in _sum, "页面给出时段结论与覆盖度（%s）" % _sum[:60])
+        # 当前生效模式的覆盖度（自动切换到「前一时段」后与固定 mode=yesterday 不同）；
+        # 摘要与曲线点数的断言必须按**本时段是否真有数据**分档 —— 本时段 0 格时
+        # 页面按设计把摘要留空、原因写进标题（gpm-page-compare.js: hasToday ? … : ''），
+        # 历史实例上「首个任务恰为停用任务」就会命中该态，硬断言会假红。
+        _active = page.evaluate(
+            "() => { const b = document.querySelector('#cmp-mode button.active');"
+            " return b && b.dataset ? b.dataset.m : ''; }")
+        _act_cov = page.evaluate(
+            """async (m) => (await (await fetch('/api/compare?task_id=' + state.task
+                + '&mode=' + m + '&metric=avail')).json()).coverage""", _active)
+        _act_ov = (_act_cov or {}).get("overlap", 0)
+        _act_today = (_act_cov or {}).get("today", 0)
+        if _act_today > 0:
+            ck.ok("Δ" in _sum and "可比" in _sum, "页面给出时段结论与覆盖度（%s）" % _sum[:60])
+        else:
+            ck.ok(_sum.strip() == "",
+                  "本时段 0 格有数据 → 摘要按设计留空、原因由标题说明（数据态诚实跳过）")
         ck.ok("仅已完结小时" in t1, "标题写明窗口只取已完结小时")
         # 两条线只在**真有重叠**时才画：修复前无论可比与否都画两条，
         # 于是「各占半轴、一格不重叠」看起来就是「数据不对」。
@@ -365,19 +381,16 @@ def main() -> int:
         # 图表当前模式可能已被**自动切换**（历史 <24h 时切到「前一时段」），所以判断
         # 条数的覆盖度必须取自实际显示的那个模式 —— 拿固定 mode=yesterday 的结果去比，
         # 会在自动切换的实例上得到「页面画 2 条、断言按 0 重叠要求 1 条」的假失败。
-        _active = page.evaluate(
-            "() => { const b = document.querySelector('#cmp-mode button.active');"
-            " return b && b.dataset ? b.dataset.m : ''; }")
-        _act_cov = page.evaluate(
-            """async (m) => (await (await fetch('/api/compare?task_id=' + state.task
-                + '&mode=' + m + '&metric=avail')).json()).coverage""", _active)
-        _act_ov = (_act_cov or {}).get("overlap", 0)
         _expect_lines = 2 if _act_ov > 0 else 1
         ck.ok(len(d["names"]) == _expect_lines,
               "曲线条数与可比性一致（当前模式 %s，重叠 %s 格 → 画 %d 条；"
               "重叠为 0 时不该画两条各占半轴的断线）"
               % (_active, _act_ov, len(d["names"])))
-        ck.ok(any(c > 0 for c in d["counts"]), "至少一条曲线有数据点（%s）" % d["counts"])
+        if _act_today > 0:
+            ck.ok(any(c > 0 for c in d["counts"]), "至少一条曲线有数据点（%s）" % d["counts"])
+        else:
+            ck.ok(all(c == 0 for c in d["counts"]),
+                  "本时段 0 格 → 曲线 0 点属设计（空窗由灰带呈现）（数据态诚实跳过）（%s）" % d["counts"])
         # 末格取值必须与样本数一致：有样本才非空。修复前轴里含尚未聚合的当前小时，
         # 该桶永不写入 → 末格**恒空**，这是「空窗比整窗」的直接来源。
         # 断言用不变量而不是「末格一定有数据」——那个小时本来就可能没有数据。

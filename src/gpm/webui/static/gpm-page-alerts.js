@@ -658,23 +658,88 @@ window.delOutbox = async (id) => {
 };
 $('#ob-refresh').addEventListener('click', () => renderOutbox());
 
+/* 操作审计按天折叠：审计是写操作自动留痕的「只增长」长列表，平铺会把页面无限拉长
+ * （需求：超过 2 屏的同类长列表都应折叠）。折法仿告警历史 al-group/al-oc 行分组：
+ * 每天一个汇总行（日期 + 星期/今天/昨天 + 条数 + 成功/失败计数），点击切换该天明细显隐。
+ * 默认策略保证「刚发生的操作」一定可见（验收断言读最近条目）：今天展开；昨天及更早折叠；
+ * 单天明细超过 AU_DAY_MAX 行（≈2 屏）时即使今天也默认折叠，用户可手动展开或点「展开全部」。
+ * 折叠只改显示：#au-export 导出仍用 state.auditRows 全量行，不受影响。 */
+const AU_DAY_MAX = 40;   // 单天默认展开的明细行上限（40 行 ≈ 2 屏）
+const AU_WD = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+function auDayKey(a) {
+  // 本地日期 YYYY-MM-DD：优先按 ts（unix 秒）转本地时区；ts 缺失时退回服务端格式化好的 time 前缀
+  if (a.ts) {
+    const dt = new Date(a.ts * 1000);
+    return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+  }
+  return String(a.time || '').slice(0, 10);
+}
+function auDayRel(day) {
+  // 相对标签：今天 / 昨天，其余给星期X；解析失败（异常数据）返回空串，汇总行只显示日期
+  const t = new Date(day + 'T00:00:00').getTime();   // 不带时区后缀 → 按本地时区解析
+  if (isNaN(t)) return '';
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0);
+  const diff = Math.round((d0.getTime() - t) / 86400000);
+  if (diff === 0) return '今天';
+  if (diff === 1) return '昨天';
+  return AU_WD[new Date(t).getDay()];
+}
 async function renderAudit() {
   const t = state.auTarget || '';
   const d = await api('/api/audit?limit=100' + (t ? '&target=' + encodeURIComponent(t) : ''));
   state.auditRows = d.items || [];
-  $('#au-sub').textContent = '累计 ' + (d.counts.total || 0) + ' 条 · 近 24h ' + (d.counts.day || 0) + ' 条';
-  $('#au-tbl').innerHTML = '<thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>目标ID</th><th>结果</th><th>来源 IP</th></tr></thead><tbody>'
-    + (state.auditRows.length ? state.auditRows.map(a => '<tr>'
+  $('#au-sub').textContent = '累计 ' + (d.counts.total || 0) + ' 条 · 近 24h ' + (d.counts.day || 0) + ' 条 · 按天折叠（点日期行展开）';
+  if (!state.auditRows.length) {
+    $('#au-tbl').innerHTML = '<thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>目标ID</th><th>结果</th><th>来源 IP</th></tr></thead>'
+      + '<tbody><tr><td colspan="7" style="color:var(--faint)">暂无审计记录（任何写操作都会自动留痕）</td></tr></tbody>';
+    return;
+  }
+  // 分组保持首现顺序：接口按 ts DESC 返回 → 最近的天排在最上面
+  const groups = [], gmap = {};
+  state.auditRows.forEach(a => {
+    const day = auDayKey(a) || '----';
+    let g = gmap[day];
+    if (!g) { g = { day: day, rows: [], ok: 0, fail: 0 }; gmap[day] = g; groups.push(g); }
+    g.rows.push(a);
+    if (a.ok) g.ok += 1; else g.fail += 1;
+  });
+  const todayKey = auDayKey({ ts: Math.floor(Date.now() / 1000) });
+  const body = groups.map(g => {
+    const open = g.day === todayKey && g.rows.length <= AU_DAY_MAX;   // 默认展开：仅今天且不超 2 屏
+    const rel = auDayRel(g.day);
+    const det = g.rows.map(a => '<tr class="au-oc' + (open ? '' : ' hidden') + '" data-d="' + g.day + '">'
       + '<td style="color:var(--muted)">' + esc(a.time || fmtTS(a.ts)) + '</td>'
       + '<td>' + esc(a.who || '') + '</td>'
       + '<td style="color:var(--fg-strong2)">' + esc(a.action || '') + '</td>'
       + '<td style="color:var(--muted)">' + esc(a.target || '') + '</td>'
       + '<td style="color:var(--muted);font-family:Consolas,monospace">' + esc(a.target_id || '—') + '</td>'
-      + '<td>' + (a.ok ? '<span class="badge b-ok">' + a.status + '</span>' : '<span class="badge b-fail">' + (a.status || '—') + '</span>') + '</td>'
-      + '<td style="color:var(--muted)">' + esc(a.ip || '—') + '</td></tr>').join('')
-      : '<tr><td colspan="7" style="color:var(--faint)">暂无审计记录（任何写操作都会自动留痕）</td></tr>')
-    + '</tbody>';
+      + '<td>' + (a.ok ? '<span class="badge b-ok">' + esc(a.status) + '</span>' : '<span class="badge b-fail">' + esc(a.status || '—') + '</span>') + '</td>'
+      + '<td style="color:var(--muted)">' + esc(a.ip || '—') + '</td></tr>').join('');
+    // 汇总行：onclick 只带我们生成的日期字面量（YYYY-MM-DD），不拼用户数据进 JS 串
+    return '<tr class="au-day" style="cursor:pointer" title="点击展开/收起这一天的操作明细" data-d="' + g.day + '"'
+      + ' onclick="toggleAuDay(\'' + g.day + '\')"><td colspan="7"><b>' + esc(g.day) + '</b> '
+      + (rel === '今天' || rel === '昨天'
+        ? '<span class="badge ' + (rel === '今天' ? 'b-ok' : 'b-off') + '">' + rel + '</span>'
+        : '<span style="color:var(--muted)">' + rel + '</span>')
+      + ' <span style="color:var(--muted)">· ' + g.rows.length + ' 条 · 成功 ' + g.ok
+      + (g.fail ? ' · <span class="badge b-fail">失败 ' + g.fail + '</span>' : ' · 失败 0') + '</span>'
+      + ' <span class="au-hint" style="float:right;color:var(--faint)">' + (open ? '▾ 收起' : '▸ 展开') + '</span></td></tr>'
+      + det;
+  }).join('');
+  $('#au-tbl').innerHTML = '<thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>目标ID</th><th>结果</th><th>来源 IP</th></tr></thead><tbody>'
+    + body + '</tbody>';
 }
+window.toggleAuDay = (day) => {
+  // 按天切换明细显隐：该天各行状态一致，以第一行当前状态为准整体翻转，并同步汇总行提示文案
+  let hide = null;
+  $$('#au-tbl tr.au-oc').forEach(tr => {
+    if (tr.dataset.d !== day) return;
+    if (hide === null) hide = !tr.classList.contains('hidden');
+    tr.classList.toggle('hidden', hide);
+  });
+  const hint = $('#au-tbl tr.au-day[data-d="' + day + '"] .au-hint');
+  if (hint) hint.textContent = hide ? '▸ 展开' : '▾ 收起';
+};
 $$('#inc-fold button').forEach(b => b.onclick = () => {
   state.evFold = b.dataset.f === '1';
   if (state.slaData) renderSlaIncidents(state.slaData);   // 纯内存重画，无需兜底
@@ -684,6 +749,16 @@ $$('#au-filter button').forEach(b => b.onclick = () => {
   b.classList.add('active');
   state.auTarget = b.dataset.t;
   rerender('操作审计', renderAudit);
+});
+/* 展开全部/折叠全部：纯 DOM 显隐操作（不重拉数据、不重算默认策略），
+ * 同步汇总行提示文案；只改显示，state.auditRows 与导出不受影响 */
+$('#au-expand').addEventListener('click', () => {
+  $$('#au-tbl tr.au-oc').forEach(tr => tr.classList.remove('hidden'));
+  $$('#au-tbl .au-hint').forEach(s => { s.textContent = '▾ 收起'; });
+});
+$('#au-foldall').addEventListener('click', () => {
+  $$('#au-tbl tr.au-oc').forEach(tr => tr.classList.add('hidden'));
+  $$('#au-tbl .au-hint').forEach(s => { s.textContent = '▸ 展开'; });
 });
 $('#au-export').addEventListener('click', () => {
   const rows = state.auditRows || [];

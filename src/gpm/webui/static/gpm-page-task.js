@@ -353,7 +353,19 @@ async function renderMtr(t) {
   } else if (hm) { hm.clear(); }
   const skips = r.filter(x => x.status === 'skipped')
     .map(x => (x.node_name || x.node_id) + '：' + (x.error_class || 'skipped'));
-  const card = x => {
+  // 并排明细卡收纳：每张卡的表体包 .mtr-body（≤30 跳 × 多列，20 张卡全铺开 ≈300 行太长，
+  // 需求：超过 2 屏的同类长列表都要收纳）。默认只展开「当前选中流」——state.mtrSel 命中的
+  // 那条，没有选中时展开第一条；点通断条带/流 chips 选中某流后 renderMtr 会带着新的
+  // mtrSel 重渲染 → 目标卡自动展开、其余收回。点卡片标题行可手动切换显隐（纯 DOM 操作，
+  // 不重拉数据）。折叠态标题区保留「跳数/丢包摘要」，网格不塌；热力图、逐跳趋势折叠区与
+  // 被跳过流提示（skips）均不受影响。
+  let openIdx = 0;
+  if (state.mtrSel) {
+    const hit = r.findIndex(x => x.node_id === state.mtrSel.node_id
+      && (x.dns || '') === (state.mtrSel.dns || '') && (x.url || '') === (state.mtrSel.url || ''));
+    if (hit >= 0) openIdx = hit;
+  }
+  const card = (x, ci) => {
     const hh = (x.metrics || {}).hops || [];
     const mm = x.metrics || {};
     const pm = { tcp: ' · TCP 模式', udp: ' · UDP 模式' }[(mm.probe_mode || 'icmp')] || '';
@@ -366,19 +378,40 @@ async function renderMtr(t) {
     const note = mm.mode === 'tracert'
       ? 'tracert 每跳 ' + (mm.probes_per_hop || 3) + ' 个探针，丢包率粒度较粗'
       : '路径故障以末跳为准（中间跳丢包多为 ICMP 限速假象）';
-    return '<div class="mtr-card"><h4>' + esc(x.node_name || x.node_id) + ' <span>' +
-      esc(mm.mode === 'tracert' ? 'tracert · 3 探针/跳' : 'mtr · cycles=' + (mm.cycles ?? '–') + pm) +
-      ' · ' + fmtTS(x.ts) + '</span></h4>' + deadNote +
-      '<table class="tbl mtr-tbl">' + MTR_HEAD + '<tbody>' +
-      (hh.length ? hh.map(h => '<tr><td>' + h.hop + '</td><td class="mono" style="font-family:Consolas,monospace;color:var(--mono)">' + esc(h.host) + '</td>' + MTR_ASN(h) +
+    // 折叠时标题区也要能看出这张卡的健康度：跳数 + 最大丢包；无跳数给原因
+    const maxLoss = hh.length ? Math.max(...hh.map(h => h.loss_pct)) : null;
+    const sumTxt = hh.length
+      ? hh.length + ' 跳 · 最大丢包 ' + maxLoss + '%'
+      : '无路径数据（' + esc(x.error_class || '不可用') + '）';
+    const open = ci === openIdx;
+    return '<div class="mtr-card" data-nid="' + esc(x.node_id) + '">'
+      + '<div class="mtr-head" style="cursor:pointer" title="点击展开/收起该流的路由明细">'
+      + '<h4>' + esc(x.node_name || x.node_id) + ' <span>'
+        + esc(mm.mode === 'tracert' ? 'tracert · 3 探针/跳' : 'mtr · cycles=' + (mm.cycles ?? '–') + pm)
+        + ' · ' + fmtTS(x.ts) + '</span></h4>'
+      + '<div style="font-size:11px;color:var(--muted);margin:-2px 0 6px">' + sumTxt
+        + ' <span class="mtr-hint" style="float:right;color:var(--faint)">' + (open ? '▾ 收起' : '▸ 展开') + '</span></div>'
+      + '</div>'
+      + '<div class="mtr-body' + (open ? '' : ' hidden') + '">' + deadNote
+      + '<table class="tbl mtr-tbl">' + MTR_HEAD + '<tbody>'
+      + (hh.length ? hh.map(h => '<tr><td>' + h.hop + '</td><td class="mono" style="font-family:Consolas,monospace;color:var(--mono)">' + esc(h.host) + '</td>' + MTR_ASN(h) +
         '<td style="color:' + (h.loss_pct > 0 ? 'var(--warn-fg)' : 'var(--ok-fg)') + '">' + h.loss_pct + '%</td><td class="num">' + h.snt + '</td>' +
         '<td class="num">' + h.last + '</td><td class="num">' + h.avg + '</td><td class="num">' + h.best + '</td>' +
         '<td class="num">' + h.wrst + '</td><td class="num">' + h.stdev + '</td></tr>').join('')
-        : '<tr><td colspan="10" style="color:var(--muted)">该流无路径数据（' + esc(x.error_class || '不可用') + '）</td></tr>') +
-      '</tbody><tfoot><tr><td colspan="10" style="color:var(--faint);font-size:11px">' + note + '</td></tr></tfoot></table></div>';
+        : '<tr><td colspan="10" style="color:var(--muted)">该流无路径数据（' + esc(x.error_class || '不可用') + '）</td></tr>')
+      + '</tbody><tfoot><tr><td colspan="10" style="color:var(--faint);font-size:11px">' + note + '</td></tr></tfoot></table></div></div>';
   };
   tbl.innerHTML = '<div class="mtr-grid">' + r.map(card).join('') + '</div>' +
     (skips.length ? '<div style="color:var(--faint);font-size:11px;margin-top:6px">被跳过的流：' + esc(skips.join('；')) + '</div>' : '');
+  // 标题行点击切换该卡表体显隐：只翻本卡，不触发重渲染（重渲染会按「选中流」重建默认展开）
+  tbl.querySelectorAll('.mtr-card .mtr-head').forEach(head => {
+    head.onclick = () => {
+      const body = head.parentElement.querySelector('.mtr-body');
+      const nowHidden = body.classList.toggle('hidden');
+      const hint = head.querySelector('.mtr-hint');
+      if (hint) hint.textContent = nowHidden ? '▸ 展开' : '▾ 收起';
+    };
+  });
 }
 
 /* ---------- mtr 逐跳趋势（折叠区，展开才请求；旧版服务端无该接口时给出提示） ---------- */

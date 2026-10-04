@@ -16,6 +16,50 @@ function extSafeUrl(u) {
   return /^https?:\/\//i.test(s) ? s : '';
 }
 
+/* 第三方告警表按天折叠：故障风暴时 /api/external/alerts?limit=200 会打满 200 行平铺，
+ * 把页面拉长好几屏（需求：超过 2 屏的同类长列表都要收纳）。折法照抄「操作审计」的
+ * au-day/au-oc 按天分组范式（gpm-page-alerts.js）：每天一个汇总行（日期 + 今天/昨天/星期X
+ * + 条数 + 告警中/已恢复计数），点击切换该天明细显隐；明细行保留原 8 列结构
+ * （来源/标题/…/「源侧」链接）不动。日期取 received_at || started_at（epoch 秒 → 本地日期）。
+ * 默认策略：今天展开；更早折叠；单天明细超过 EXT_DAY_MAX 行（≈2 屏）时即使今天也默认折叠。
+ * #ext-refresh / 来源筛选重渲染后按最新数据重建分组，默认策略随之重算。 */
+const EXT_DAY_MAX = 40;   // 单天默认展开的明细行上限（40 行 ≈ 2 屏）
+const EXT_WD = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+function extDayKey(x) {
+  const ts = x.received_at || x.started_at || 0;
+  if (!ts) return '';
+  const dt = new Date(ts * 1000);
+  return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+}
+function extDayRel(day) {
+  // 相对标签：今天 / 昨天，其余给星期X；解析失败（异常数据）返回空串，汇总行只显示日期
+  const t = new Date(day + 'T00:00:00').getTime();   // 不带时区后缀 → 按本地时区解析
+  if (isNaN(t)) return '';
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0);
+  const diff = Math.round((d0.getTime() - t) / 86400000);
+  if (diff === 0) return '今天';
+  if (diff === 1) return '昨天';
+  return EXT_WD[new Date(t).getDay()];
+}
+function extRow(x, day, open) {   // 单条明细行：8 列与平铺时期完全一致，仅多出分组用 class/data-d
+  const u = extSafeUrl(x.url);
+  return '<tr class="ext-day-oc' + (open ? '' : ' hidden') + '" data-d="' + day + '">'
+    + '<td><span class="badge b-warn">' + esc(x.source.toUpperCase()) + '</span></td>'
+    + '<td style="color:var(--fg-strong2)">' + esc(x.title || x.source_id) + '</td>'
+    + '<td>' + esc(x.severity || '—') + '</td>'
+    + '<td>' + (x.status === 'resolved' ? '<span class="badge b-ok">已恢复</span>'
+      : '<span class="badge b-fail">告警中</span>') + '</td>'
+    + '<td style="color:var(--muted)">' + (x.started_at ? fmtTS(x.started_at) : '—') + '</td>'
+    + '<td style="color:var(--muted)">' + (x.received_at ? fmtAgo(x.received_at) : '—') + '</td>'
+    + '<td>' + (x.linked_incident
+      ? '<span class="badge b-off" title="已折叠进本地事件 #' + x.linked_incident
+        + ' 的旁证">旁证 #' + x.linked_incident + '</span>'
+      : '<span class="badge b-warn" title="本平台没有对应事件，它会单独进值班总览">未关联</span>')
+    + '</td>'
+    + '<td>' + (u ? '<a class="btn sm ghost" href="' + esc(u)
+      + '" target="_blank" rel="noopener">源侧</a>' : '') + '</td></tr>';
+}
+
 async function renderExternal() {
   const st = await api('/api/external/settings');
   const bySrc = {};
@@ -67,28 +111,46 @@ async function renderExternal() {
         + '>' + esc(s.toUpperCase()) + '</option>').join('');
   }
   const items = d.items || [];
+  // 按天分组，保持首现顺序：接口按最近优先返回 → 最近的天排在最上面
+  const groups = [], gmap = {};
+  items.forEach(x => {
+    const day = extDayKey(x) || '----';
+    let g = gmap[day];
+    if (!g) { g = { day: day, rows: [], firing: 0, resolved: 0 }; gmap[day] = g; groups.push(g); }
+    g.rows.push(x);
+    if (x.status === 'resolved') g.resolved += 1; else g.firing += 1;
+  });
+  const todayKey = extDayKey({ received_at: Math.floor(Date.now() / 1000) });
   $('#ext-tbl').innerHTML = '<thead><tr><th>来源</th><th>标题</th><th>严重度</th><th>状态</th>'
     + '<th>开始</th><th>最近收到</th><th>关联</th><th></th></tr></thead><tbody>'
-    + (items.length ? items.map(x => {
-      const u = extSafeUrl(x.url);
-      return '<tr><td><span class="badge b-warn">' + esc(x.source.toUpperCase()) + '</span></td>'
-        + '<td style="color:var(--fg-strong2)">' + esc(x.title || x.source_id) + '</td>'
-        + '<td>' + esc(x.severity || '—') + '</td>'
-        + '<td>' + (x.status === 'resolved' ? '<span class="badge b-ok">已恢复</span>'
-          : '<span class="badge b-fail">告警中</span>') + '</td>'
-        + '<td style="color:var(--muted)">' + (x.started_at ? fmtTS(x.started_at) : '—') + '</td>'
-        + '<td style="color:var(--muted)">' + (x.received_at ? fmtAgo(x.received_at) : '—') + '</td>'
-        + '<td>' + (x.linked_incident
-          ? '<span class="badge b-off" title="已折叠进本地事件 #' + x.linked_incident
-            + ' 的旁证">旁证 #' + x.linked_incident + '</span>'
-          : '<span class="badge b-warn" title="本平台没有对应事件，它会单独进值班总览">未关联</span>')
-        + '</td>'
-        + '<td>' + (u ? '<a class="btn sm ghost" href="' + esc(u)
-          + '" target="_blank" rel="noopener">源侧</a>' : '') + '</td></tr>';
+    + (items.length ? groups.map(g => {
+      const open = g.day === todayKey && g.rows.length <= EXT_DAY_MAX;   // 默认展开：仅今天且不超 2 屏
+      const rel = extDayRel(g.day);
+      // 汇总行 onclick 只传代码生成的日期字面量（YYYY-MM-DD），不拼用户数据进 JS 串
+      return '<tr class="ext-day" style="cursor:pointer" title="点击展开/收起这一天的告警明细" data-d="' + g.day + '"'
+        + ' onclick="toggleExtDay(\'' + g.day + '\')"><td colspan="8"><b>' + esc(g.day) + '</b> '
+        + (rel === '今天' || rel === '昨天'
+          ? '<span class="badge ' + (rel === '今天' ? 'b-ok' : 'b-off') + '">' + rel + '</span>'
+          : '<span style="color:var(--muted)">' + rel + '</span>')
+        + ' <span style="color:var(--muted)">· ' + g.rows.length + ' 条 · 告警中 ' + g.firing
+        + ' · 已恢复 ' + g.resolved + '</span>'
+        + ' <span class="ext-hint" style="float:right;color:var(--faint)">' + (open ? '▾ 收起' : '▸ 展开') + '</span></td></tr>'
+        + g.rows.map(x => extRow(x, g.day, open)).join('');
     }).join('') : '<tr><td colspan="8" style="color:var(--faint)">还没有收到第三方告警'
       + '（先在「第三方接入」里配对 Token，再把源侧的 webhook 指过来）</td></tr>')
     + '</tbody>';
 }
+window.toggleExtDay = (day) => {
+  // 按天切换明细显隐：该天各行状态一致，以第一行当前状态为准整体翻转，并同步汇总行提示文案
+  let hide = null;
+  $$('#ext-tbl tr.ext-day-oc').forEach(tr => {
+    if (tr.dataset.d !== day) return;
+    if (hide === null) hide = !tr.classList.contains('hidden');
+    tr.classList.toggle('hidden', hide);
+  });
+  const hint = $('#ext-tbl tr.ext-day[data-d="' + day + '"] .ext-hint');
+  if (hint) hint.textContent = hide ? '▸ 展开' : '▾ 收起';
+};
 
 /* API 拉取配置（第六期 26）：能力、地址、开关、立即拉一次。
  * 未实现的来源把「立即拉」禁用并把原因写在行里，而不是给一个点了报错的按钮。 */

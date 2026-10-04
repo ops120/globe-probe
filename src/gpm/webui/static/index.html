@@ -586,6 +586,9 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           <div class="panel">
             <div class="panel-head">操作审计 <span class="sub" id="au-sub"></span>
               <span style="flex:1"></span>
+              <!-- 审计表按天折叠（明细默认只开今天）：这里给全量展开/折叠的快捷入口 -->
+              <button class="btn sm ghost" id="au-expand">展开全部</button>
+              <button class="btn sm ghost" id="au-foldall">折叠全部</button>
               <div class="seg" id="au-filter">
                 <button data-t="" class="active">全部</button>
                 <button data-t="任务">任务</button>
