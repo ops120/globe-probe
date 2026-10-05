@@ -165,7 +165,7 @@ async function renderPublicUrl() {
 async function renderChannels() {
   const chans = await api('/api/alerts/channels');
   state.channels = chans;
-  const typeName = { webhook: 'Webhook', wecom: '企业微信', dingtalk: '钉钉', feishu: '飞书', smtp: 'SMTP' };
+  const typeName = { webhook: 'Webhook', wecom: '企业微信', dingtalk: '钉钉', feishu: '飞书', teams: 'Teams', smtp: 'SMTP' };
   $('#ch-tbl').innerHTML = '<thead><tr><th>名称</th><th>类型</th><th>状态</th><th>最近成功</th><th>最近错误</th><th>操作</th></tr></thead><tbody>' +
     (chans.length ? chans.map(c => '<tr>'
       + '<td style="color:var(--fg-strong2)">' + esc(c.name) + '</td>'
@@ -371,6 +371,7 @@ const CH_FIELDS = {
   dingtalk: [['webhook', '机器人 Webhook', 'https://oapi.dingtalk.com/robot/send?access_token=…'],
     ['secret', '加签 Secret（可选）', 'SEC…']],
   feishu: [['webhook', '机器人 Webhook', 'https://open.feishu.cn/open-apis/bot/v2/hook/…']],
+  teams: [['url', 'Workflows / Connector Webhook', 'https://xxx.office.com/webhook/…']],
   smtp: [['host', 'SMTP 主机', 'smtp.example.com'], ['port', '端口', '587'],
     ['user', '用户名', 'ops@example.com'], ['password', '密码 / 授权码', ''],
     ['mail_from', '发件人', 'gpm@example.com'], ['mail_to', '收件人（逗号分隔）', 'ops@example.com'],
@@ -389,7 +390,7 @@ window.chModal = async (cid) => {
   const chans = state.channels || await api('/api/alerts/channels');
   const c = cid ? chans.find(x => x.id === cid) : null;
   const type = c ? c.type : 'webhook';
-  const opts = ['webhook', 'wecom', 'dingtalk', 'feishu', 'smtp']
+  const opts = ['webhook', 'wecom', 'dingtalk', 'feishu', 'teams', 'smtp']
     .map(t => '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + t + '</option>').join('');
   $('#modal-body').innerHTML = '<span class="m-close" onclick="closeModal()">✕</span>'
     + '<div class="m-title">' + (c ? '编辑通知渠道' : '新增通知渠道') + '</div>'
