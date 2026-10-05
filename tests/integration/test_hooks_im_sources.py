@@ -150,6 +150,56 @@ def test_teams_and_generic_end_to_end(tmp_path):
     assert {i["source"] for i in items} == {"teams", "generic"}
 
 
+# ---------------------------------------------------------------- 签名校验预留扩展点（决议 #5）
+
+def test_signature_verifier_reserved_api(tmp_path):
+    """预留扩展点语义：未注册放行（现状）、注册即生效、注销即恢复、modes API 透出。"""
+    client, cfg, s = make_client(tmp_path)
+    client.put("/api/external/settings", json={"hook_token_dingtalk": "tk-d"})
+    body = {"msgtype": "text", "text": {"content": "x 故障"}}
+    headers = {"X-GPM-Hook-Token": "tk-d", "x-dingtalk-sign": "bad"}
+    # 未注册 verifier：按共享 Token 模式放行（现状不变）
+    assert client.post("/api/hooks/dingtalk", json=body, headers=headers).status_code == 200
+
+    calls = []
+
+    def verifier(hs, bd):
+        calls.append(hs.get("x-dingtalk-sign"))
+        return hs.get("x-dingtalk-sign") == "good", "钉钉加签不匹配"
+
+    hooks.register_signature_verifier("dingtalk", verifier)
+    try:
+        ok_r = client.post("/api/hooks/dingtalk", json=body,
+                           headers={"X-GPM-Hook-Token": "tk-d", "x-dingtalk-sign": "good"})
+        assert ok_r.status_code == 200, ok_r.text
+        bad_r = client.post("/api/hooks/dingtalk", json=body, headers=headers)
+        assert bad_r.status_code == 401 and "签名校验失败" in bad_r.json()["detail"]
+        modes = client.get("/api/external/settings").json()["signature_modes"]
+        assert modes["dingtalk"] == "signature+token" and modes["grafana"] == "token"
+    finally:
+        hooks.SIGNATURE_VERIFIERS.pop("dingtalk", None)
+    # 注销后恢复共享 Token 模式
+    assert client.post("/api/hooks/dingtalk", json=body, headers=headers).status_code == 200
+    assert calls == ["good", "bad"], calls
+
+
+def test_signature_verifier_exception_denies(tmp_path):
+    """校验器自身抛异常 → 401（宁拒勿放），且响应里带异常摘要。"""
+    client, cfg, s = make_client(tmp_path)
+    client.put("/api/external/settings", json={"hook_token_generic": "tk-g"})
+
+    def broken(hs, bd):
+        raise RuntimeError("密钥未配置")
+
+    hooks.register_signature_verifier("generic", broken)
+    try:
+        r = client.post("/api/hooks/generic", json={"title": "x"},
+                        headers={"X-GPM-Hook-Token": "tk-g"})
+        assert r.status_code == 401 and "RuntimeError" in r.json()["detail"]
+    finally:
+        hooks.SIGNATURE_VERIFIERS.pop("generic", None)
+
+
 def test_correlation_endpoint_links_external_to_local(tmp_path):
     """端到端：本地事件 + 带任务名的钉钉告警 → 关联分析把它们连成一簇。"""
     client, cfg, s = make_client(tmp_path)

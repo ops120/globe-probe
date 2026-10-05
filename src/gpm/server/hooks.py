@@ -549,3 +549,45 @@ def rate_ok(source: str, ts: int | None = None, limit: int | None = None) -> boo
 def rate_reset() -> None:
     """测试辅助：清空限流账本。"""
     _RATE.clear()
+
+
+# ---------------------------------------------------------------- 签名校验（预留扩展点，2026-10-06 决议 #5）
+
+# 各家「官方签名」机制并不统一（钉钉机器人回调加签、Teams Bot Framework 鉴权、
+# GCP OIDC JWT、腾讯云签名算法），且需要各家凭据/授权才能实现与联调。
+# 决议：**先预留功能及 API**——这里给出活的扩展点（不是死配置键）：
+#
+#   1. 实现方注册 {source: verifier}，verifier 签名 fn(headers, body) -> (bool, 说明)；
+#      注册即生效——接收端在 Token 与限流之后调用，False 一律 401。
+#   2. 未注册的来源返回 (None, ...)，接收端按现状放行——共享 Token（token_ok，
+#      常量时间比较）在扩展点之外仍是硬门槛，不存在「无鉴权」通道。
+#   3. headers 约定传大小写不敏感映射（Starlette Headers 原样透传），verifier 内
+#      用小写键名读取；签名密钥约定落 setting `hook_sign_<source>`（与 token 同一
+#      读写路径），由具体 verifier 自行读取——本期不预建该键，避免无消费方的死配置。
+SIGNATURE_VERIFIERS: dict = {}
+
+
+def register_signature_verifier(source: str, fn) -> None:
+    """注册某来源的签名校验器（预留 API；测试可临时注册后注销）。"""
+    SIGNATURE_VERIFIERS[source] = fn
+
+
+def validate_signature(source: str, headers, body) -> tuple:
+    """调用来源签名校验器（若已注册）。返回 (ok, 说明)：
+
+    ok=True 通过；ok=False 失败（接收端 401）；ok=None 未注册（共享 Token 模式放行）。
+    校验器自身异常一律转 False——签名环节宁拒勿放。"""
+    fn = SIGNATURE_VERIFIERS.get(source)
+    if fn is None:
+        return None, "该来源未注册签名校验器（当前为共享 Token 模式）"
+    try:
+        ok, msg = fn(headers, body)
+        return bool(ok), str(msg or "")
+    except Exception as e:  # noqa: BLE001 - 签名环节异常视为校验失败
+        return False, f"{type(e).__name__}: {e}"
+
+
+def signature_modes() -> dict:
+    """各来源当前鉴权模式（/api/external/settings 透出，供前端/运维核对）。"""
+    return {src: ("signature+token" if src in SIGNATURE_VERIFIERS else "token")
+            for src in SOURCES}

@@ -1979,6 +1979,12 @@ def setup_router(app_state) -> APIRouter:
             body = json.loads(raw.decode("utf-8") or "{}")
         except (ValueError, UnicodeDecodeError):
             raise HTTPException(422, "payload 不是合法 JSON")
+        # 官方签名校验（预留扩展点，2026-10-06 决议 #5）：已注册 verifier 的来源在此
+        # 强制执行（False 一律 401，宁拒勿放）；未注册来源返回 None 按共享 Token
+        # 模式放行——Token 校验在上方，仍是硬门槛。放在限流之后：签名运算不做免费算力。
+        sig_ok, sig_msg = hooks.validate_signature(source, request.headers, body)
+        if sig_ok is False:
+            raise HTTPException(401, "签名校验失败：%s" % sig_msg)
         ts = now()
         alerts = hooks.parse(source, body)
         ids = []
@@ -2019,8 +2025,10 @@ def setup_router(app_state) -> APIRouter:
         return {"sources": [{"source": src, "configured": bool(hooks.expected_token(s, src))}
                             for src in hooks.SOURCES],
                 "token_header": hooks.TOKEN_HEADER, "token_query": hooks.TOKEN_QUERY,
+                "signature_modes": hooks.signature_modes(),
                 "hint": ("每家都要配一个接入 Token 才会接收；未配置时该来源一律 401。"
-                         "官方签名校验（GCP OIDC / 腾讯云签名）本期未实现，见文档限制。"),
+                         "官方签名校验为预留扩展点（signature_modes 标注各来源当前模式），"
+                         "待各家凭据到位后注册即生效；共享 Token 当前是唯一硬门槛。"),
                 "limits": {"max_body_bytes": hooks.MAX_BODY_BYTES,
                            "rate_per_min": hooks.RATE_LIMIT_PER_MIN}}
 
