@@ -105,8 +105,8 @@ def create_app(cfg, storage: Storage | None = None):
 
     # 把 cfg 注入到所有持有「模块级 _cfg」的组件。它们启动时就读 cfg.*，
     # 之后所有函数调用都从 _cfg 拿新值；不依赖入参下传，调用方零改动。
-    from . import alerting, api_web, eventview, hooks, jev, metrics, notify, pullers, report
-    for _mod in (hooks, pullers, jev, alerting, notify, report, metrics, api_web):
+    from . import alerting, api_web, correlation, eventview, hooks, jev, metrics, notify, pullers, report
+    for _mod in (hooks, pullers, jev, alerting, notify, report, metrics, api_web, correlation):
         if hasattr(_mod, "init"):
             _mod.init(cfg)
     if hasattr(eventview, "init_cfg"):

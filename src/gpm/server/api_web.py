@@ -2000,14 +2000,12 @@ def setup_router(app_state) -> APIRouter:
         items = s.list_external_alerts(limit=max(1, min(limit, 500)), source=source,
                                        status=status, t_from=t_from,
                                        firing_only=firing_only)
-        # 旁证关系一并返回：前端要知道「哪些已经折进本地卡片了」
-        links = s.external_alert_links_for([i["id"] for i in items])
-        by_alert = {}
-        for iid, lst in links.items():
-            for a in lst:
-                by_alert[a["id"]] = iid
+        # 旁证关系一并返回：前端要知道「哪些已经折进本地卡片了」。
+        # 入参是**告警 id**（按告警侧反查）——曾把告警 id 传给按事件 id 过滤的
+        # external_alert_links_for，两套 id 撞巧才显示对旁证
+        link_map = s.external_alert_link_map([i["id"] for i in items])
         for i in items:
-            i["linked_incident"] = by_alert.get(i["id"])
+            i["linked_incident"] = link_map.get(i["id"])
         return {"items": items, "count": len(items)}
 
     @router.get("/external/summary")
@@ -2125,6 +2123,20 @@ def setup_router(app_state) -> APIRouter:
             n += 1
             linked += _correlate_external(s, a, ts)
         return {"scanned": n, "linked": linked, "ts": ts}
+
+    # ---------- 同时段故障关联分析（第八期）----------
+    @router.get("/correlation")
+    def correlation_view(t_from: int = 0, t_to: int = 0, hours: int = 6):
+        """同一时段所有故障（本地事件+外部告警）的聚合与相关关系。
+
+        只对齐可证明的维度（同节点/同目标/同线路/旁证/时间聚集），假设一律
+        「疑似」措辞并带证据计数；每簇附 CMDB 信息缺口（补哪些字段能进一步
+        自动定位）。只读、现算，不改任何状态。"""
+        from . import correlation as _corr
+        ts = now()
+        t_to_v = int(t_to or ts)
+        t_from_v = int(t_from or (ts - max(1, min(int(hours), 24 * 7)) * 3600))
+        return _corr.analyze(s, t_from_v, t_to_v)
 
     # ---------- 通知深链前缀（第三期 11/12）----------
     @router.get("/settings/public-url")

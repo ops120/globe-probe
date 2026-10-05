@@ -1,10 +1,13 @@
 """告警通知渠道：校验、描述、载荷构造与发送（仅标准库）。
 
-支持 5 种渠道：
+支持 6 种渠道：
   webhook   通用 POST（format=json 默认 / text）
   wecom     企业微信机器人
   dingtalk  钉钉机器人（可选加签；仅支持 secret 加签方式）
   feishu    飞书机器人
+  teams     Teams 机器人（Office 365 Connector / Power Automate 的 webhook URL，
+            发 MessageCard；与 hooks.teams 入向通道配套——告警从 Teams 群进来，
+            判断结果也回得去）
   smtp      SMTP 邮件（ssl 为真时忽略 starttls）
 
 对外接口（签名冻结）：
@@ -40,7 +43,7 @@ from email.message import EmailMessage
 
 from ..config import Config
 
-CHANNEL_TYPES = ("webhook", "wecom", "dingtalk", "feishu", "smtp")
+CHANNEL_TYPES = ("webhook", "wecom", "dingtalk", "feishu", "teams", "smtp")
 
 # —— 以下阈值由 cfg.alert.* 提供；保留模块级同名常量供旧调用按属性名直接读取。
 # 默认值与 src/gpm/config.py DEFAULTS["alert"] 对齐；运行期 init(cfg) 会覆盖。
@@ -176,6 +179,12 @@ def validate(channel: dict) -> str | None:
                     return "secret 必须是字符串"
             return None
 
+        if t == "teams":
+            err = _check_url(channel.get("url"), "url")
+            if err:
+                return err
+            return None
+
         # smtp
         host = channel.get("host")
         if not isinstance(host, str) or not host.strip():
@@ -216,6 +225,9 @@ def describe(channel: dict) -> str:
         if t == "feishu":
             return "飞书机器人" if isinstance(channel, dict) and channel.get("webhook") \
                 else "飞书机器人 (缺少 webhook)"
+        if t == "teams":
+            return "Teams 机器人" if isinstance(channel, dict) and channel.get("url") \
+                else "Teams 机器人 (缺少 url)"
         if t == "smtp":
             if not isinstance(channel, dict):
                 return "SMTP (配置不完整)"
@@ -427,6 +439,27 @@ def _post_json(url: str, payload, timeout: float, method: str = "POST"):
 
 # ------------------------------------------------------------------ send
 
+def _send_teams(channel, title, text, timeout):
+    """Teams 出向：Office 365 Connector / Power Automate webhook 都吃 MessageCard。
+
+    summary 字段是连接器必填（通知预览用）；正文用 text（支持简单 markdown）。
+    """
+    payload = {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "summary": title or "gpm 通知",
+        "themeColor": "E5484D",
+        "title": title,
+        "text": text,
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    ok, status, info = _http(_s(channel.get("url")), data, timeout,
+                             {"Content-Type": _JSON_CT}, "POST")
+    if not ok:
+        return False, info
+    return True, f"HTTP {status}"
+
+
 def _send_webhook(channel, title, text, timeout):
     payload = render_payload(channel, title, text)
     if isinstance(payload, str):
@@ -542,6 +575,8 @@ def send(channel: dict, title: str, text: str, timeout: float | None = None) -> 
             return _send_smtp(channel, title, text, tmo)
         if t == "webhook":
             return _send_webhook(channel, title, text, tmo)
+        if t == "teams":
+            return _send_teams(channel, title, text, tmo)
         return _send_im(channel, title, text, tmo)
     except Exception as e:  # 兜底：绝不向调用方抛异常
         return False, f"{type(e).__name__}: {_head(e, _ERR_LIMIT)}"

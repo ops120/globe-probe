@@ -25,6 +25,8 @@ $$('#al-subtabs button').forEach(b => b.onclick = () => {
   showAlertsSub(b.dataset.sub);
   // 值班视图是「现在进行时」，每次点开都刷新；服务端不支持时不再重复请求（只重画降级说明）
   if (b.dataset.sub === 'oncall') renderOncall(!state.oncallUnsupported);
+  // 关联分析同样每次点开都现算（窗口是相对 now 的，缓存反而误导）
+  if (b.dataset.sub === 'corr') rerender('关联分析', renderCorr);
 });
 $('#oncall-refresh').addEventListener('click', () => renderOncall(true));
 

@@ -1060,7 +1060,7 @@ class Storage:
             return cur.rowcount > 0
 
     def external_alert_links_for(self, incident_ids: list[int]) -> dict:
-        """一次取齐多条事件的旁证（避免逐条查的 N+1）。"""
+        """一次取齐多条事件的旁证（避免逐条查的 N+1）。入参是**事件 id**。"""
         if not incident_ids:
             return {}
         with self.lock:
@@ -1077,6 +1077,22 @@ class Storage:
             d.pop("linked_at", None)
             out.setdefault(iid, []).append(self._ext_alert(d))
         return out
+
+    def external_alert_link_map(self, alert_ids: list[int]) -> dict:
+        """告警侧反查：alert_id -> incident_id（/external/alerts 列表标注用）。
+
+        与 external_alert_links_for 的区别在 id 空间：那个按事件 id 过滤，这个按
+        告警 id 过滤。曾经 /external/alerts 把告警 id 传给按事件 id 过滤的查询，
+        两套 id 撞巧时页面才显示对旁证——量小的新库看不出来，属隐性数据错位。
+        """
+        if not alert_ids:
+            return {}
+        with self.lock:
+            ph = ",".join("?" for _ in alert_ids)
+            rows = self.db.execute(
+                "SELECT alert_id, incident_id FROM external_alert_links"
+                " WHERE alert_id IN (" + ph + ")", tuple(alert_ids)).fetchall()
+        return {int(r["alert_id"]): int(r["incident_id"]) for r in rows}
 
     def external_alert_stats(self, t_from: int, t_to: int) -> dict:
         """窗口内第三方告警按来源统计（第六期 29 的报表维度）。

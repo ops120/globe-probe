@@ -9,7 +9,7 @@
  *    卡片的旁证 —— 这是「接了第三方不会把第一屏塞满」的机制，页面上要说清楚。
  */
 'use strict';
-const EXT_SOURCES = ['grafana', 'zabbix', 'tencent', 'gcp'];
+const EXT_SOURCES = ['grafana', 'zabbix', 'tencent', 'gcp', 'dingtalk', 'teams', 'generic'];
 
 function extSafeUrl(u) {
   const s = String(u || '').trim();

@@ -5,18 +5,22 @@
 - **只接收、不回写**：本模块不产生任何对外请求，第三方告警一律只读。双向同步的反馈环
   留到确有需求再说。
 - **各家 payload 形态不同**：解析器只做「取字段」，**不猜语义**。取不到就置空并保留 raw，
-  宁可在页面上显示不全，也不伪造一个看起来合理的值。
-- **签名差异如实说明**：四家的「官方签名」机制并不统一（GCP Pub/Sub push 用 OIDC JWT、
-  腾讯云有自己的签名算法、Grafana/Zabbix 侧通常靠自定义 header）。本期只实现**它家都
-  做得到**的共享 Token（header 或 query），并把「未实现官方签名校验」明确列进限制；
-  不假装已经验证了签名。
-- **`raw_json` 落库前脱敏**：键名命中敏感词一律替换，URL 里的敏感查询参数与 userinfo 去掉。
+  宁可在页面上显示不全，也不伪造一个看起来合理的值。文本型来源（钉钉/Teams/generic）
+  的状态与严重度从文本关键词判，判不出按 firing 兜底（宁可多报一条 firing，
+  不把故障装成已恢复）。
+- **签名差异如实说明**：各家（含钉钉加签、Teams Bot Framework 鉴权）的「官方签名」机制
+  并不统一（GCP Pub/Sub push 用 OIDC JWT、腾讯云有自己的签名算法、Grafana/Zabbix 侧通常
+  靠自定义 header）。本期只实现**各家都做得到**的共享 Token（header 或 query），
+  并把「未实现官方签名校验」明确列进限制；不假装已经验证了签名。
+- **`raw_json` 落库前脱敏**：键名命中敏感词一律替换，URL 里的敏感查询参数与 userinfo 去掉
+  （钉钉回调里的 sessionWebhook、Teams 的凭据类字段都会被这条规则抹掉）。
 """
 from __future__ import annotations
 
 import base64
 import binascii
 import datetime
+import hashlib
 import hmac
 import json
 import re
@@ -24,7 +28,7 @@ import time
 
 from ..config import Config
 
-SOURCES = ("grafana", "zabbix", "tencent", "gcp")
+SOURCES = ("grafana", "zabbix", "tencent", "gcp", "dingtalk", "teams", "generic")
 
 # 接入 Token 的请求头与查询参数名（两家都能配：Grafana 有自定义 header，
 # Zabbix webhook 是脚本、腾讯云/GCP 的 URL 由你自己给，塞 query 即可）
@@ -238,8 +242,219 @@ def parse_gcp(body: dict) -> list[dict]:
     }]
 
 
+# ---------------------------------------------------------------- 文本型告警（钉钉群 / Teams 频道 / 任意来源）
+
+# 状态词表：从 IM 群消息文本里判 firing/resolved。命中恢复词 → resolved；
+# 其余只要像告警就按 firing（不猜第三种状态——宁可多报一条 firing，也不把
+# 故障装成已恢复）。恢复词必须排除「未/没/无/尚/不」类否定前缀——「故障未恢复」
+# 「故障没有恢复」「无法恢复」「not recovered」都是 firing，由 _NOT_RECOVERED_RE 兜住。
+_RESOLVED_RE = re.compile(
+    r"(?<![未没无尚不])恢复|已修复|(?<![未没无尚不])解决|(?<![不未])正常\b|resolved|recovered|\bok\b",
+    re.I)
+_NOT_RECOVERED_RE = re.compile(
+    r"(未|没|无|尚|不|无法|没有)[^，。,,.；;！!]{0,4}(恢复|修复|解决|正常)"
+    r"|\bnot\s+(recovered|resolved|ok|fixed|restored)", re.I)
+_SEVERITY_RE = re.compile(r"\bP[0-4]\b|critical|high|warning|warn|info|严重|紧急|警告|提示", re.I)
+_MD_NOISE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)|\[(?!\^)[^\]]*\]\([^)]*\)|[#*`>_]")
+# 幂等指纹的截断词：第一个状态/处置词（含其常见的 已/未/请 前缀）之后的内容
+# （请尽快处理/已恢复/...）不属于「什么故障」——firing 与恢复消息在此对齐
+_TEXT_CUT_RE = re.compile(
+    r"已|未|请|恢复|处理|排查|修复|解决|确认|关注|介入|resolved|recovered|fixed", re.I)
+
+
+def _text_status(title: str, text: str) -> str:
+    joined = " ".join((title, text))
+    if _RESOLVED_RE.search(joined) and not _NOT_RECOVERED_RE.search(joined):
+        return "resolved"
+    return "firing"
+
+
+def _text_severity(title: str, text: str) -> str:
+    m = _SEVERITY_RE.search(" ".join((title, text)))
+    return m.group(0) if m else ""
+
+
+def _first_meaningful_line(text: str, limit: int = 120) -> str:
+    """取第一条有内容的行并剥掉 markdown 噪声，作为标题兜底。"""
+    for ln in str(text or "").splitlines():
+        clean = _MD_NOISE_RE.sub("", ln).strip()
+        if clean:
+            return clean[:limit]
+    return ""
+
+
+def _stable_text_id(title: str, text: str) -> str:
+    """文本告警的幂等 id：对「内容指纹」做哈希（启发式，见约束说明）。
+
+    归一化三步：
+      1. 抹掉每次消息都在变的元数据——URL、日期时间、epoch（只剥 16~19xx 开头的
+         类 epoch 数，订单号这类业务单号**保留**：它们常常就是对象标识）；
+      2. 在第一个「状态/处置」词处**截断**——firing 与恢复消息共享同一段「什么事
+         +哪个对象」前缀，尾部（请尽快处理 / 已恢复）不是身份的一部分；
+      3. 剩余文本整体小写哈希。
+    已知取舍：截断词表覆盖不到的尾部差异（如两条不同故障共用同一前缀）会并成
+    同 id——对 IM 文本告警这是可接受的启发式，结构化来源请自带 fingerprint。
+    """
+    norm = re.sub(r"https?://\S+", " ", str(title) + " " + str(text))
+    norm = re.sub(r"【[^】]{0,12}】", " ", norm)     # 【P1】等严重度/频道前缀不算身份
+    norm = re.sub(r"\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日]?\s*\d{1,2}[:：]\d{2}(:\d{2})?", " ", norm)
+    norm = re.sub(r"\b1[6-9]\d{8}\b|\b1[7-9]\d{11}\b", " ", norm)   # 类 epoch 秒/毫秒
+    norm = re.sub(r"[\d.]+%|\b\d+(\.\d+)?\s*(ms|秒|分|分钟|小时)\b", " ", norm, flags=re.I)
+    m = _TEXT_CUT_RE.search(norm)
+    if m:
+        norm = norm[:m.start()]
+    norm = re.sub(r"\s+", " ", norm).strip().lower()
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def _text_alert_record(title: str, text: str, labels: dict, ts_hint=0) -> dict:
+    title = str(title or "").strip() or _first_meaningful_line(text)
+    labels = {str(k): str(v) for k, v in (labels or {}).items() if v not in (None, "")}
+    return {
+        "source_id": _stable_text_id(title, text),
+        "title": title[:200],
+        "severity": _text_severity(title, text),
+        "status": _text_status(title, text),
+        "started_at": _ts_from_any(ts_hint),
+        "ended_at": 0,       # 文本告警没有结构化恢复时间：恢复走「同 id 后到覆盖」，不猜
+        "labels": labels,
+        "url": "",
+        "raw": {"title": title, "text": str(text or "")[:2000], "labels": labels},
+    }
+
+
+def parse_dingtalk(body: dict) -> list[dict]:
+    """钉钉群机器人回调（企业内部机器人 HTTP 回调 / Stream 推送把群消息转发给 gpm）。
+
+    接收形态：{"msgtype":"text","text":{"content":...},"senderNick":...,"timestamp":...}
+    与 {"msgtype":"markdown","markdown":{"title":...,"text":...}}。监控类告警到钉钉群
+    的存量形态就是这两种机器人消息；本解析器只取字段不猜语义，状态/严重度从文本判。
+    钉钉官方的加签/签名校验未实现（与四家同口径：共享 Token），见文档限制。
+    """
+    if not isinstance(body, dict):
+        return []
+    mt = str(_first(body, "msgtype", "msgType", default="text")).lower()
+    labels = {}
+    for k in ("senderNick", "senderStaffId", "conversationTitle", "conversationId"):
+        v = _first(body, k)
+        if v:
+            labels["dingtalk_" + k] = str(v)
+    if mt == "markdown":
+        md = body.get("markdown")
+        if not isinstance(md, dict):
+            md = {}
+        rec = _text_alert_record(str(md.get("title") or ""), str(md.get("text") or md.get("content") or ""),
+                                 labels, ts_hint=_first(body, "timestamp", "createAt", "createTime"))
+        return [rec] if rec["title"] else []
+    txt = body.get("text")
+    if not isinstance(txt, dict):
+        txt = {}
+    content = str(_first(txt, "content") or "")
+    if not content.strip():
+        # 钉钉 actionCard / 其它扩展形态：有 text 字段就吃，认不出如实留空（0 条 + raw 已在调用方落库口径之外）
+        return []
+    rec = _text_alert_record("", content, labels,
+                             ts_hint=_first(body, "timestamp", "createAt", "createTime"))
+    return [rec] if rec["title"] else []
+
+
+def parse_teams(body: dict) -> list[dict]:
+    """Microsoft Teams 告警消息获取。
+
+    Teams 原生没有「把频道消息推给任意 webhook」的免费通道，工程上最省事的存量
+    兼容法是 Teams Workflows(Power Automate)「发布频道消息时」触发器 → HTTP POST
+    转发到 gpm。这里兼容三种到达形态（认不出就 0 条，不猜）：
+      1. Office/Workflows MessageCard：{"@type":"MessageCard","title":...,"text":...}
+      2. Bot Framework 消息：{"type":"message","attachments":[{contentType:
+         "application/vnd.microsoft.card.adaptive","content":{body:[{type:"TextBlock",text:...}]}}]}
+      3. 简单转发：{"title":...,"text":...} / {"text":...}
+    与上游监控直连 webhook（Alertmanager/Grafana 格式，已支持）相比，这是给
+    「告警只进 Teams 群」的存量链路兜底的通道。
+    """
+    if not isinstance(body, dict):
+        return []
+    labels = {}
+    conv = body.get("conversation")
+    if not isinstance(conv, dict):
+        conv = {}
+    if conv.get("name"):
+        labels["teams_channel"] = str(conv["name"])
+    sender = body.get("from")
+    if isinstance(sender, dict) and isinstance(sender.get("user"), dict) \
+            and sender["user"].get("displayName"):
+        labels["teams_sender"] = str(sender["user"]["displayName"])
+    texts: list[str] = []
+    title = str(_first(body, "title", "summary", default="") or "")
+    if title:
+        texts.append(title)
+    if body.get("text"):
+        texts.append(str(body["text"]))
+    card = body.get("attachments")
+    if not isinstance(card, list):
+        card = []
+    for att in card:
+        c = att.get("content") if isinstance(att, dict) else None
+        if not isinstance(c, dict):
+            continue
+        if c.get("title"):
+            texts.append(str(c["title"]))
+        if c.get("text"):
+            texts.append(str(c["text"]))
+        blocks = c.get("body")
+        if not isinstance(blocks, list):
+            blocks = []
+        for b in blocks:
+            if isinstance(b, dict) and b.get("text"):
+                texts.append(str(b["text"]))
+    if not texts:
+        return []
+    rec = _text_alert_record(title, "\n".join(texts), labels,
+                             ts_hint=_first(body, "timestamp", "createdDateTime"))
+    return [rec] if rec["title"] else []
+
+
+def parse_generic(body: dict) -> list[dict]:
+    """通用告警来源：给「自有系统 / 没有现成适配器」的最后一个兜底入口。
+
+    优先吃结构化字段（title/status/severity/startsAt/labels/fingerprint），取不到
+    退化为文本解析。设计动机：与其让每个自有系统各自想办法挤进 IM 群再让人肉搬运，
+    不如直接 POST 到 gpm——IM 群适合人看，聚合判断留给平台。
+    """
+    if not isinstance(body, dict):
+        return []
+    # source_id 是幂等主键：上游给多长都截到 128，防畸形 payload 把主键撑爆
+    sid = str(_first(body, "fingerprint", "source_id", "id", "event_id", default="") or "")[:128]
+    title = str(_first(body, "title", "summary", "name", default="") or "")
+    text = str(_first(body, "text", "message", "description", default="") or "")
+    labels = body.get("labels")
+    if not isinstance(labels, dict):
+        labels = {}
+    labels = dict(labels)
+    for k in ("host", "instance", "service", "env", "region"):
+        v = _first(body, k)
+        if v and k not in labels:
+            labels[k] = str(v)
+    st = str(_first(body, "status", "state", default="")).lower()
+    if not sid:
+        sid = _stable_text_id(title or text, text)
+    if not title and not text:
+        return []
+    return [{
+        "source_id": sid,
+        "title": (title or _first_meaningful_line(text))[:200],
+        "severity": str(_first(body, "severity", "priority", default="") or _text_severity(title, text)),
+        "status": "resolved" if st in ("resolved", "recovered", "ok", "closed", "0") else "firing",
+        "started_at": _ts_from_any(_first(body, "startsAt", "started_at", "starts_at", "time", "ts")),
+        "ended_at": _ts_from_any(_first(body, "endsAt", "ended_at", "ends_at")),
+        "labels": {str(k): str(v) for k, v in labels.items() if v not in (None, "")},
+        "url": str(_first(body, "url", "link", "generatorURL", default="") or ""),
+        "raw": body,
+    }]
+
+
 PARSERS = {"grafana": parse_grafana, "zabbix": parse_zabbix,
-           "tencent": parse_tencent, "gcp": parse_gcp}
+           "tencent": parse_tencent, "gcp": parse_gcp,
+           "dingtalk": parse_dingtalk, "teams": parse_teams, "generic": parse_generic}
 
 
 def parse(source: str, body: dict) -> list[dict]:

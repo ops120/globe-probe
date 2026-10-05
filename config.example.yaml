@@ -93,6 +93,13 @@ report:
 export:
   max_rows: 100000                 # 单次导出行数上限（防误操作全量拖库打爆内存）
 
+# —— 同时段故障关联分析 ——
+corr:
+  burst_seconds: 300               # 突发窗口：起点相差 ≤N 秒视为「同时段」（区间重叠恒成立）
+  min_edge: 3                      # 连边最低证据权重（旁证=4 节点/目标=3 任务/DNS=2 时间=1）
+  max_members: 12                  # 簇成员展示上限（超过即全局风暴，逐条展示已无意义）
+  window_max_hours: 168            # 单次分析窗口上限（7 天）
+
 agent:
   server_url: "http://127.0.0.1:8620"
   register_token: "gpm-dev-register"   # 生产请用 GPM_REGISTER_TOKEN 环境变量

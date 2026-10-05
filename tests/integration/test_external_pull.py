@@ -81,8 +81,11 @@ def test_unimplemented_sources_report_honestly(tmp_path):
         assert body["supported"] is False and body["fetched"] == 0
         assert "未实现" in body["error"]
     st = client.get("/api/external/pull").json()["sources"]
+    # 第八期起 hooks 源扩到 7 家：IM/通用三源（dingtalk/teams/generic）是纯 webhook 接入，
+    # 没有拉取适配器 → supported=False 如实列出，而不是从列表里藏掉
     assert {x["source"]: x["supported"] for x in st} == {
-        "grafana": True, "zabbix": True, "tencent": False, "gcp": False}
+        "grafana": True, "zabbix": True, "tencent": False, "gcp": False,
+        "dingtalk": False, "teams": False, "generic": False}
 
 
 def test_missing_url_is_reported_not_silently_ok(tmp_path):

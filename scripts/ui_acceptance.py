@@ -431,9 +431,9 @@ def main() -> int:
         page.click('nav a[data-page="alerts"]')
         wait_page(page, "alerts")
         page.wait_for_timeout(1500)
-        # 子导航条：六个子 tab，默认落在「值班总览」
-        ck.ok(page.locator("#al-subtabs button[data-sub]").count() == 6,
-              "告警页子导航条有 6 个子 tab（值班总览/报表/事件与告警/第三方告警/通知配置/操作审计）")
+        # 子导航条：七个子 tab（第八期新增「关联分析」），默认落在「值班总览」
+        ck.ok(page.locator("#al-subtabs button[data-sub]").count() == 7,
+              "告警页子导航条有 7 个子 tab（值班总览/报表/事件与告警/第三方告警/关联分析/通知配置/操作审计）")
         ck.ok("active" in (page.locator('#al-subtabs button[data-sub="oncall"]')
                            .get_attribute("class") or ""), "默认落在「值班总览」子页")
         # —— 值班总览（两分支：旧后端无 /api/oncall → 优雅降级；新后端 → 卡片或空态）——
@@ -555,7 +555,7 @@ def main() -> int:
               "第三方接入有 Token 输入与保存入口")
         _exst = page.evaluate(
             "async () => await (await fetch('/api/external/settings')).json()")
-        ck.ok(len(_exst["sources"]) == 4, "四家来源都有接入状态（%s）"
+        ck.ok(len(_exst["sources"]) == 7, "七家来源都有接入状态（%s）"
               % [x["source"] for x in _exst["sources"]])
         ck.ok("Token" in (page.text_content("#ext-recv-hint") or ""),
               "说明接收地址与鉴权方式（%s）" % (_exst["token_header"]))
@@ -567,15 +567,17 @@ def main() -> int:
         ck.ok(_srckeys == ["configured", "source"],
               "来源状态只暴露「配没配」（字段 %s）" % _srckeys)
         ck.ok(page.locator("#ext-sum-tbl tbody tr").count() >= 1, "按来源汇总表已渲染")
-        # 第六期 26：API 拉取配置。未实现的来源要**如实标注**，而不是给一个点了报错的按钮
-        ck.ok(page.locator("#ext-pull-tbl tbody tr").count() == 4,
-              "拉取配置列出四家来源")
+        # 第六期 26：API 拉取配置。未实现的来源要**如实标注**，而不是给一个点了报错的按钮。
+        # 第八期起 hook 源 7 家：IM/通用三源是纯 webhook 接入，无拉取适配器 → 如实标「未实现」
+        ck.ok(page.locator("#ext-pull-tbl tbody tr").count() == 7,
+              "拉取配置列出全部 7 家来源（含 3 家无拉取适配器的 IM/通用源）")
         _pull_txt = page.text_content("#ext-pull-tbl") or ""
         ck.ok("支持" in _pull_txt and "未实现" in _pull_txt,
-              "拉取能力如实区分「支持」与「未实现」（腾讯云/GCP 需要官方签名/OAuth）")
+              "拉取能力如实区分「支持」与「未实现」（腾讯云/GCP 需官方签名/OAuth；IM 源为纯 webhook）")
         _pull = page.evaluate("async () => await (await fetch('/api/external/pull')).json()")
         ck.ok({x["source"]: x["supported"] for x in _pull["sources"]} ==
-              {"grafana": True, "zabbix": True, "tencent": False, "gcp": False},
+              {"grafana": True, "zabbix": True, "tencent": False, "gcp": False,
+               "dingtalk": False, "teams": False, "generic": False},
               "接口能力表正确（%s）" % {x["source"]: x["supported"] for x in _pull["sources"]})
         ck.ok("未实现" in _pull["hint"], "接口提示里也写明哪两家未实现")
         ck.ok(page.locator("#ext-tbl tbody tr").count() >= 1, "第三方告警表已渲染（含空态行）")

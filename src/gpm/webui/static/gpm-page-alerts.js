@@ -314,6 +314,7 @@ async function renderAlerts() {
     guard('告警规则', renderRules), guard('维护窗口', renderWindows)]);
   await guard('通知深链', renderPublicUrl);
   await guard('第三方告警', renderExternal);   // 第六期：「第三方告警」子页（来源汇总 + 告警表）
+  if (state.alertsSub === 'corr') await guard('关联分析', renderCorr);   // 第八期：仅子页可见时请求
   await guard('告警历史', renderAlertHistory);
   await guard('巡检推送', renderDigest);
   await guard('重投队列', renderOutbox);

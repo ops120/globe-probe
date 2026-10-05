@@ -435,6 +435,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           <button data-sub="report">报表</button>
           <button data-sub="events">事件与告警</button>
           <button data-sub="external">第三方告警</button>
+          <button data-sub="corr">关联分析</button>
             <button data-sub="notify">通知配置</button>
           <button data-sub="audit">操作审计</button>
         </div>
@@ -600,6 +601,23 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
             <table class="tbl" id="au-tbl"></table>
           </div>
         </div>
+
+        <!-- 关联分析（第八期）：同时段故障聚合 + 相关关系。口径在服务端（correlation.py），
+             前端只呈现：假设带证据计数、措辞「疑似」、CMDB 缺口如实提示。 -->
+        <div class="subpage hidden" data-subpage="corr">
+          <div class="panel">
+            <div class="panel-head">关联分析 <span class="sub" id="corr-sub">同一时段的所有故障（本地事件+外部告警）聚合成簇，找出可能的相关关系</span>
+              <span style="flex:1"></span>
+              <button class="btn sm ghost" id="corr-refresh">刷新</button></div>
+            <div class="seg" id="corr-window">
+              <button data-h="1">近1小时</button>
+              <button data-h="6" class="active">近6小时</button>
+              <button data-h="24">近24小时</button>
+              <button data-h="168">近7天</button>
+            </div>
+            <div id="corr-body"></div>
+          </div>
+        </div>
       </section>
 
       <section class="page hidden" id="page-nodes">
@@ -668,6 +686,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 <script src="/static/gpm-page-compare.js?v=44"></script>
 <script src="/static/gpm-page-geo.js?v=44"></script>
 <script src="/static/gpm-page-external.js?v=44"></script>
+<script src="/static/gpm-page-corr.js?v=44"></script>
 <script src="/static/gpm-page-oncall.js?v=44"></script>
 <script src="/static/gpm-page-alerts.js?v=44"></script>
 <script src="/static/gpm-page-nodes.js?v=44"></script>
