@@ -276,6 +276,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
     <header class="topbar">
       <div class="crumb" id="crumb">总览</div>
       <div class="top-actions"><span id="srv-status"><i class="dot r"></i>连接中…</span><span id="srv-time"></span>
+        <button class="tgl" id="admin-token-btn" title="设置管理 token（写操作鉴权）">🔑 Token</button>
         <button class="tgl" id="theme-toggle" title="切换白天/夜间主题">☀ 白天</button></div>
     </header>
     <main class="content">
@@ -720,22 +721,22 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=44"></script>
+<script src="/static/echarts.min.js?v=45"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=44"></script>
-<script src="/static/gpm-api.js?v=44"></script>
-<script src="/static/gpm-theme.js?v=44"></script>
-<script src="/static/gpm-charts.js?v=44"></script>
-<script src="/static/gpm-page-overview.js?v=44"></script>
-<script src="/static/gpm-page-task.js?v=44"></script>
-<script src="/static/gpm-page-compare.js?v=44"></script>
-<script src="/static/gpm-page-geo.js?v=44"></script>
-<script src="/static/gpm-page-external.js?v=44"></script>
-<script src="/static/gpm-page-corr.js?v=44"></script>
-<script src="/static/gpm-page-oncall.js?v=44"></script>
-<script src="/static/gpm-page-alerts.js?v=44"></script>
-<script src="/static/gpm-page-nodes.js?v=44"></script>
-<script src="/static/gpm-page-tasks.js?v=44"></script>
-<script src="/static/gpm-boot.js?v=44"></script>
+<script src="/static/gpm-utils.js?v=45"></script>
+<script src="/static/gpm-api.js?v=45"></script>
+<script src="/static/gpm-theme.js?v=45"></script>
+<script src="/static/gpm-charts.js?v=45"></script>
+<script src="/static/gpm-page-overview.js?v=45"></script>
+<script src="/static/gpm-page-task.js?v=45"></script>
+<script src="/static/gpm-page-compare.js?v=45"></script>
+<script src="/static/gpm-page-geo.js?v=45"></script>
+<script src="/static/gpm-page-external.js?v=45"></script>
+<script src="/static/gpm-page-corr.js?v=45"></script>
+<script src="/static/gpm-page-oncall.js?v=45"></script>
+<script src="/static/gpm-page-alerts.js?v=45"></script>
+<script src="/static/gpm-page-nodes.js?v=45"></script>
+<script src="/static/gpm-page-tasks.js?v=45"></script>
+<script src="/static/gpm-boot.js?v=45"></script>
 </body>
 </html>

@@ -69,6 +69,9 @@ async function show(page) {
   // 用户看到的就是「空白页 + 控制台报错」——「假死加固」建立的信任又被新入口漏掉
   try {
     if (page === 'tasks' || page === 'overview') state.tasks = await api('/api/tasks');
+    // 任务分析/历史对比也可能直接从菜单进入（state.tasks 尚未拉取）——渲染依赖任务列表，
+    // 缺了就是整页空白（renderTask 的 curTask() 返回 undefined 直接 return）
+    else if ((page === 'task' || page === 'compare') && !state.tasks.length) state.tasks = await api('/api/tasks');
   } catch (e) { toast('加载任务列表失败: ' + e.message); }
   if ((page === 'task' || page === 'compare') && !state.task && state.tasks.length) state.task = state.tasks[0].id;
   fillTaskSelects();
@@ -84,6 +87,19 @@ async function show(page) {
 })();
 $('#theme-toggle').addEventListener('click', () =>
   applyTheme(document.body.classList.contains('light') ? 'dark' : 'light'));
+/* 🔑 管理 token 设置：存 localStorage（gpm-admin-token），api() 会把它带进每个请求头。
+ * 清空即删除。保存后立即验证一次（对 /api/tasks 发一个无害的读请求没意义——读口不鉴权，
+ * 所以直接重画当前页让用户在下一个写操作里看到效果，失败 toast 会给出指引）。 */
+$('#admin-token-btn').addEventListener('click', () => {
+  const cur = adminToken();
+  const v = prompt('管理 token（X-Admin-Token）\n服务端配置了 admin_token 时用于写操作鉴权；留空并确定则清除已保存的 token。', cur);
+  if (v === null) return;                       // 取消：不动
+  try {
+    if (v.trim()) localStorage.setItem('gpm-admin-token', v.trim());
+    else localStorage.removeItem('gpm-admin-token');
+  } catch (e) { toast('无法访问 localStorage，token 未保存', 'err'); return; }
+  toast(v.trim() ? '管理 token 已保存，写操作将携带 X-Admin-Token' : '管理 token 已清除', 'ok');
+});
 
 function fillTaskSelects() {
   const opts = state.tasks.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
