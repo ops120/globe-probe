@@ -306,22 +306,44 @@ async function guard(name, fn) {
   catch (e) { toast(name + '加载失败: ' + (e.message || e)); }
 }
 
+// 子页 → 渲染函数映射：**只在该子页首次可见时**渲染一次（lazy），切到别处不重画整页。
+// 之前 renderAlerts 把 7 个子页全部串行重画（8 个 render 全跑），既慢又让隐藏子页打无效接口
+//（如 corr/oncall 在不可见时也请求，旧服务端会 404 噪声）。现在改为按需 + 首次可见才拉数据。
+const SUB_RENDER = {
+  oncall:    () => guard('值班总览', renderOncall),
+  report:    () => guard('SLA', renderSla),
+  events:    () => guard('告警历史', renderAlertHistory),
+  external:  () => guard('第三方告警', renderExternal),
+  corr:      () => guard('关联分析', renderCorr),
+  notify:    async () => {
+    await Promise.all([guard('通知渠道', renderChannels), guard('告警规则', renderRules),
+      guard('维护窗口', renderWindows), guard('通知深链', renderPublicUrl),
+      guard('巡检推送', renderDigest), guard('重投队列', renderOutbox)]);
+  },
+  audit:     () => guard('操作审计', renderAudit),
+};
+
+/* 子页是否已渲染过：首次可见才调用其 render；切回同一页不重复请求。 */
+const _subRendered = new Set();
+async function renderSubOnce(key) {
+  if (_subRendered.has(key)) return;
+  _subRendered.add(key);
+  const fn = SUB_RENDER[key];
+  if (fn) await fn();
+}
+
 async function renderAlerts() {
   const nodes = await api('/api/nodes');
   state.nodeMap = nodes;
   if (!state.tasks || !state.tasks.length) state.tasks = await api('/api/tasks');
-  await Promise.all([guard('SLA', renderSla), guard('通知渠道', renderChannels),
-    guard('告警规则', renderRules), guard('维护窗口', renderWindows)]);
-  await guard('通知深链', renderPublicUrl);
-  await guard('第三方告警', renderExternal);   // 第六期：「第三方告警」子页（来源汇总 + 告警表）
-  if (state.alertsSub === 'corr') await guard('关联分析', renderCorr);   // 第八期：仅子页可见时请求
-  await guard('告警历史', renderAlertHistory);
-  await guard('巡检推送', renderDigest);
-  await guard('重投队列', renderOutbox);
-  await guard('操作审计', renderAudit);
-  // 值班总览只在子页可见时请求（默认子页）：旧版服务端无 /api/oncall，避免隐藏页也打接口产生 404 噪声
-  if (state.alertsSub === 'oncall') await guard('值班总览', renderOncall);
+  // 只渲染当前子页（默认 oncall）；其它子页等首次点击时 lazy 渲染
+  await renderSubOnce(state.alertsSub || 'oncall');
 }
+
+/* 切子页时懒加载：这是「隐性无渲染」的关键修复——compare/geo 挪 subpage 后首次可见不画的坑。 */
+window.renderAlertsSub = async (key) => {
+  await renderSubOnce(key);
+};
 
 /* 筛选/子页切换类按钮的读接口调用统一兜底：失败给 toast，不再静默吞成空表 */
 function rerender(name, fn) {
@@ -1049,6 +1071,13 @@ function jevHtml(tr) {
 }
 
 /* 事件详情：时间线 / 影响范围 / 指标曲线 / 确认备注 */
+// 事件详情内跳转到告警页的某个子页（批 4：第三方告警/关联分析降级为辅助入口）
+window.evJump = (sub) => {
+  closeModal();
+  show('alerts');
+  if (window.showAlertsSub) window.showAlertsSub(sub);
+  if (window.renderAlertsSub) window.renderAlertsSub(sub);
+};
 window.eventModal = async (iid) => {
   let d;
   try { d = await api('/api/event/' + iid); }
@@ -1079,6 +1108,12 @@ window.eventModal = async (iid) => {
     + '<div class="sub" style="margin:12px 0 4px">指标曲线（' + esc(win.bucket || '') + ' 桶）</div>'
     + '<div id="ev-chart" style="height:180px"></div>'
     + '<div class="sub" style="margin:14px 0 4px">时间线</div><div>' + tl + '</div>'
+      // 事件详情内快捷跳转（批 4）：不必离开上下文就能看第三方告警/关联分析，降级为辅助入口
+      + '<div class="sub" style="margin:14px 0 4px">相关视图</div>',
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap">',
+      + '<button class="btn ghost sm" onclick="evJump(\'external\')">查看第三方告警</button>',
+      + '<button class="btn ghost sm" onclick="evJump(\'corr\')">查看关联分析</button>',
+      + '</div>',
     + '<div class="sub" style="margin:14px 0 4px">影响范围（同期异常）</div>' + blast
     + evExtraBlocks(d)
     + '<details class="ev-x" id="ev-x-jev"><summary>JEV 故障判断（人话翻译 + 详细）'

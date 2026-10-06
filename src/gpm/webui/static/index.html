@@ -54,6 +54,9 @@ body{font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;backgroun
 .sidebar nav a{display:block;padding:10px 16px;color:var(--nav);cursor:pointer;text-decoration:none;border-left:2px solid transparent;font-size:13px}
 .sidebar nav a:hover{background:var(--bg-3);color:var(--fg-strong)}
 .sidebar nav a.active{background:var(--accent-bg);color:var(--nav-active);border-left-color:var(--accent)}
+.nav-group{margin:6px 0}
+.nav-group-title{padding:6px 16px 4px;font-size:11px;letter-spacing:.5px;color:var(--faint);text-transform:uppercase;border-top:1px solid var(--bd);margin-top:8px}
+.nav-group:first-child .nav-group-title{border-top:none;margin-top:0}
 .sidebar-footer{margin-top:auto;padding:12px 16px;color:var(--faint);font-size:11px;border-top:1px solid var(--bd);line-height:1.7}
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
 .topbar{height:48px;flex-shrink:0;background:var(--bg-2);border-bottom:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between;padding:0 20px}
@@ -248,14 +251,21 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 <div class="layout">
   <aside class="sidebar">
     <div class="logo">🌐 GPM<span>全球拨测监控平台</span></div>
+    <!-- 一级菜单分三组（监控/分析/配置），data-page 不动 = 路由零改动；         只是把视觉分组显式化，避免 7 项混用「对象域/视图/场景」三种分类轴（第四轮 IA 复核 P1）。-->
     <nav>
-      <a data-page="overview" class="active">▦ 总览</a>
-      <a data-page="task">📈 任务详情</a>
-      <a data-page="compare">⇄ 历史对比</a>
-      <a data-page="geo">🌍 全球地图</a>
-      <a data-page="alerts">🔔 告警与报表</a>
-      <a data-page="nodes">◈ 节点管理</a>
-      <a data-page="tasks">≡ 任务管理</a>
+      <div class="nav-group"><div class="nav-group-title">监控</div>
+        <a data-page="overview" class="active">▓ 概览</a>
+        <a data-page="alerts">🔔 值班告警</a>
+        <a data-page="geo">🌍 全球地图</a>
+      </div>
+      <div class="nav-group"><div class="nav-group-title">分析</div>
+        <a data-page="task">📈 任务分析</a>
+        <a data-page="compare">⇄ 历史对比</a>
+      </div>
+      <div class="nav-group"><div class="nav-group-title">配置</div>
+        <a data-page="tasks">≡ 任务管理</a>
+        <a data-page="nodes">◈ 节点管理</a>
+      </div>
     </nav>
     <div class="sidebar-footer" id="sb-foot">gpm v0.1.0<br>
       <span style="color:var(--faint)">作者 <b style="color:var(--muted);font-weight:500">ops120</b></span><br>
@@ -297,9 +307,19 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
       </section>
 
       <section class="page hidden" id="page-task">
+        <!-- 任务分析分 3 个子页 -->
+        <div style="margin:6px 0 10px">
+          <button class="btn ghost sm" id="task-back" onclick="goBackToPrev()" title="返回上一个页面">← 返回</button>
+        </div>
+        <div class="subtabs" id="task-subtabs">
+          <button data-tsub="overview" class="active">概览</button>
+          <button data-tsub="metrics">指标</button>
+          <button data-tsub="path">链路</button>
+        </div>
+        <div class="subpage" data-tsubpage="overview">
         <div class="panel">
           <div class="panel-head" style="margin-bottom:0">
-            <select id="task-select"></select>
+<select id="task-select"></select>
             <span class="sub" id="task-meta"></span>
             <span style="flex:1"></span>
             <div class="seg" id="task-range">
@@ -326,6 +346,8 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           </div>
           <div id="chart-uptime" class="chart h160"></div>
         </div>
+        </div>
+        <div class="subpage hidden" data-tsubpage="metrics">
         <div id="panels-ping">
           <div class="panel">
             <div class="panel-head">RTT 延迟 <span class="sub" id="gran-note"></span></div>
@@ -336,16 +358,18 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
             <div id="chart-loss" class="chart h220"></div>
           </div>
         </div>
-        <div id="panels-dns" class="hidden">
-          <div class="panel">
-            <div class="panel-head">逐线路解析 <span class="sub" id="dns-lines-sub">最新一轮 · 各线路独立统计</span></div>
-            <div id="dns-lines"></div>
-          </div>
-        </div>
         <div id="panels-curl" class="hidden">
           <div class="grid-2">
             <div class="panel"><div class="panel-head">HTTP 状态码分布 <span class="sub">全部节点汇总</span></div><div id="chart-code" class="chart h300"></div></div>
             <div class="panel"><div class="panel-head">总耗时 P95/均值 <span class="sub">按节点</span></div><div id="chart-stage" class="chart h300"></div></div>
+          </div>
+        </div>
+        </div>
+        <div class="subpage hidden" data-tsubpage="path">
+        <div id="panels-dns" class="hidden">
+          <div class="panel">
+            <div class="panel-head">逐线路解析 <span class="sub" id="dns-lines-sub">最新一轮 · 各线路独立统计</span></div>
+            <div id="dns-lines"></div>
           </div>
         </div>
         <div id="panels-mtr" class="hidden">
@@ -373,6 +397,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
         <div class="hint">点击图表数据点或通断条带色块 → 该时刻单次探测详情；原始明细仅短窗提供（性能红线），长窗走聚合表</div>
       </section>
 
+        </div>
       <section class="page hidden" id="page-compare">
         <div class="panel">
           <div class="panel-head">

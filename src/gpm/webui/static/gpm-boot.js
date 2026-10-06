@@ -39,9 +39,13 @@ async function pollHealth() {
 }
 
 /* ---------- 导航 ---------- */
-const PAGENAMES = { overview: '总览', task: '任务详情', compare: '历史对比', geo: '全球地图', alerts: '告警与报表', nodes: '节点管理', tasks: '任务管理' };
+const PAGENAMES = { overview: '概览', task: '任务分析', compare: '历史对比', geo: '全球地图', alerts: '值班告警', nodes: '节点管理', tasks: '任务管理' };
 const RENDER = { overview: renderOverview, task: renderTask, compare: renderCompare, geo: renderGeo, alerts: renderAlerts, nodes: renderNodes, tasks: renderTasks };
 async function show(page) {
+  if (state.page && state.page !== page) {
+    state._prevPage = state.page;
+    state._prevAlertsSub = (state.page === "alerts") ? state.alertsSub : state._prevAlertsSub;
+  }
   state.page = page;
   $$('.sidebar nav a').forEach(a => a.classList.toggle('active', a.dataset.page === page));
   $$('.page').forEach(p => p.classList.add('hidden'));
@@ -115,6 +119,18 @@ setInterval(pollHealth, 10000);
  * 值班总览「去处理」与外部链接共用 openTaskAt：导航到任务页、把时间窗覆盖到 ts、
  * 打开该时刻的单次详情弹窗（复用现有 openDetail 路径）。进页面后清掉 query，幂等可刷新。
  */
+// 记录「上一个页面」，让任务分析页能返回（批 4：任务列表/告警入口进任务分析后，原本无返回路径）
+function goBackToPrev() {
+  const prev = state._prevPage || 'overview';
+  state._prevPage = null;
+  show(prev);
+  // 告警页：还要恢复到进入前的子页
+  if (prev === 'alerts' && state._prevAlertsSub && window.showAlertsSub) {
+    window.showAlertsSub(state._prevAlertsSub);
+  }
+}
+window.goBackToPrev = goBackToPrev;
+
 async function openTaskAt(taskId, ts) {
   if (!state.tasks || !state.tasks.length) state.tasks = await api('/api/tasks');
   const t = state.tasks.find(x => String(x.id) === String(taskId));

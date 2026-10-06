@@ -21,7 +21,7 @@ function applyTheme(theme, rerender) {
   if (rerender !== false) {                       // 重画当前页（echarts 颜色是快照）
     // 直接 dispose 重建：clear() 后复用实例在部分图上会「空白」（实测切主题后世界地图消失）
     Object.entries(charts).forEach(([cid, c]) => { try { c.dispose(); } catch (e) { } delete charts[cid]; });
-    const R = { overview: renderOverview, task: renderTask, compare: renderCompare, geo: renderGeo, nodes: renderNodes, tasks: renderTasks };
+    const R = { overview: renderOverview, task: renderTask, compare: renderCompare, geo: renderGeo, alerts: renderAlerts, nodes: renderNodes, tasks: renderTasks };
     (R[state.page] || (() => { }))();
   }
 }

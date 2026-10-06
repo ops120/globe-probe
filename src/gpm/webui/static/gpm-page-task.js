@@ -5,6 +5,18 @@
 'use strict';
 /* ---------- 任务详情 ---------- */
 function curTask() { return state.tasks.find(t => t.id === state.task); }
+// 任务分析分 3 个子页（概览/指标/链路）：切换只动 .hidden，不重画图表（chart 在可见时才 needResize）。
+// 解决 10 个面板单页滚屏（第四轮 IA 复核 P0）。
+state.taskSub = 'overview';
+function showTaskSub(key) {
+  state.taskSub = key;
+  $$('#task-subtabs button').forEach(b => b.classList.toggle('active', b.dataset.tsub === key));
+  $$('#page-task .subpage').forEach(p => p.classList.toggle('hidden', p.dataset.tsubpage !== key));
+  // 切到指标/链路后 echarts 实例需要重算尺寸（否则首次可见时宽度为 0）
+  setTimeout(() => { try { Object.values(charts || {}).forEach(c => c.resize()); } catch (e) {} }, 50);
+}
+$$('#task-subtabs button').forEach(b => b.onclick = () => showTaskSub(b.dataset.tsub));
+
 async function renderTask() {
   const t = curTask(); if (!t) return;
   // 切任务/筛选/时间范围时清掉「点选的历史轮次」，明细回到最新一轮
