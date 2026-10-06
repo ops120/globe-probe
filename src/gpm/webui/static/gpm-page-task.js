@@ -183,6 +183,24 @@ async function renderRttLoss(t, from, to, noLoss) {
     dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 8, borderColor: C('--input-bd'), backgroundColor: C('--chart-bg'), fillerColor: 'rgba(78,140,230,.15)', handleStyle: { color: C('--accent') }, textStyle: { color: C('--faint') } }],
     series: sSeries,
   }, p => openDetail(t, Math.round(p.value[0] / 1000), p.seriesName));
+    // ===== 图表联动（RTT <-> 丢包）：hover/缩放/拖拽/框选 全部同步 =====
+    // 实现：echarts.connect() 联动 tooltip/dataZoom；十字准星用 mousemove 跨图同步
+    if (!noLoss && charts["chart-rtt"] && charts["chart-loss"]) {
+      connectCharts(["chart-rtt", "chart-loss"], "rtt-loss-group");
+      // 十字准星：hover RTT 图 -> 同步丢包图；反之亦然
+      ["chart-rtt", "chart-loss"].forEach(srcId => {
+        const src = charts[srcId];
+        const tgtIds = ["chart-rtt", "chart-loss"].filter(x => x !== srcId);
+        src.getZr().on("mousemove", (params) => {
+          const x = (params && params.offsetX != null) ? params.offsetX : 0;
+          syncCrosshair(srcId, tgtIds, x);
+        });
+        src.getZr().on("globalout", () => { clearCrosshair(tgtIds); });
+        src.on("globalout", () => { clearCrosshair(tgtIds); });
+      });
+    }
+    // ===== 图表联动结束 =====
+
   if (!noLoss) chart('chart-loss', {
     grid: { left: 50, right: 14, top: 30, bottom: 30 },
     legend: { data: legend, textStyle: { color: C('--chart-label'), fontSize: 11 }, itemWidth: 14 },

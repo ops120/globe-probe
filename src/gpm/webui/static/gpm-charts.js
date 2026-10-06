@@ -19,3 +19,38 @@ function chart(id, option, onClick) {
   charts[id].clear(); charts[id].setOption(option);
 }
 function chartOf(id) { return charts[id]; }
+
+/* 图表联动（Chart Linking / Crosshair Sync）：同一时间轴多图同步
+ * hover 一处 → 多图同步十字准星 + tooltip；缩放/拖拽/框选同步；
+ * 业界叫法：Chart Linking / Synchronized Charts / Coordinated Multiple Views。
+ */
+function connectCharts(ids, groupName) {
+  const list = ids.map(id => charts[id]).filter(Boolean);
+  if (list.length < 2) return;
+  // echarts.connect() 正确用法：传数组直接连接，或先设 group 再 connect(groupName)
+  // 这里用数组方式最稳（echarts 5.x 官方 API）
+  list.forEach(c => { c.group = groupName; });
+  echarts.connect(list);
+}
+
+/* 十字准星同步（Crosshair Sync）：hover 一处，多图同步竖直虚线 */
+function syncCrosshair(sourceId, targetIds, xPos) {
+  targetIds.forEach(id => {
+    const c = charts[id];
+    if (!c) return;
+    const line = { type: 'line', shape: { x1: xPos, y1: 0, x2: xPos, y2: c.getHeight() }, style: { stroke: '#ff8b8b', lineWidth: 1, lineDash: [4, 4] }, silent: true };
+    c.setOption({ graphic: [{ type: 'group', id: 'crosshair', elements: [line] }] });
+  });
+}
+
+/* 清除十字准星（鼠标移出时调用） */
+function clearCrosshair(ids) {
+  ids.forEach(id => {
+    const c = charts[id];
+    if (c) c.setOption({ graphic: [{ type: 'group', id: 'crosshair', elements: [] }] });
+  });
+}
+
+window.connectCharts = connectCharts;
+window.syncCrosshair = syncCrosshair;
+window.clearCrosshair = clearCrosshair;
