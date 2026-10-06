@@ -81,7 +81,7 @@ RULE_LAYER_TO_ROOT = {
 
 # ---------------------------------------------------------------- 证据池（代码切分）
 
-def build_evidence(detail: dict) -> list:
+def build_evidence(detail: dict, storage=None) -> list:
     """从事件详情（人类在弹窗里看到的同一份数据）切出候选证据，带稳定 id。
 
     这一步必须是**纯代码**：模型只能从这里挑，不能自己编引文。
@@ -122,6 +122,20 @@ def build_evidence(detail: dict) -> list:
         if p.get("cpu") is None and p.get("mem") is None:
             continue
         push("node_resource", "节点心跳资源：cpu=%s mem=%s" % (p.get("cpu"), p.get("mem")), False)
+
+    # 基线偏离（第十期）：同任务近 1h 的 anomaly firing 告警。z≥2k 记 strong——
+    # 偏离远超判定阈值时，这比 error_class 更能说明「是真的变了」而非抖动。
+    if storage is not None:
+        tid = str(inc.get("task_id") or "")
+        if tid:
+            try:
+                for a in (storage.recent_anomaly_alerts(tid, max(0, int(inc.get("started_at") or 0) - 3600)) or [])[:2]:
+                    z = a.get("z")
+                    strong = bool(z is not None and abs(float(z)) >= 6)
+                    push("baseline", "动态基线偏离告警：%s（偏离 %skσ）"
+                         % (a.get("rule_name") or "?", z if z is not None else "?"), strong)
+            except Exception:
+                pass  # 证据查询失败不影响证据池其余部分
 
     if not inc.get("task_id"):
         push("node_heartbeat", "节点侧事件：心跳中断（任务侧无目标）", True)
@@ -286,7 +300,7 @@ def consistency(rule_root: str, decision: dict) -> str:
 
 # ---------------------------------------------------------------- 主流程
 
-def run(detail: dict, judge=None, ts: int | None = None, cfg=None) -> dict:
+def run(detail: dict, judge=None, ts: int | None = None, cfg=None, storage=None) -> dict:
     """对一个事件跑一次 JEV 判断，返回可回放的轨迹。
 
     **前置门禁（第七期 38）**：调用方必须先确认「不可信事件数 = 0」，
@@ -295,7 +309,7 @@ def run(detail: dict, judge=None, ts: int | None = None, cfg=None) -> dict:
     cfg 留空时使用模块级常量（由 init(cfg) 同步为 cfg.jev.*）。
     """
     t0 = int(ts or time.time())
-    evidence = build_evidence(detail)
+    evidence = build_evidence(detail, storage=storage)
     inc = detail.get("incident") or {}
     rule_layer, rule_advice = classify(str((inc.get("reason") or {}).get("error_class") or ""))
     rule_root = RULE_LAYER_TO_ROOT.get(rule_layer, "")

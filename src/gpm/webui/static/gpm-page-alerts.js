@@ -461,6 +461,28 @@ window.ruleModal = async (rid) => {
     + '<div class="m-sub">默认每 30s 评估一轮；命中后按静默期去重，恢复时再发一条「已恢复」</div>'
     + '<div class="form-row"><label>规则名</label><input type="text" id="r-name" value="' + esc(x ? x.name : '') + '" placeholder="如 可用率跌破 95%"></div>'
     + '<div class="form-row"><label>指标</label><select id="r-metric">' + mopts + '</select></div>'
+    // 动态基线（第十期）：仅 metric=anomaly 时显示；预览按钮调 /api/baseline 保存前看得见基线
+    + '<div id="r-anomaly" class="hidden" style="border:1px dashed var(--bd);border-radius:8px;padding:8px;margin:6px 0;font-size:12px">'
+    + '<div class="form-row"><label>指标字段</label><select id="r-a-field">'
+    + '<option value="rtt_avg">延迟均值 rtt_avg</option><option value="avail_rate">可用率 avail_rate</option>'
+    + '<option value="loss_rate">丢包率 loss_rate</option></select></div>'
+    + '<div class="form-row"><label>敏感度 k</label><input type="text" id="r-a-k" value="3" style="max-width:80px">'
+    + '<span class="sub" style="margin-left:8px">方向</span><select id="r-a-dir" style="max-width:200px;margin-left:6px">'
+    + '<option value="">随指标（rtt=up，avail/loss=down）</option><option value="both">both</option>'
+    + '<option value="up">up</option><option value="down">down</option></select></div>'
+    + '<div class="form-row"><label>窗口模式</label><select id="r-a-mode" style="max-width:200px">'
+    + '<option value="rolling">rolling（最近 N 天滚动）</option><option value="fixed">fixed（锚定起点，业务变过用）</option></select></div>'
+    + '<div class="form-row"><label>基线天数</label><input type="text" id="r-a-days" value="14" style="max-width:80px">'
+    + '<span class="sub" style="margin-left:8px">fixed 起点 YYYY-MM-DD</span><input type="text" id="r-a-from" placeholder="2026-09-01" style="max-width:130px;margin-left:6px"></div>'
+    + '<div class="form-row"><label>对齐</label><select id="r-a-align" style="max-width:220px">'
+    + '<option value="hour">同小时（日周期）</option><option value="weekday_hour">星期几+小时（周周期，样本门槛×7）</option></select></div>'
+    + '<div class="form-row" style="align-items:flex-start"><label>排除时段</label>'
+    + '<textarea id="r-a-excl" rows="2" style="flex:1" placeholder="一行一段：2026-06-01~2026-06-10（大促压测期不进基线）"></textarea></div>'
+    + '<div class="form-row"><label>样本门槛</label><input type="text" id="r-a-mins" value="20" style="max-width:80px">'
+    + '<span class="sub" style="margin-left:8px">连续桶</span><input type="text" id="r-a-mc" value="2" style="max-width:60px;margin-left:6px"></div>'
+    + '<div style="margin:6px 0"><button class="btn sm ghost" id="r-a-preview">预览基线带</button>'
+    + '<span class="sub" style="margin-left:8px">用当前表单参数实际算一遍，保存前确认基线不是空的</span></div>'
+    + '<div id="r-a-preview-out" class="sub" style="white-space:pre-wrap;max-height:160px;overflow:auto"></div></div>'
     + '<div class="form-row"><label>比较</label><select id="r-op" style="max-width:90px">' + oopts + '</select>'
     + '<input type="text" id="r-thr" value="' + (x ? x.threshold : '0.95') + '" placeholder="阈值（可用率/丢包率用 0~1）"></div>'
     + '<div class="form-row"><label>窗口(秒)</label><input type="text" id="r-win" value="' + (x ? x.window_seconds : 300) + '"></div>'
@@ -485,6 +507,53 @@ window.ruleModal = async (rid) => {
     $('#r-node-row').style.display = s === 'node' ? 'flex' : 'none';
   };
   $('#r-scope').onchange = syncScope; syncScope();
+  // anomaly 表单联动：隐藏阈值语义行、强制任务范围、回填编辑值
+  const collectParams = () => ({
+    metric_field: $('#r-a-field').value, k: Number($('#r-a-k').value) || 3,
+    direction: $('#r-a-dir').value, window_mode: $('#r-a-mode').value,
+    baseline_days: parseInt($('#r-a-days').value) || 14, baseline_from: $('#r-a-from').value.trim(),
+    align: $('#r-a-align').value, min_samples: parseInt($('#r-a-mins').value) || 20,
+    min_consecutive: parseInt($('#r-a-mc').value) || 2,
+    exclude_windows: $('#r-a-excl').value.split('\n').map(s => s.trim()).filter(Boolean),
+  });
+  const syncMetric = () => {
+    const isA = $('#r-metric').value === 'anomaly';
+    $('#r-anomaly').classList.toggle('hidden', !isA);
+    $('#r-op').disabled = isA; $('#r-thr').disabled = isA;
+    $('#r-win').disabled = isA;
+    $('#r-op').parentElement.style.opacity = isA ? .45 : 1;
+    if (isA) {
+      $('#r-scope').value = 'task';                     // anomaly 必须指定任务
+      if (!$('#r-task').value && (state.tasks || []).length) $('#r-task').value = state.tasks[0].id;
+    }
+    syncScope();
+  };
+  $('#r-metric').onchange = syncMetric;
+  if (x && x.params && x.metric === 'anomaly') {
+    const p = x.params;
+    $('#r-a-field').value = p.metric_field || 'avail_rate';
+    $('#r-a-k').value = p.k != null ? p.k : 3; $('#r-a-dir').value = p.direction || '';
+    $('#r-a-mode').value = p.window_mode || 'rolling'; $('#r-a-days').value = p.baseline_days || 14;
+    $('#r-a-from').value = p.baseline_from || ''; $('#r-a-align').value = p.align || 'hour';
+    $('#r-a-mins').value = p.min_samples || 20; $('#r-a-mc').value = p.min_consecutive || 2;
+    $('#r-a-excl').value = (p.exclude_windows || []).join('\n');
+  }
+  syncMetric();
+  $('#r-a-preview').addEventListener('click', async () => {
+    try {
+      const p = collectParams();
+      const q = new URLSearchParams({ task_id: $('#r-task').value, exclude_windows: JSON.stringify(p.exclude_windows) });
+      ['metric_field', 'k', 'direction', 'min_samples', 'min_consecutive', 'window_mode',
+       'baseline_days', 'baseline_from', 'align'].forEach(key => { if (p[key] !== '' && p[key] != null) q.set(key, p[key]); });
+      const r = await api('/api/baseline?' + q.toString());
+      const lines = (r.streams || []).slice(0, 8).map(s => (s.node_id || '') + (s.dns ? '·' + s.dns : '')
+        + (s.url ? '·' + s.url : '') + '：' + (s.evaluable
+          ? '中位 ' + s.center + '（MAD ' + s.scale + '，n=' + s.samples + '，' + s.mode + '）当前 '
+            + (s.cur_v != null ? s.cur_v : '—') + '，z=' + (s.worst_z != null ? s.worst_z : '—')
+          : (s.reason || '不可评估')));
+      $('#r-a-preview-out').textContent = (r.evaluable ? '基线可行 ✓\n' : '不可评估 ✗\n') + lines.join('\n');
+    } catch (e) { $('#r-a-preview-out').textContent = '预览失败: ' + e.message; }
+  });
   $('#r-save').onclick = async () => {
     const scope = $('#r-scope').value;
     const body = {
@@ -496,6 +565,7 @@ window.ruleModal = async (rid) => {
       node_id: scope === 'node' ? $('#r-node').value : '',
       channel_ids: [...document.querySelectorAll('.r-ch:checked')].map(c => c.value),
     };
+    if ($('#r-metric').value === 'anomaly') body.params = collectParams();
     try {
       await api(x ? '/api/alerts/rules/' + x.id : '/api/alerts/rules', {
         method: x ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

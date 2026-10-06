@@ -15,6 +15,7 @@ function corrStatusBadge(open) {
 }
 function corrKindBadge(m) {
   if (m.kind === 'incident') return '<span class="badge b-off">本地</span>';
+  if (m.kind === 'alert') return '<span class="badge b-fail">告警·基线</span>';
   return '<span class="badge b-warn">外部·' + esc(m.source || '?') + '</span>';
 }
 

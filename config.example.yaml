@@ -80,6 +80,10 @@ alert:
   retry_backoff_seconds: [60, 300, 900]
   notify_default_timeout_seconds: 8.0   # 单渠道发送超时（SMTP 全流程耗时会超过一个超时额度）
   notify_default_smtp_port: 587
+  anomaly_baseline_days: 14        # 动态基线默认窗口天数（规则 params 可逐条覆盖）
+  anomaly_min_samples: 20          # 基线样本门槛（不足如实拒评）
+  anomaly_default_k: 3.0           # 默认敏感度 kσ
+  anomaly_min_consecutive: 2       # 连续 N 个小时桶偏离才进入告警
 
 # —— 报表 ——
 report:
@@ -103,6 +107,9 @@ corr:
 agent:
   server_url: "http://127.0.0.1:8620"
   register_token: "gpm-dev-register"   # 生产请用 GPM_REGISTER_TOKEN 环境变量
+  # 多 server failover 备用地址（server_url 是首选/粘滞主地址）。前提：全部 server
+  # 共享同一 DB 与 register_token，独立 DB 形态不支持 failover
+  servers: []
   name: "bj-ct-01"
   tags: { region: "cn-north", isp: "telecom" }
   data_dir: "data/agent"

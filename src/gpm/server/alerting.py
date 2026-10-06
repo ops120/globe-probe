@@ -39,6 +39,7 @@ METRICS = {
     "rtt_p95": ("延迟 P95", "gt", "ms", True),
     "loss": ("丢包率", "gt", "%", True),
     "node_offline": ("节点离线", "eq", "", False),
+    "anomaly": ("动态基线偏离", "gt", "kσ", True),   # 第十期：与自己的历史同时段比，无需手拍阈值
 }
 OPS = {"lt": "<", "gt": ">", "eq": "=", "ne": "!="}
 
@@ -455,6 +456,120 @@ def evaluate(storage, ts: int = 0) -> list[dict]:
         return _evaluate_impl(storage, ts)
 
 
+# 动态基线预警日志限频（rule_id -> 上次预警时间）：预警只进日志，别把日志刷爆
+_ANOMALY_WARN_AT: dict = {}
+
+
+def _anomaly_changes(storage, rule: dict, task: dict, label: str, ts: int) -> list[dict]:
+    """anomaly 规则评估（第十期）：动态基线偏离，产出与主循环同构的 changes。
+
+    与阈值路径的差异：不走 window_stats（阈值语义不适用），判定来自 baseline.baseline()
+    的流级 z 序列；firing/resolved 仍走同一套告警状态机（alerts 追加行/silence/重投全复用）。
+    另含 5m 快路径「预警」：只 log.warning，不改状态机（设计文档 §五 双层判定）。
+    """
+    from . import baseline as _bl
+    p = _bl.params_of(rule)
+    task_id = str(task["id"])
+    try:
+        res = _bl.baseline(storage, task_id, p, ts)
+    except Exception as e:  # noqa: BLE001 - 基线计算失败绝不影响其它规则评估
+        log.warning("动态基线计算失败 rule=%s task=%s: %s", rule["name"], task_id, e)
+        return []
+    if not res.get("evaluable"):
+        # 冷启动/样本不足：如实说明，限频记日志（每规则 10 分钟最多一条）
+        last_warn = _ANOMALY_WARN_AT.get(rule["id"], 0)
+        if ts - last_warn > 600:
+            _ANOMALY_WARN_AT[rule["id"]] = ts
+            reason = next((s.get("reason") for s in res.get("streams", []) if s.get("reason")),
+                          "样本不足")
+            log.info("动态基线未评估 rule=%s task=%s：%s（基线就绪前由阈值规则兜底）",
+                     rule["name"], task_id, reason)
+        return []
+
+    fired = [s for s in res["streams"] if s.get("fired")]
+    key = task_id
+    opened = storage.alert_open(rule["id"], key)
+    last = storage.alert_last(rule["id"], key)
+
+    # 5m 快路径预警：当前 5m 桶按同一基线偏离超 k → 日志提醒（不改告警状态机）
+    if not fired:
+        try:
+            mf = res["metric_field"]
+            t5 = ts // 300 * 300 - 300
+            for r in storage.agg_metric_values(task_id, "5m", mf, t5, t5):
+                s0 = next((s for s in res["streams"]
+                           if s["node_id"] == r["node_id"] and s["dns"] == r["dns"]
+                           and s["url"] == r["url"] and s.get("evaluable")), None)
+                if not s0 or r["value"] is None or not s0.get("scale"):
+                    continue
+                z5 = (float(r["value"]) - s0["center"]) / s0["scale"]
+                if abs(z5) >= (s0.get("eff_k") or res["k"]) and \
+                        (res["direction"] != "down" or z5 <= 0) and \
+                        (res["direction"] != "up" or z5 >= 0):
+                    last_warn = _ANOMALY_WARN_AT.get(rule["id"], 0)
+                    if ts - last_warn > 600:
+                        _ANOMALY_WARN_AT[rule["id"]] = ts
+                        log.warning("动态基线预警（未确认）: %s 流 %s 当前值 %.2f 偏离基线 "
+                                    "%.2f±%.2f 达 %.1fkσ——等 1h 桶确认", rule["name"],
+                                    (r["node_id"], r["dns"], r["url"]), float(r["value"]),
+                                    s0["center"], s0["scale"], abs(z5))
+                    break
+        except Exception:  # noqa: BLE001 - 预警绝不影响正式评估
+            pass
+
+    # 当前桶偏离度（滞回判定）：恢复=当前桶 |z| < 0.8k，而非「连续序列仍偏离」——
+    # 否则前一小时的历史偏离会挡住恢复
+    evaluable_streams = [s for s in res["streams"] if s.get("evaluable")]
+    cur_dev = max((abs(s["zs"][-1][2]) for s in evaluable_streams
+                   if s.get("zs") and s["zs"][-1][2] is not None), default=None)
+    # 状态语义：进入=连续 mc 桶偏离（fired）；维持=当前桶 |z| ≥ eff_k；恢复=当前桶
+    # |z| < 0.8*eff_k（滞回）。eff_k：zscore=k / bounded=1.0（流级 st["eff_k"]）——
+    # 用 k 会让 bounded 在 z∈[1.0,0.8k) firing↔resolved 振铃（复核 P1 修正）
+    _eff_k = max((s.get("eff_k") or res["k"]) for s in res["streams"]
+                 if s.get("evaluable")) if res["streams"] else res["k"]
+    cur_deviant = bool(cur_dev is not None and cur_dev >= _eff_k)
+    in_firing = bool(opened and last and last["status"] == "firing")
+    if in_firing and cur_dev is not None and cur_dev < 0.8 * _eff_k:
+        kind = "resolved"                      # 滞回恢复
+    elif fired:
+        if in_firing and (ts - int(last["ts"] or 0)) < int(rule["silence_seconds"] or 0):
+            return []                          # 持续偏离，静默期内不打扰
+        kind = "remind" if in_firing else "firing"
+    elif in_firing:
+        return []                              # 0.8*eff_k~eff_k 滞回带内：维持 firing 不发通知
+    else:
+        return []                              # 无未恢复告警且未满足进入条件
+
+    # 展示流：firing/remind 取最劣流；resolved 取首个可评估流
+    pool = fired or [s for s in res["streams"] if s.get("evaluable")]
+    worst = max(pool, key=lambda s: abs(s.get("worst_z") or 0)) if kind != "resolved" \
+        else pool[0]
+    where = " · ".join(x for x in (worst["node_id"], worst.get("dns") or "",
+                                   worst.get("url") or "") if x)
+    head = {"firing": "【告警】", "remind": "【提醒】", "resolved": "【恢复】"}[kind]
+    title = head + "动态基线偏离 · " + str(rule["name"])
+    zs_txt = "；".join("当前 %.2f（%s）" % (v, _time_text(t)) for t, v, _ in worst.get("zs", [])
+                       if v is not None) or "当前值缺失"
+    body = "\n".join([
+        "- 规则：" + str(rule["name"]) + "（动态基线偏离）",
+        "- 任务：" + label,
+        "- 基线：" + res.get("window_desc", ""),
+        ("- 判定：偏离 %skσ ≥ 阈值 %skσ，连续 %d 个小时桶"
+         % (worst.get("worst_z") if worst.get("worst_z") is not None else 0,
+            res.get("k"), int(res.get("mc") or 0))) if kind != "resolved"
+        else "- 判定：已回到基线带宽内（滞回恢复）",
+        "- 最劣流：" + where,
+        "- " + zs_txt,
+        "- 基线数字：中位 %s（MAD %s，样本 %d）" % (
+            worst.get("center"), worst.get("scale"), worst.get("samples")),
+    ])
+    target = {"task_id": task_id, "node_id": worst.get("node_id") or "", "label": label,
+              "value": worst.get("cur_v"), "threshold": res.get("k"),
+              "z": worst.get("worst_z"), "samples": worst.get("samples")}
+    return [{"rule": rule, "key": key, "label": label, "kind": kind,
+             "title": title, "text": body, "target": target}]
+
+
 def _evaluate_impl(storage, ts: int = 0) -> list[dict]:
     import time
     ts = ts or int(time.time())
@@ -470,6 +585,18 @@ def _evaluate_impl(storage, ts: int = 0) -> list[dict]:
 
     for rule in rules:
         metric = rule["metric"]
+        if metric == "anomaly":
+            # 动态基线（第十期）：不走 window_stats 阈值路径，判定在 baseline.baseline()；
+            # 创建时已校验必须指定任务（任务级基线，按流判定）
+            t_id = str(rule["task_id"] or "")
+            task = tasks.get(t_id)
+            if not task or not task.get("enabled"):
+                continue
+            if storage.in_maintenance(ts, task_id=t_id):
+                continue
+            changes.extend(_anomaly_changes(storage, rule, task,
+                                            task.get("name") or t_id, ts))
+            continue
         keys: list[tuple[str, str]] = []          # [(key, label)]
         if metric == "node_offline":
             ids = [rule["node_id"]] if rule["node_id"] else list(nodes)

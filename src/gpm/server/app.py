@@ -22,6 +22,10 @@ from .storage import BUCKET_SECONDS, Storage
 
 log = logging.getLogger("gpm.server")
 
+
+class _LeaseSkip(Exception):
+    """后台循环未持有单执行者租约时的本轮跳过标记（内部控制流，非错误）。"""
+
 # 应用元信息（页脚/接口展示用；与 pyproject.toml 的 authors/urls 保持一致）
 AUTHOR = "ops120"
 REPO = "https://github.com/ops120/globe-probe"
@@ -42,8 +46,16 @@ def create_app(cfg, storage: Storage | None = None):
                               cfg.probe.get("flap_window_seconds", 600),
                               cfg.probe.get("flap_max_seconds", 21600))
     ingest = Ingest(storage, machine, cfg.server)
+    # 后台任务单执行者租约（server 集群，.docs/CLUSTER_DESIGN.md 阶段 2）：
+    # holder 每进程唯一；SQLite 单机形态 hold 恒真零开销，多实例时只有持租约节点干活
+    import uuid as _uuid
+    _holder = _uuid.uuid4().hex[:12]
+    _LEASE_NAMES = ("sweep", "agg", "retention", "alert", "retry",
+                    "digest", "channel_probe", "pull")
+    from .lease import DbLease
     state = {"storage": storage, "cfg": cfg, "ingest": ingest,
-             "register_token": cfg.agent.get("register_token", "gpm-dev-register")}
+             "register_token": cfg.agent.get("register_token", "gpm-dev-register"),
+             "leases": {name: DbLease(storage, name, _holder) for name in _LEASE_NAMES}}
 
     # 结构化日志开关（GPM_LOG_JSON=1，默认关闭保持原有纯文本行为）。这里与 lifespan
     # 各调一次是故意的：uvicorn.run() 在 create_app 之后才应用自己的日志配置，
@@ -258,10 +270,12 @@ async def _channel_probe_loop(state: dict, stop: asyncio.Event):
     while not stop.is_set():
         try:
             # notify.send 是阻塞网络调用 → 丢线程池，别卡事件循环
-            results = await asyncio.to_thread(channel_selfcheck_tick, s)
-            for r in results:
-                (log.info if r["ok"] else log.warning)(
-                    "渠道自检 %s(%s): %s", r["name"], r["channel_id"], r["detail"])
+            # 单执行者租约：渠道探针会真实外发消息，多实例必须只有一台跑
+            if state["leases"]["channel_probe"].hold():
+                results = await asyncio.to_thread(channel_selfcheck_tick, s)
+                for r in results:
+                    (log.info if r["ok"] else log.warning)(
+                        "渠道自检 %s(%s): %s", r["name"], r["channel_id"], r["detail"])
         except Exception as e:  # noqa: BLE001 - 自检失败绝不影响主流程
             log.error("渠道自检失败: %s", e)
         try:
@@ -280,14 +294,15 @@ async def _pull_loop(state: dict, stop: asyncio.Event):
     while not stop.is_set():
         try:
             from . import pullers
-            for src in pullers.due_sources(s, now()):
-                # poll_source 是阻塞网络调用（HTTP 拉取）→ 丢线程池，别卡事件循环
-                r = await asyncio.to_thread(pullers.poll_source, s, src)
-                if r.get("error"):
-                    log.warning("拉取 %s 失败：%s", src, r["error"])
-                elif r.get("fetched"):
-                    log.info("拉取 %s：%d 条（新增 %d 更新 %d）",
-                             src, r["fetched"], r["created"], r["updated"])
+            if state["leases"]["pull"].hold():
+                for src in pullers.due_sources(s, now()):
+                    # poll_source 是阻塞网络调用（HTTP 拉取）→ 丢线程池，别卡事件循环
+                    r = await asyncio.to_thread(pullers.poll_source, s, src)
+                    if r.get("error"):
+                        log.warning("拉取 %s 失败：%s", src, r["error"])
+                    elif r.get("fetched"):
+                        log.info("拉取 %s：%d 条（新增 %d 更新 %d）",
+                                 src, r["fetched"], r["created"], r["updated"])
         except Exception as e:  # noqa: BLE001 - 拉取失败不影响主流程
             log.error("第三方告警拉取失败: %s", e)
         try:
@@ -300,9 +315,11 @@ async def _sweep_loop(state: dict, stop: asyncio.Event):
     s: Storage = state["storage"]
     while not stop.is_set():
         try:
-            n = s.sweep_offline(state["cfg"].server.get("heartbeat_timeout", 60), now())
-            if n:
-                log.warning("%d 个节点心跳超时，标记离线", n)
+            # 单执行者租约：未持租约实例本轮跳过（单机形态 hold 恒真，零开销）
+            if state["leases"]["sweep"].hold():
+                n = s.sweep_offline(state["cfg"].server.get("heartbeat_timeout", 60), now())
+                if n:
+                    log.warning("%d 个节点心跳超时，标记离线", n)
         except Exception as e:  # noqa
             log.error("离线 sweep 失败: %s", e)
         try:
@@ -329,9 +346,11 @@ async def _alert_loop(state: dict, stop: asyncio.Event):
             from . import alerting
             # evaluate 内部含告警派发（notify.send 是阻塞网络调用，SMTP/HTTP 可达数十秒）
             # → 丢线程池。直接跑会停摆整个事件循环（/api/health 一并假死），假死复发路径。
-            events = await asyncio.to_thread(alerting.evaluate, s, now())
-            if events:
-                log.warning("告警评估产生 %d 条事件（firing/remind/resolved）", len(events))
+            # 单执行者租约：未持租约实例跳过本轮评估（防多实例重复告警）。
+            if state["leases"]["alert"].hold():
+                events = await asyncio.to_thread(alerting.evaluate, s, now())
+                if events:
+                    log.warning("告警评估产生 %d 条事件（firing/remind/resolved）", len(events))
         except Exception as e:  # noqa
             log.error("告警评估失败: %s", e)
         try:
@@ -341,7 +360,9 @@ async def _alert_loop(state: dict, stop: asyncio.Event):
 
 
 async def _selfcheck_loop(state: dict, stop: asyncio.Event):
-    """每 60s 记录一次内存与线程数：出现「假死」时可回看是内存压力还是线程池耗尽。"""
+    """每 60s 记录一次内存与线程数：出现「假死」时可回看是内存压力还是线程池耗尽。
+
+    刻意**不接单执行者租约**：这是每实例的自诊断，单执行反而会藏掉其它实例的健康面。"""
     interval = 60
     while not stop.is_set():
         try:
@@ -369,10 +390,11 @@ async def _retry_loop(state: dict, stop: asyncio.Event):
         try:
             from . import alerting
             # 重投内部走 notify.send（阻塞网络调用）→ 丢线程池，别卡事件循环
-            done = await asyncio.to_thread(alerting.retry_pending, s, now(), 10)
-            if done:
-                log.info("通知重投：%d 条（成功 %d）", len(done),
-                         sum(1 for d in done if d["status"] == "done"))
+            if state["leases"]["retry"].hold():
+                done = await asyncio.to_thread(alerting.retry_pending, s, now(), 10)
+                if done:
+                    log.info("通知重投：%d 条（成功 %d）", len(done),
+                             sum(1 for d in done if d["status"] == "done"))
         except Exception as e:  # noqa: BLE001
             log.error("通知重投失败: %s", e)
         try:
@@ -387,7 +409,7 @@ async def _digest_loop(state: dict, stop: asyncio.Event):
     interval = int(state["cfg"].server.get("digest_check_interval", 300) or 300)
     while not stop.is_set():
         try:
-            if s.setting_get("digest_enabled", "0") == "1":
+            if s.setting_get("digest_enabled", "0") == "1" and state["leases"]["digest"].hold():
                 hours = int(s.setting_get("digest_interval_hours", "24") or 24)
                 last = int(s.setting_get("digest_last_ts", "0") or 0)
                 if now() - last >= max(1, hours) * 3600:
@@ -408,6 +430,8 @@ async def _agg_loop(state: dict, stop: asyncio.Event):
     s: Storage = state["storage"]
     while not stop.is_set():
         try:
+            if not state["leases"]["agg"].hold():
+                raise _LeaseSkip()
             t = now()
             for bucket in ("1m", "5m", "1h", "1d"):
                 step = BUCKET_SECONDS[bucket]
@@ -423,6 +447,8 @@ async def _agg_loop(state: dict, stop: asyncio.Event):
                 # 聚合重算可能整段读 probe_results（停机数天后追赶）→ 丢线程池
                 await asyncio.to_thread(s.agg_recompute, bucket, b_from, complete_to + step)
                 s.meta_set(f"agg_cursor_{bucket}", str(complete_to))
+        except _LeaseSkip:
+            pass                                   # 未持租约实例本轮跳过（单执行者）
         except Exception as e:  # noqa
             log.error("聚合 sweep 失败: %s", e)
         try:
@@ -437,7 +463,9 @@ async def _retention_loop(state: dict, stop: asyncio.Event):
     while not stop.is_set():
         try:
             # retention 是持全局锁的多表大批量 DELETE（首次清 30 天原始数据可达分钟级）
-            # → 丢线程池，别把事件循环一起拖死
+            # → 丢线程池，别把事件循环一起拖死；单执行者租约防多实例重复删
+            if not state["leases"]["retention"].hold():
+                raise _LeaseSkip()
             n = await asyncio.to_thread(
                 s.retention,
                 srv.get("retention_raw_days", 30), srv.get("retention_1m_days", 90),
@@ -451,6 +479,8 @@ async def _retention_loop(state: dict, stop: asyncio.Event):
             s.meta_set("last_retention", str(now()))
             if any(n.values()):
                 log.info("保留策略清理完成: %s", n)
+        except _LeaseSkip:
+            pass
         except Exception as e:  # noqa
             log.error("保留策略清理失败: %s", e)
         try:

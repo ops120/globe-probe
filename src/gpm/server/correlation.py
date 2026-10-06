@@ -160,6 +160,37 @@ def _fault_of_external(a: dict) -> dict:
     }
 
 
+def _fault_of_alert(a: dict) -> dict:
+    """第三故障源：anomaly 告警（alerts 表 firing 行）。
+
+    与事件的差异：没有 dns/url 流粒度，只有任务/节点画像；同任务维度可与
+    事件/其它告警成簇（「同任务维度可与事件成簇」），时间聚集照常生效。
+    """
+    tgt = a.get("target")
+    if not isinstance(tgt, dict):
+        tgt = {}
+    task_id = str(tgt.get("task_id") or "")
+    return {
+        "kind": "alert",
+        "ref": int(a.get("id") or 0),
+        "title": "【告警·基线偏离】%s" % (a.get("rule_name") or a.get("rule_id") or "?"),
+        "task_id": task_id,
+        "task_name": "",
+        "node_id": str(tgt.get("node_id") or ""),
+        "node_name": "",
+        "node_tags": {},
+        "source": "anomaly",
+        "start": int(a.get("ts") or 0),
+        "end": 0,
+        "open": a.get("status") == "firing",
+        "error_class": "",
+        "dns": "",
+        "url": "",
+        "hosts": set(),
+        "labels": {"z": str(tgt.get("z") or "")},
+    }
+
+
 def _overlap(fa: dict, fb: dict) -> bool:
     """时间聚集：区间有交集，或起点相差 ≤ burst（突发窗口）。"""
     b_len = BURST_SECONDS
@@ -268,6 +299,13 @@ def analyze(storage, t_from: int, t_to: int = 0) -> dict:
 
     faults = [_fault_of_incident(i, tasks, nodes) for i in incidents]
     faults += [_fault_of_external(a) for a in ext]
+    # 第三故障源（评审补）：动态基线告警只写 alerts 不开事件——不开第三源就永远进不了簇。
+    # 只取 firing 的 anomaly 告警（阈值型告警与事件语义重叠，不重复计入）。
+    try:
+        alerts_src = storage.list_anomaly_alerts(t_from, t_to) or []
+    except AttributeError:                     # 测试 FakeStorage 未实现时的诚实降级
+        alerts_src = []
+    faults += [_fault_of_alert(a) for a in alerts_src]
     faults = [f for f in faults if f["start"]]
     # 主键去重（incidents 与 external id 空间独立，(kind, ref) 唯一）
     seen, uniq = set(), []

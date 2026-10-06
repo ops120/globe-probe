@@ -70,6 +70,11 @@ CREATE TABLE IF NOT EXISTS tokens(
   revoked_at INTEGER DEFAULT 0);
 
 -- GeoIP 结果缓存（避免频繁打外部接口）
+CREATE TABLE IF NOT EXISTS lease(
+  name TEXT PRIMARY KEY, holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
+-- 后台任务单执行者（server 集群，.docs/CLUSTER_DESIGN.md 阶段 2）：持有者心跳续约，
+-- 超时即可被争夺。时间一律 DB 侧 epoch 秒（strftime('%s','now')），规避节点时钟漂移。
+
 CREATE TABLE IF NOT EXISTS geo_cache(
   ip TEXT PRIMARY KEY, data_json TEXT DEFAULT '{}', ts INTEGER);
 
@@ -87,7 +92,7 @@ CREATE TABLE IF NOT EXISTS alert_rules(
   window_seconds INTEGER DEFAULT 300, task_id TEXT DEFAULT '', node_id TEXT DEFAULT '',
   group_id TEXT DEFAULT '', severity TEXT DEFAULT 'warning',
   channel_ids_json TEXT DEFAULT '[]', silence_seconds INTEGER DEFAULT 1800,
-  escalate_minutes INTEGER DEFAULT 0,
+  escalate_minutes INTEGER DEFAULT 0, params_json TEXT DEFAULT '{}',
   enabled INTEGER DEFAULT 1, created_at INTEGER);
 
 -- 维护窗口：窗口内不评估规则，也不计入可用率（SLA 侧按事件剔除）
@@ -212,6 +217,9 @@ class Storage:
             acols = [r[1] for r in self.db.execute("PRAGMA table_info(alert_rules)")]
             if "escalate_minutes" not in acols:
                 self.db.execute("ALTER TABLE alert_rules ADD COLUMN escalate_minutes INTEGER DEFAULT 0")
+            if "params_json" not in acols:
+                # 动态基线（第十期）：anomaly 规则参数（k/方向/基线窗口）收在这一列
+                self.db.execute("ALTER TABLE alert_rules ADD COLUMN params_json TEXT DEFAULT '{}'")
             self.db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version','1')")
             self.db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('config_version','1')")
             self.db.commit()
@@ -1455,6 +1463,89 @@ class Storage:
             self.db.commit()
 
     # ---------- 告警规则 ----------
+    def agg_metric_values(self, task_id: str, bucket: str, metric_field: str,
+                         t_from: int, t_to: int) -> list[dict]:
+        """动态基线取值：窗口内该任务全部流的指定指标列。
+
+        metric_field 只允许聚合表既有列名（白名单在 baseline.METRIC_FIELDS，此处再挡一层
+        防注入——列名不能走参数绑定）。返回 (ts,node,dns,url,value) 字典列表。"""
+        if metric_field not in ("rtt_avg", "rtt_p95", "avail_rate", "loss_rate"):
+            raise ValueError(f"非法指标列: {metric_field}")
+        with self.lock:
+            rows = self.db.execute(
+                f"SELECT ts, node_id, dns, url, {metric_field} AS value FROM aggregates "
+                "WHERE bucket=? AND task_id=? AND ts>=? AND ts<=?",
+                (bucket, task_id, int(t_from), int(t_to))).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_anomaly_alerts(self, t_from: int, t_to: int, limit: int = 300) -> list[dict]:
+        """anomaly 规则的 firing 告警（关联分析第三故障源：不开事件的告警也要进簇）。"""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT a.id, a.ts, a.rule_id, a.rule_name, a.status, a.target_json"
+                " FROM alerts a JOIN alert_rules r ON r.id = a.rule_id"
+                " WHERE r.metric='anomaly' AND a.status='firing' AND a.ts>=? AND a.ts<=?"
+                " ORDER BY a.ts DESC LIMIT ?",
+                (int(t_from), int(t_to), max(1, int(limit)))).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    d["target"] = json.loads(d.pop("target_json") or "{}")
+                except json.JSONDecodeError:
+                    d["target"] = {}
+                out.append(d)
+            return out
+
+    def recent_anomaly_alerts(self, task_id: str, since: int, limit: int = 5) -> list[dict]:
+        """该任务最近的 firing 动态基线告警（JEV「基线偏离」证据用）。
+
+        task_id 过滤下推 SQL（json_extract）：先 LIMIT 再 Python 过滤会让多任务下他任务
+        告警占满窗口、本任务证据静默丢失（复核 P2 修正）。"""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT a.id, a.ts, a.rule_name, a.title, a.text, a.target_json FROM alerts a"
+                " JOIN alert_rules r ON r.id = a.rule_id"
+                " WHERE r.metric='anomaly' AND a.status='firing' AND a.ts>=?"
+                " AND json_extract(a.target_json,'$.task_id')=?"
+                " ORDER BY a.ts DESC LIMIT ?",
+                (int(since), str(task_id), max(1, int(limit)))).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                try:
+                    tgt = json.loads(d.pop("target_json") or "{}")
+                except json.JSONDecodeError:
+                    tgt = {}
+                d["z"] = tgt.get("z")
+                out.append(d)
+            return out
+
+    def lease_acquire(self, name: str, holder: str, ttl_seconds: int) -> bool:
+        """获取/续约租约（server 集群单执行者，.docs/CLUSTER_DESIGN.md 阶段 2）。
+
+        全部后端一律走 DB 表——SQLite WAL 支持多进程共享文件，本机双进程即可验收；
+        时间用 DB 侧 strftime("%s","now")，规避节点时钟漂移。返回 True=本调用后由
+        holder 持有（新获取或续约成功）；False=他人持有且未过期。"""
+        with self.lock:
+            cur = self.db.execute(
+                "INSERT INTO lease(name,holder,expires_at)"
+                " VALUES(?,?, strftime('%s','now') + ?)"
+                " ON CONFLICT(name) DO UPDATE SET holder=excluded.holder,"
+                " expires_at=excluded.expires_at"
+                " WHERE lease.expires_at <= strftime('%s','now')"
+                " OR lease.holder=excluded.holder",
+                (name, holder, max(5, int(ttl_seconds))))
+            self.db.commit()
+            return cur.rowcount > 0
+
+    def lease_release(self, name: str, holder: str) -> bool:
+        with self.lock:
+            cur = self.db.execute(
+                "DELETE FROM lease WHERE name=? AND holder=?", (name, holder))
+            self.db.commit()
+            return cur.rowcount > 0
+
     def list_rules(self) -> list[dict]:
         with self.lock:
             rows = self.db.execute("SELECT * FROM alert_rules ORDER BY created_at").fetchall()
@@ -1462,6 +1553,7 @@ class Storage:
             for r in rows:
                 d = dict(r)
                 d["channel_ids"] = json.loads(d.pop("channel_ids_json") or "[]")
+                d["params"] = json.loads(d.pop("params_json") or "{}")
                 out.append(d)
             return out
 
@@ -1480,8 +1572,8 @@ class Storage:
                 self.db.execute(
                     "INSERT INTO alert_rules(id,name,metric,op,threshold,window_seconds,task_id,"
                     "node_id,group_id,severity,channel_ids_json,silence_seconds,escalate_minutes,"
-                    "enabled,created_at)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "params_json,enabled,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (rid, fields["name"], fields["metric"], fields["op"], float(fields["threshold"]),
                      int(fields.get("window_seconds") or 300), fields.get("task_id") or "",
                      fields.get("node_id") or "", fields.get("group_id") or "",
@@ -1489,6 +1581,7 @@ class Storage:
                      json.dumps(fields.get("channel_ids") or []),
                      int(fields.get("silence_seconds") or 1800),
                      self._clamp_escalate_minutes(fields.get("escalate_minutes") or 0),
+                     json.dumps(fields.get("params") or {}, ensure_ascii=False),
                      1 if fields.get("enabled", True) else 0, ts))
             except sqlite3.IntegrityError:
                 raise ValueError(f"规则名已存在: {fields.get('name')}")
@@ -1507,6 +1600,10 @@ class Storage:
             for k, col in cols.items():
                 if k in fields and fields[k] is not None:
                     sets.append(f"{col}=?"); vals.append(fields[k])
+            if fields.get("params") is not None:
+                # anomaly 规则参数（dict）→ params_json；其它规则不传即不影响
+                sets.append("params_json=?")
+                vals.append(json.dumps(fields["params"], ensure_ascii=False))
             if "escalate_minutes" in fields and fields["escalate_minutes"] is not None:
                 sets.append("escalate_minutes=?")
                 vals.append(self._clamp_escalate_minutes(fields["escalate_minutes"]))
@@ -1585,7 +1682,10 @@ class Storage:
     def alert_last(self, rule_id: str, key: str) -> dict | None:
         with self.lock:
             r = self.db.execute(
-                "SELECT * FROM alerts WHERE rule_id=? AND key=? ORDER BY ts DESC LIMIT 1",
+                # 二级排序 id DESC：同一秒内 firing→resolved 两行同 ts 时，
+                # 只按 ts 排会随机读回旧的 firing 行（anomaly 高频评估实测踩到）
+                "SELECT * FROM alerts WHERE rule_id=? AND key=?"
+                " ORDER BY ts DESC, id DESC LIMIT 1",
                 (rule_id, key)).fetchone()
             return dict(r) if r else None
 

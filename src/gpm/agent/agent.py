@@ -173,7 +173,25 @@ class Agent:
     def __init__(self, cfg):
         self.cfg = cfg
         a = cfg.agent
-        self.server = a["server_url"].rstrip("/")
+        # 多 server failover（.docs/CLUSTER_DESIGN.md 阶段 1）：servers 列表，保留
+        # server_url 单值与 CLI --server 逗号列表兼容。**前提：全部 server 指向同一 DB
+        # 且 register_token 一致**——节点凭据=sha256(name:register_token)、node_id 在共享
+        # DB 里，切换后 sync 才能对上；各 server 独立 DB 的 failover 不支持（孤儿数据）。
+        # servers 可能被配成字符串（如 "a,b"）——按列表/逗号串拆，防止逐字符拆成服务器
+        _servers = a.get("servers") or []
+        if isinstance(_servers, str):
+            _servers = [_servers]
+        raw = [a.get("server_url") or ""] + list(_servers)
+        parts: list[str] = []
+        for s0 in raw:
+            parts.extend(x.strip() for x in str(s0).replace("，", ",").split(",") if x.strip())
+        seen: set = set()
+        self.servers = [s0 for s0 in (s0.rstrip("/") for s0 in parts)
+                        if not (s0 in seen or seen.add(s0))] or ["http://127.0.0.1:8620"]
+        self.server = self.servers[0]
+        self._active = 0
+        self._sync_fails = 0
+        self._preferred_probe_at = 0
         self.name = a.get("name") or (IS_WINDOWS and "win-local" or "linux-local")
         self.data_dir = Path(a["data_dir"])
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -191,6 +209,26 @@ class Agent:
         self.dns_prev: dict[str, list[str]] = {}  # dns 任务值变更记忆：task_id -> 上次答案集
 
     # ---------- 凭据 ----------
+    def _rotate_server(self, reason: str):
+        """连续同步失败后轮换到下一个 server（粘滞直到下次失败或首选回探成功）。"""
+        if len(self.servers) < 2:
+            return
+        old = self.server
+        self._active = (self._active + 1) % len(self.servers)
+        self.server = self.servers[self._active]
+        log.warning("切换 server：%s → %s（%s）", old, self.server, reason)
+
+    async def _try_preferred(self):
+        """回探首选（粘滞回切）：每 10 分钟试一次 servers[0]，成功即切回。"""
+        old_server, old_active = self.server, self._active
+        self.server, self._active = self.servers[0], 0
+        try:
+            await self.sync_once()
+            log.warning("首选 server 恢复，已切回 %s", self.servers[0])
+            self._sync_fails = 0
+        except Exception:
+            self.server, self._active = old_server, old_active
+
     def load_creds(self):
         if self.cred_file.exists():
             try:
@@ -472,14 +510,23 @@ class Agent:
             # 心跳+配置同步。失败时只退避重试 sync 本身——服务端宕机恰恰是最需要
             # 本地数据连续性的时刻，调度与上报必须照常走（探测→内存缓冲→落盘），
             # 否则「离线运行」变成全线哑火，离线缓冲机制成为不可达死路径。
+            if self._active > 0 and t0 - self._preferred_probe_at >= 600:
+                self._preferred_probe_at = t0
+                await self._try_preferred()          # 回探首选（粘滞回切）
             if (t0 - last_hb >= hb_i or not self.config_version) and t0 >= next_sync_try:
                 try:
                     await self.sync_once()
                     last_hb = t0
                     self.backoff = 1
+                    self._sync_fails = 0
                 except Exception as e:  # noqa
                     self.backoff = min(max(self.backoff * 2, 2), 60)
                     next_sync_try = t0 + self.backoff
+                    self._sync_fails += 1
+                    if self._sync_fails >= 2 and len(self.servers) > 1:
+                        self._rotate_server("连续同步失败 %d 次" % self._sync_fails)
+                        self._sync_fails = 0
+                        next_sync_try = 0            # 立即对新 server 尝试
                     log.warning("同步失败(离线运行): %s —— 探测继续，%.0fs 后重试同步", e, self.backoff)
             # 调度到期的探测任务
             for key, job in list(self.jobs.items()):

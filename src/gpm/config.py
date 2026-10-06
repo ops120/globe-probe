@@ -79,6 +79,11 @@ DEFAULTS = {
     # —— 通知/告警评估（第三期）——
     "alert": {
         "scope_window_seconds": 60,
+        # 动态基线（第十期）全局默认，规则 params 可逐条覆盖
+        "anomaly_baseline_days": 14,
+        "anomaly_min_samples": 20,
+        "anomaly_default_k": 3.0,
+        "anomaly_min_consecutive": 2,
         "escalate_max_minutes": 1440,        # 升级冷却
         "retry_backoff_seconds": [60, 300, 900],
         "notify_default_timeout_seconds": 8.0,
@@ -114,6 +119,9 @@ DEFAULTS = {
         "report_batch_size": 50,
         "report_interval": 5,
         "offline_buffer_max": 5000,   # 本地缓冲条数上限
+        # 多 server failover（.docs/CLUSTER_DESIGN.md 阶段 1）：备用地址列表（server_url
+        # 仍是首选/粘滞主地址）。前提：全部 server 共享同一 DB 与 register_token
+        "servers": [],
     },
     "probe": {
         "min_interval_seconds": 10,   # ping/curl/tcp 间隔下限

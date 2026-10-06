@@ -1716,6 +1716,26 @@ def setup_router(app_state) -> APIRouter:
             if metric not in alerting.METRICS:
                 raise HTTPException(422, f"不支持的指标: {metric}")
             out["metric"] = metric
+        # 动态基线（第十期）：必须指定任务；params 走可行域联动校验；op/threshold 给中性默认
+        if metric == "anomaly":
+            if not str(body.get("task_id") or "").strip():
+                raise HTTPException(422, "动态基线规则必须指定任务（适用范围=指定任务）")
+            params = body.get("params")
+            if params is None:
+                params = {}
+            if not isinstance(params, dict):
+                # 严格区分 None（缺省）与 []/""（非法）——`params or {}` 会把后者悄悄吃掉
+                raise HTTPException(422, "params 必须是对象")
+            from . import baseline as _bl
+            errs = _bl.validate_params(params)
+            if errs:
+                raise HTTPException(422, "；".join(errs))
+            out["params"] = params
+            out.setdefault("op", "gt")
+            out.setdefault("threshold", 0.0)
+        elif body.get("params") is not None:
+            raise HTTPException(422, "仅动态基线（metric=anomaly）支持 params")
+        # 更新场景：partial 时 metric 未随行就不动 params（防止只改名称把 params 清成 {}）
         op = body.get("op")
         if op is not None:
             if op not in alerting.OPS:
@@ -1831,6 +1851,46 @@ def setup_router(app_state) -> APIRouter:
         return {"ok": ok, "detail": msg}
 
     # ---------- 告警：规则 ----------
+    @router.get("/baseline")
+    def baseline_view(task_id: str, metric_field: str = "avail_rate", k: float = 0,
+                      direction: str = "", min_samples: int = 0, min_consecutive: int = 0,
+                      window_mode: str = "", baseline_days: int = 0, baseline_from: str = "",
+                      align: str = "", exclude_windows: str = "[]"):
+        """动态基线预览（第十期）：规则弹窗「预览基线带」与排障核对用。只读聚合表。
+
+        返回 evaluable/基线数字/每条流的 z 序列；不可行域参数直接 422（对齐×天数×样本
+        联动校验与规则保存同口径）。"""
+        from . import baseline as _bl
+        p: dict = {"metric_field": metric_field}
+        if k:
+            p["k"] = k
+        if direction:
+            p["direction"] = direction
+        if min_samples:
+            p["min_samples"] = min_samples
+        if min_consecutive:
+            p["min_consecutive"] = min_consecutive
+        if window_mode:
+            p["window_mode"] = window_mode
+        if baseline_days:
+            p["baseline_days"] = baseline_days
+        if baseline_from:
+            p["baseline_from"] = baseline_from
+        if align:
+            p["align"] = align
+        try:
+            excludes = json.loads(exclude_windows or "[]")
+        except ValueError:
+            raise HTTPException(422, "exclude_windows 必须是 JSON 数组")
+        if excludes:
+            p["exclude_windows"] = excludes
+        errs = _bl.validate_params(p)
+        if errs:
+            raise HTTPException(422, "；".join(errs))
+        if task_id not in {t["id"] for t in s.list_tasks()}:
+            raise HTTPException(404, "任务不存在")
+        return _bl.baseline(s, task_id, p, now())
+
     @router.get("/alerts/rules")
     def list_rules():
         return {"items": s.list_rules(), "metrics": alerting.METRICS, "ops": alerting.OPS}
@@ -2074,7 +2134,7 @@ def setup_router(app_state) -> APIRouter:
             detail = _ev.detail(s, iid)
         except KeyError:
             raise HTTPException(404, "事件不存在")
-        trace = _jev.run(detail)
+        trace = _jev.run(detail, storage=s)
         trace["incident_id"] = iid
         _jev.save(s, trace)
         return trace
