@@ -50,35 +50,81 @@ def test_rotate_server_cycles(tmp_path):
     assert a.server == "http://a" and a._active == 0
 
 
-def test_failover_after_consecutive_failures(tmp_path, monkeypatch):
-    """连续 2 次同步失败 → 自动切到下一个 server（run 循环内联逻辑的等价驱动）。"""
-    import gpm.agent.agent as mod
+def test_failover_driven_by_run_loop(tmp_path, monkeypatch):
+    """真驱动 run()：坏首选连续失败 → 自动切备用（治「手工重演计数」的假绿）。
+
+    上一版在测试内自己 `a._sync_fails += 1` 再调 `_rotate_server`，从未调用 run()——
+    把 run() 里阈值 2 改成 3、或删掉 `next_sync_try = 0`，测试照样全绿（复核抓到的假绿）。
+    """
     a = make_agent(tmp_path, ["http://bad", "http://good"])
+    seen = []
 
-    calls = []
+    async def fake_sync(self):
+        seen.append(self.server)
+        if self.server == "http://bad":
+            raise ConnectionError("首选不可达")
 
-    def fake_post(url, payload, timeout=10):
-        calls.append(url)
-        if "bad" in url:
-            return 0, {}
-        if url.endswith("/api/agent/sync"):
-            return 200, {"config_version": 1, "server_time": int(time.time()), "tasks": []}
-        return 200, {"node_id": "n-failover", "created": False, "server_time": int(time.time())}
+    async def no_report(self):
+        return
 
-    monkeypatch.setattr(mod, "_post_json", fake_post)
+    monkeypatch.setattr(Agent, "sync_once", fake_sync)
+    monkeypatch.setattr(Agent, "report_once", no_report)
 
     async def scenario():
-        # 模拟 run() 的失败计数与切换（与 run() 内联逻辑同口径驱动两次失败）
-        a._sync_fails += 1
-        a._sync_fails += 1
-        if a._sync_fails >= 2 and len(a.servers) > 1:
-            a._rotate_server("连续同步失败 %d 次" % a._sync_fails)
-            a._sync_fails = 0
-        await a.sync_once()
-        assert "good" in calls[-1]
+        task = asyncio.create_task(a.run())
+        for _ in range(30):                 # run 每轮 sleep(1s)，最多等约 3s
+            await asyncio.sleep(0.1)
+            if a.server == "http://good":
+                break
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     asyncio.run(scenario())
+    assert "http://bad" in seen, "首选应先被尝试"
+    assert a.server == "http://good", f"连续失败后应切到备用（实际 {a.server}，轨迹 {seen}）"
+
+
+def test_rotate_only_after_two_consecutive_failures(tmp_path, monkeypatch):
+    """把「连续失败 ≥2 次才切换」这条阈值钉住：阈值被改成 1 或 3 此用例即红。"""
+    a = make_agent(tmp_path, ["http://bad", "http://good"])
+    state = {"rotated": 0}
+    real_rotate = a._rotate_server
+
+    async def fake_sync(self):
+        if self.server == "http://bad":
+            raise ConnectionError("首选不可达")
+
+    def spy_rotate(self, reason):        # 同步：_rotate_server 是普通方法，不是协程
+        state["rotated"] += 1
+        real_rotate(reason)
+
+    async def no_report(self):
+        return
+
+    monkeypatch.setattr(Agent, "sync_once", fake_sync)
+    monkeypatch.setattr(Agent, "_rotate_server", spy_rotate)
+    monkeypatch.setattr(Agent, "report_once", no_report)
+
+    async def scenario():
+        task = asyncio.create_task(a.run())
+        # sync 失败后退避 2s→4s，第二次失败在 ~2s 后才到；给足 6s 窗口
+        for _ in range(60):
+            await asyncio.sleep(0.1)
+            if state["rotated"]:
+                break
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+    assert state["rotated"] == 1, f"应恰好切换一次（实际 {state['rotated']}）"
     assert a.server == "http://good"
+
 
 
 def test_try_preferred_switches_back(tmp_path, monkeypatch):

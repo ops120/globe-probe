@@ -193,6 +193,13 @@ class Storage:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=NORMAL")
             self.db.execute("PRAGMA busy_timeout=5000")
+            # SQLite 版本守卫：lease 表 UPSERT（ON CONFLICT DO UPDATE）需 3.24+，
+            # json_extract/json_valid 需 3.38+（JSON1 自 2022 起默认内建）。旧 libsqlite3
+            # 环境会抛裸 OperationalError，这里给中文报错而不是让建库半途失败
+            if sqlite3.sqlite_version_info < (3, 38, 0):
+                raise RuntimeError(
+                    "SQLite 版本过低（当前 %s，需 ≥3.38）：动态基线与集群租约依赖 UPSERT + JSON1"
+                    % sqlite3.sqlite_version)
             self.db.executescript(SCHEMA)
             # 轻量迁移：老库补列
             cols = [r[1] for r in self.db.execute("PRAGMA table_info(tasks)")]
@@ -1507,6 +1514,7 @@ class Storage:
                 "SELECT a.id, a.ts, a.rule_name, a.title, a.text, a.target_json FROM alerts a"
                 " JOIN alert_rules r ON r.id = a.rule_id"
                 " WHERE r.metric='anomaly' AND a.status='firing' AND a.ts>=?"
+                " AND json_valid(a.target_json)"
                 " AND json_extract(a.target_json,'$.task_id')=?"
                 " ORDER BY a.ts DESC LIMIT ?",
                 (int(since), str(task_id), max(1, int(limit)))).fetchall()

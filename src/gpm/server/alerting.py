@@ -519,24 +519,35 @@ def _anomaly_changes(storage, rule: dict, task: dict, label: str, ts: int) -> li
 
     # 当前桶偏离度（滞回判定）：恢复=当前桶 |z| < 0.8k，而非「连续序列仍偏离」——
     # 否则前一小时的历史偏离会挡住恢复
-    evaluable_streams = [s for s in res["streams"] if s.get("evaluable")]
-    cur_dev = max((abs(s["zs"][-1][2]) for s in evaluable_streams
-                   if s.get("zs") and s["zs"][-1][2] is not None), default=None)
-    # 状态语义：进入=连续 mc 桶偏离（fired）；维持=当前桶 |z| ≥ eff_k；恢复=当前桶
-    # |z| < 0.8*eff_k（滞回）。eff_k：zscore=k / bounded=1.0（流级 st["eff_k"]）——
-    # 用 k 会让 bounded 在 z∈[1.0,0.8k) firing↔resolved 振铃（复核 P1 修正）
-    _eff_k = max((s.get("eff_k") or res["k"]) for s in res["streams"]
-                 if s.get("evaluable")) if res["streams"] else res["k"]
-    cur_deviant = bool(cur_dev is not None and cur_dev >= _eff_k)
+    # 状态语义：进入=连续 mc 桶偏离（fired）；维持=仍有流越界；恢复=**所有**可评估流
+    # 的当前桶 |z| 都落进各自 0.8*eff_k 滞回带。
+    # eff_k 是**流级**的（zscore=k / bounded=1.0）——曾用 max() 跨流聚合抬到 k，
+    # 混合 bounded+zscore 流时 bounded 流仍越界却被判恢复，firing↔resolved 振铃
+    # 复现（复核 P1 修正：逐流 all() 语义，min/max 聚合都会误判）。
+    evaluable_all = [s for s in res["streams"] if s.get("evaluable")]
+
+    def _cur_z(s):
+        return s["zs"][-1][2] if s.get("zs") and s["zs"][-1][2] is not None else None
+
+    _all_recovered = bool(evaluable_all) and all(
+        _cur_z(s) is not None and abs(_cur_z(s)) < 0.8 * (s.get("eff_k") or res["k"])
+        for s in evaluable_all)
+    _any_deviant = any(
+        _cur_z(s) is not None and abs(_cur_z(s)) >= (s.get("eff_k") or res["k"])
+        for s in evaluable_all)
     in_firing = bool(opened and last and last["status"] == "firing")
-    if in_firing and cur_dev is not None and cur_dev < 0.8 * _eff_k:
-        kind = "resolved"                      # 滞回恢复
+    if in_firing and _all_recovered:
+        kind = "resolved"                      # 全部流回到各自滞回带 → 恢复
     elif fired:
         if in_firing and (ts - int(last["ts"] or 0)) < int(rule["silence_seconds"] or 0):
             return []                          # 持续偏离，静默期内不打扰
         kind = "remind" if in_firing else "firing"
     elif in_firing:
-        return []                              # 0.8*eff_k~eff_k 滞回带内：维持 firing 不发通知
+        if not _any_deviant:
+            return []                          # 滞回带内（未全恢复也未越界）：维持不发通知
+        if ts - int(last["ts"] or 0) < int(rule["silence_seconds"] or 0):
+            return []                          # 仍有流越界但在静默期
+        kind = "remind"                        # 静默期外的持续偏离 → remind
     else:
         return []                              # 无未恢复告警且未满足进入条件
 
@@ -577,6 +588,10 @@ def _evaluate_impl(storage, ts: int = 0) -> list[dict]:
     rules = [r for r in storage.list_rules() if r["enabled"]]
     if not rules:
         return out
+    if _ANOMALY_WARN_AT:                       # 收敛限频账本（规则删除后条目永不清理）
+        live = {r["id"] for r in rules}
+        for _rid in [k for k in _ANOMALY_WARN_AT if k not in live]:
+            _ANOMALY_WARN_AT.pop(_rid, None)
     chans = {c["id"]: c for c in storage.list_channels() if c["enabled"]}
     tasks = {t["id"]: t for t in storage.list_tasks()}
     nodes = {n["id"]: n for n in storage.list_nodes()}
@@ -723,6 +738,9 @@ def _has_unacked_incident(rule_metric: str, key: str, incidents: list[dict]) -> 
 
 def _escalations(storage, rules: list[dict], chans: dict, tasks: dict, nodes: dict,
                  node_names: dict, ts: int) -> list[dict]:
+    # anomaly（动态基线）不参与升级链：按设计不开事件 → _has_unacked_incident 无依据；
+    # 强行升级会渲染「当前值：无数据」，且升级行以 firing 写回刷新 last.ts 扰动静默期
+    # （复核 P1 修正；UI/API 同时对 anomaly 强制 escalate_minutes=0）。
     """升级链扫描（evaluate 每轮调用）：到期未确认的 firing 告警重新通知。
 
     触发条件（全部满足）：
@@ -739,6 +757,8 @@ def _escalations(storage, rules: list[dict], chans: dict, tasks: dict, nodes: di
     out: list[dict] = []
     incidents: list[dict] | None = None
     for rule in rules:
+        if rule["metric"] == "anomaly":
+            continue                       # anomaly 不开事件 → 无升级依据
         em = _escalate_minutes(rule)
         if em <= 0:
             continue

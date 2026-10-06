@@ -1778,6 +1778,12 @@ def setup_router(app_state) -> APIRouter:
             out["severity"] = sev
         if body.get("enabled") is not None:
             out["enabled"] = bool(body["enabled"])
+        if metric == "anomaly":
+            # 强制项放在**所有字段处理之后**（每次实测都被后一段通用循环写回）：
+            # 不开事件 → 升级链无依据（_escalations 亦已跳过）；评估按全任务流走，
+            # 静默丢弃 node 范围会让 API 直连规则与 UI 强制 task 范围语义不一致
+            out["escalate_minutes"] = 0
+            out["node_id"] = ""
         if not partial:
             for req in ("name", "metric", "op", "threshold"):
                 if req not in out:

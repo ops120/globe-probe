@@ -468,7 +468,7 @@ window.ruleModal = async (rid) => {
     + '<option value="loss_rate">丢包率 loss_rate</option></select></div>'
     + '<div class="form-row"><label>敏感度 k</label><input type="text" id="r-a-k" value="3" style="max-width:80px">'
     + '<span class="sub" style="margin-left:8px">方向</span><select id="r-a-dir" style="max-width:200px;margin-left:6px">'
-    + '<option value="">随指标（rtt=up，avail/loss=down）</option><option value="both">both</option>'
+    + '<option value="">随指标（rtt=up，avail=down，loss=up）</option><option value="both">both</option>'
     + '<option value="up">up</option><option value="down">down</option></select></div>'
     + '<div class="form-row"><label>窗口模式</label><select id="r-a-mode" style="max-width:200px">'
     + '<option value="rolling">rolling（最近 N 天滚动）</option><option value="fixed">fixed（锚定起点，业务变过用）</option></select></div>'

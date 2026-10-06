@@ -189,3 +189,40 @@ def test_maintenance_buckets_excluded():
     seed_history(st, 10.0, cur_value=50.0, cur_prev_value=50.0)
     r = baseline.baseline(st, "t1", P, NOW)
     assert not r["evaluable"], "全部桶都在维护窗口内 → 样本不足拒评"
+
+
+# ---------------- 复核第二轮补钉：loss 方向与混合流（2026-10-06） ----------------
+
+def test_loss_rate_direction_default_is_up():
+    """丢包突增是**上升沿**——默认 direction 必须是 up（复核 P1-1 漏网处）。
+
+    曾经默认 down：z=(center-v)/scale 只认下降，恒定 0 的丢包史下 z≤0 永不触发，
+    丢包突增全聋。这条把「默认方向」钉死，配置被改回 down 即红。"""
+    st = FakeStorage()
+    seed_history(st, 0.0, jitter=0, cur_value=0.25, cur_prev_value=0.25)
+    r = baseline.baseline(st, "t1", {**P, "metric_field": "loss_rate", "k": 3}, NOW)
+    s = r["streams"][0]
+    assert s["evaluable"] and s["fired"], f"丢包 0→0.25 必须触发（实际 {s}）"
+    assert r["direction"] == "up"
+
+
+def test_loss_rate_up_only_fires_on_rise():
+    """direction=up 时丢包「下降」（变好）不触发。"""
+    st = FakeStorage()
+    seed_history(st, 0.2, jitter=0, cur_value=0.0, cur_prev_value=0.0)
+    r = baseline.baseline(st, "t1", {**P, "metric_field": "loss_rate", "k": 3}, NOW)
+    assert not r["streams"][0]["fired"]
+
+
+def test_bounded_uses_band_as_threshold_not_k():
+    """bounded 模式的有效门槛=1.0（带宽即定义）——不能用 k（复核 P1-2 的核心）。
+
+    偏离 z=1.2（刚越带宽）在 k=3 下会被旧口径判为「未触发」，是恒定可用率突跌
+    场景漏报的根因。这条钉住：z≥1 即触发。"""
+    st = FakeStorage()
+    seed_history(st, 1.0, jitter=0, cur_value=0.94, cur_prev_value=0.94)
+    r = baseline.baseline(st, "t1", {**P, "metric_field": "avail_rate", "k": 3}, NOW)
+    s = r["streams"][0]
+    assert s["mode"] == "bounded" and s["eff_k"] == 1.0
+    assert s["worst_z"] and 1.0 <= abs(s["worst_z"]) < 3.0, s  # z=1.2 ∈ [1,3)
+    assert s["fired"], "z 越过带宽即触发，不看 k"

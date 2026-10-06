@@ -172,3 +172,103 @@ def test_jev_baseline_evidence(tmp_path):
     ev = jev.build_evidence(detail, storage=s)
     kinds = [e["kind"] for e in ev]
     assert "baseline" in kinds, kinds
+
+
+# ---------------- 复核第二轮补钉（2026-10-06） ----------------
+
+def test_mixed_bounded_and_zscore_streams_no_ringing(tmp_path):
+    """混合 bounded + zscore 流：恢复必须逐流 all() 判定（复核 P1-2 漏网处）。
+
+    曾用 max(eff_k) 跨流聚合：bounded 流（eff_k=1）仍越界却被判恢复，
+    下一轮又 firing → 每 30s 振铃刷通知。"""
+    client, cfg, s = make_client(tmp_path)
+    tid = make_task(client)
+    # 造两条流：n1 恒定可用率史（bounded），n2 波动延迟史（zscore）
+    now = int(time.time())
+    cur_ts = now // 3600 * 3600 - 3600
+    cur_hour = time.localtime(cur_ts).tm_hour
+    import datetime as dt
+    day0 = int(dt.datetime.fromtimestamp(cur_ts).replace(hour=0, minute=0, second=0,
+                                                     microsecond=0).timestamp())
+    aligned = {(cur_hour + off) % 24 for off in (-1, 0, 1)}
+    with s.lock:
+        for d in range(0, 15):
+            for h in sorted(aligned):
+                ts = day0 + h * 3600 - d * 86400
+                if ts > cur_ts:
+                    continue
+                s.db.execute(
+                    "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+                    "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+                    " VALUES('1h',?,?,'n1','','',10,10,0,10.0,0.0,1.0)", (ts, tid))
+                s.db.execute(
+                    "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+                    "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+                    " VALUES('1h',?,?,'n2','','',10,9,1,?,0.05,0.95)", (ts, tid,
+                                                                             10.0 + (d % 2)))
+        # 当前两桶：n1 可用率跌到 0.94（bounded 越界 z≈1.2）；n2 延迟 50（zscore 越界）
+        for i in (0, 1):
+            s.db.execute(
+                "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+                "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+                " VALUES('1h',?,'x','n1','','',10,6,4,10.0,0.4,0.6)".replace("'x'", "?"),
+                (cur_ts - i * 3600, tid))
+            # n2 的可用率也越界（跌到 0.90 = 带宽 0.05 的 1.0 倍）→ 两流都 firing
+            s.db.execute(
+                "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+                "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+                " VALUES('1h',?,?,'n2','','',10,9,1,50.0,0.1,0.90)", (cur_ts - i * 3600, tid))
+        s.db.commit()
+    rid = client.post("/api/alerts/rules", json={
+        "name": "混合流", "metric": "anomaly", "task_id": tid,
+        "params": {"metric_field": "avail_rate", "k": 3, "min_samples": 20,
+                   "min_consecutive": 2, "baseline_days": 14}}).json()["id"]
+    ev = client.post("/api/alerts/evaluate").json()["events"]
+    assert [e for e in ev if e.get("kind") == "firing"], ev
+    # 只让 n1 恢复（回带宽内），n2 仍越界 → 不得 resolved
+    for i in (0, 1):
+        s.db.execute(
+            "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+            "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+            " VALUES('1h',?,?,'n1','','',10,10,0,10.0,0.0,1.0)", (cur_ts - i * 3600, tid))
+    s.db.commit()
+    ev2 = client.post("/api/alerts/evaluate").json()["events"]
+    assert not [e for e in ev2 if e.get("kind") == "resolved"], \
+        "n2 仍越界时不得恢复（all() 语义）"
+    last = s.alert_last(rid, tid)
+    assert last and last["status"] == "firing", "应维持 firing"
+
+
+def test_anomaly_escalate_forced_zero(tmp_path):
+    """anomaly 规则的 escalate_minutes 强制 0（不开事件→无升级依据，复核 P1-3）。"""
+    client, cfg, s = make_client(tmp_path)
+    tid = make_task(client)
+    r = client.post("/api/alerts/rules", json={
+        "name": "升级禁用", "metric": "anomaly", "task_id": tid,
+        "escalate_minutes": 30,
+        "params": {"metric_field": "avail_rate"}})
+    assert r.status_code == 200, r.text
+    assert r.json()["escalate_minutes"] == 0, "anomaly 的 escalate 必须被强制清零"
+    # node 范围同样被清空（评估按全任务流走，静默丢弃语义不一致）
+    r2 = client.post("/api/alerts/rules", json={
+        "name": "node范围清空", "metric": "anomaly", "task_id": tid,
+        "node_id": "n1", "params": {"metric_field": "avail_rate"}})
+    assert r2.status_code == 200 and r2.json()["node_id"] == ""
+
+
+def test_alert_last_same_second_tiebreak(tmp_path):
+    """同秒 firing→resolved 双行：alert_last 必须读回最新（id DESC 竞态修复钉）。
+
+    这正是 anomaly 高频评估实测踩到的存量 bug：不带二级排序时 SQLite 顺序不定。"""
+    client, cfg, s = make_client(tmp_path)
+    tid = make_task(client)
+    seed_history(s, tid, cur_values={0: 50.0, 1: 50.0})
+    rid = client.post("/api/alerts/rules", json={
+        "name": "同秒", "metric": "anomaly", "task_id": tid,
+        "params": {"metric_field": "rtt_avg"}}).json()["id"]
+    client.post("/api/alerts/evaluate")            # firing
+    seed_history(s, tid, cur_values={0: 10.5})     # 同秒内恢复
+    client.post("/api/alerts/evaluate")            # resolved（同 ts）
+    last = s.alert_last(rid, tid)
+    assert last and last["status"] == "resolved", \
+        f"同秒双行时 alert_last 必须读回最新的 resolved（实际 {last and last['status']}）"
