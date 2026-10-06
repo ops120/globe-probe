@@ -1858,32 +1858,25 @@ def setup_router(app_state) -> APIRouter:
 
     # ---------- 告警：规则 ----------
     @router.get("/baseline")
-    def baseline_view(task_id: str, metric_field: str = "avail_rate", k: float = 0,
-                      direction: str = "", min_samples: int = 0, min_consecutive: int = 0,
-                      window_mode: str = "", baseline_days: int = 0, baseline_from: str = "",
-                      align: str = "", exclude_windows: str = "[]"):
+    def baseline_view(task_id: str, metric_field: str = "avail_rate",
+                      k: float | None = None, direction: str | None = None,
+                      min_samples: int | None = None, min_consecutive: int | None = None,
+                      window_mode: str | None = None, baseline_days: int | None = None,
+                      baseline_from: str | None = None, align: str | None = None,
+                      exclude_windows: str = "[]"):
         """动态基线预览（第十期）：规则弹窗「预览基线带」与排障核对用。只读聚合表。
 
         返回 evaluable/基线数字/每条流的 z 序列；不可行域参数直接 422（对齐×天数×样本
         联动校验与规则保存同口径）。"""
         from . import baseline as _bl
+        # 显式 0 是有意义的输入（k=0 会被钳到下限），不能用真值门「当未传」
         p: dict = {"metric_field": metric_field}
-        if k:
-            p["k"] = k
-        if direction:
-            p["direction"] = direction
-        if min_samples:
-            p["min_samples"] = min_samples
-        if min_consecutive:
-            p["min_consecutive"] = min_consecutive
-        if window_mode:
-            p["window_mode"] = window_mode
-        if baseline_days:
-            p["baseline_days"] = baseline_days
-        if baseline_from:
-            p["baseline_from"] = baseline_from
-        if align:
-            p["align"] = align
+        for key, val in (("k", k), ("direction", direction), ("min_samples", min_samples),
+                         ("min_consecutive", min_consecutive), ("window_mode", window_mode),
+                         ("baseline_days", baseline_days), ("baseline_from", baseline_from),
+                         ("align", align)):
+            if val not in (None, ""):
+                p[key] = val
         try:
             excludes = json.loads(exclude_windows or "[]")
         except ValueError:
@@ -1959,8 +1952,17 @@ def setup_router(app_state) -> APIRouter:
 
     @router.post("/alerts/evaluate")
     def evaluate_now(x_admin_token: str | None = Header(default=None)):
-        """立即评估一轮规则（不等后台周期），返回本轮事件。"""
+        """立即评估一轮规则（不等后台周期），返回本轮事件。
+
+        多实例下必须走**单执行者租约**（与后台循环同一把 alert 租约）：否则两台
+        同时手动触发会各评估一遍，同一规则+目标写两行告警、外发两条通知
+        （实测动态验证：6 条外发应为 3 条）。未持租约时如实返回 skipped，
+        不静默评估。"""
         check_write(x_admin_token)
+        lease = (app_state.get("leases") or {}).get("alert")
+        if lease is not None and not lease.hold():
+            return {"events": [], "skipped": True,
+                    "reason": "本实例未持有告警单执行者租约（另一实例正在评估）"}
         return {"events": alerting.evaluate(s)}
 
     # ---------- SLA / 报表 ----------

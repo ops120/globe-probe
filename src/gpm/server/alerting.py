@@ -481,9 +481,14 @@ def _anomaly_changes(storage, rule: dict, task: dict, label: str, ts: int) -> li
         if ts - last_warn > 600:
             _ANOMALY_WARN_AT[rule["id"]] = ts
             reason = next((s.get("reason") for s in res.get("streams", []) if s.get("reason")),
-                          "样本不足")
-            log.info("动态基线未评估 rule=%s task=%s：%s（基线就绪前由阈值规则兜底）",
-                     rule["name"], task_id, reason)
+                          "窗口内无聚合数据（流不存在或聚合未生成）")
+            # 「由阈值规则兜底」只在真存在阈值规则时才说——不核实就是编造（复核 P1）
+            has_thr = any(r["metric"] != "anomaly" and r["enabled"]
+                           and (not r.get("task_id") or r["task_id"] == task_id)
+                           for r in storage.list_rules())
+            log.info("动态基线未评估 rule=%s task=%s：%s%s", rule["name"], task_id, reason,
+                     "；该任务当前无启用的阈值规则，基线就绪前不产生告警" if not has_thr
+                     else "；基线就绪前由该任务的阈值规则兜底")
         return []
 
     fired = [s for s in res["streams"] if s.get("fired")]
@@ -551,28 +556,41 @@ def _anomaly_changes(storage, rule: dict, task: dict, label: str, ts: int) -> li
     else:
         return []                              # 无未恢复告警且未满足进入条件
 
-    # 展示流：firing/remind 取最劣流；resolved 取首个可评估流
+    # 展示流：firing/remind 取最劣流；resolved 用**本轮评估过的流里最劣的一条**。
+    # 曾用 pool[0]（按键序第一条可评估流）——可能是全程没偏离的无关流，恢复通知
+    # 写「最劣流：n1」而真正劣化的是 n9，误导定位（复核 P1）。
     pool = fired or [s for s in res["streams"] if s.get("evaluable")]
-    worst = max(pool, key=lambda s: abs(s.get("worst_z") or 0)) if kind != "resolved" \
-        else pool[0]
+    worst = max(pool, key=lambda s: abs(s.get("worst_z") or 0)) if pool else None
+    if worst is None:
+        return []                              # 极端兜底：无可展示流时不造通知
     where = " · ".join(x for x in (worst["node_id"], worst.get("dns") or "",
                                    worst.get("url") or "") if x)
     head = {"firing": "【告警】", "remind": "【提醒】", "resolved": "【恢复】"}[kind]
     title = head + "动态基线偏离 · " + str(rule["name"])
-    zs_txt = "；".join("当前 %.2f（%s）" % (v, _time_text(t)) for t, v, _ in worst.get("zs", [])
-                       if v is not None) or "当前值缺失"
+    # 桶序列：按时间正序（升序），逐桶标偏离倍数——不把历史桶也写成「当前」
+    zs_txt = "；".join(
+        "%s %.2f（%s）" % (_time_text(t), v,
+                           ("%.1fσ" % z) if z is not None else "无基线")
+        for t, v, z in worst.get("zs", []) if v is not None) or "当前值缺失"
+    _wz = worst.get("worst_z")
+    _eff = worst.get("eff_k") or res.get("k") or 0
+    # 阈值与门槛必须与实际判定口径一致（复核 P0：bounded 流真实门槛是流级 eff_k=1.0，
+    # 文本曾固定打印 k=3.0 → 「1.2σ 就该有 3σ 的事件」自相矛盾）
+    _judge = ("- 判定：偏离 %.1fσ ≥ 门槛 %.1fσ，连续 %d 个小时桶" % (
+        _wz, _eff, int(res.get("mc") or 0))) if kind != "resolved" \
+        else "- 判定：全部 %d 条流已回到各自滞回带内（恢复）" % len(evaluable_all)
+    # 基线数字：bounded 模式 scale 是**绝对带宽**不是 MAD——报 MAD=0.05 是编造
+    _scale_txt = ("绝对带宽 %.3f（历史恒定，按带宽判定）" % worst["scale"]) \
+        if worst.get("mode") == "bounded" else ("MAD×1.4826 %.3f" % worst["scale"])
     body = "\n".join([
         "- 规则：" + str(rule["name"]) + "（动态基线偏离）",
         "- 任务：" + label,
         "- 基线：" + res.get("window_desc", ""),
-        ("- 判定：偏离 %skσ ≥ 阈值 %skσ，连续 %d 个小时桶"
-         % (worst.get("worst_z") if worst.get("worst_z") is not None else 0,
-            res.get("k"), int(res.get("mc") or 0))) if kind != "resolved"
-        else "- 判定：已回到基线带宽内（滞回恢复）",
-        "- 最劣流：" + where,
-        "- " + zs_txt,
-        "- 基线数字：中位 %s（MAD %s，样本 %d）" % (
-            worst.get("center"), worst.get("scale"), worst.get("samples")),
+        _judge,
+        "- 流：" + where,
+        "- 各小时桶：" + zs_txt,
+        "- 基线数字：中位 %s（%s，样本 %d）" % (
+            worst.get("center"), _scale_txt, worst.get("samples")),
     ])
     target = {"task_id": task_id, "node_id": worst.get("node_id") or "", "label": label,
               "value": worst.get("cur_v"), "threshold": res.get("k"),

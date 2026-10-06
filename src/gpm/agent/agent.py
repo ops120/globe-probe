@@ -219,15 +219,18 @@ class Agent:
         log.warning("切换 server：%s → %s（%s）", old, self.server, reason)
 
     async def _try_preferred(self):
-        """回探首选（粘滞回切）：每 10 分钟试一次 servers[0]，成功即切回。"""
+        """回探首选（粘滞回切）：每 10 分钟试一次 servers[0]，成功即切回。
+
+        失败也必须留痕（复核 P1：静默探测让运维无法判断「首选是否已恢复」）。"""
         old_server, old_active = self.server, self._active
         self.server, self._active = self.servers[0], 0
         try:
             await self.sync_once()
             log.warning("首选 server 恢复，已切回 %s", self.servers[0])
             self._sync_fails = 0
-        except Exception:
+        except Exception as e:  # noqa: BLE001 - 回探失败仅保持现状，不影响探测
             self.server, self._active = old_server, old_active
+            log.warning("首选 server 仍不可达（%s），继续使用 %s", e, self.server)
 
     def load_creds(self):
         if self.cred_file.exists():

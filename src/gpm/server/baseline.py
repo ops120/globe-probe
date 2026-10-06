@@ -61,19 +61,26 @@ def params_of(rule: dict) -> dict:
 
 
 def _with_defaults(p: dict) -> dict:
-    """补默认值 + 类型规整（不校验可行域，校验在 validate_params）。"""
-    mf = p.get("metric_field") or "avail_rate"
+    """补默认值 + 类型规整（不校验可行域，校验在 validate_params）。
+
+    取值一律用「is None」判缺省而非 `or`——显式 0 是有意义的输入（k=0 钳到下限、
+    min_samples=0 钳到 5），用 `or` 会把 0 静默换成全局默认（复核 P2 真值门）。"""
+    def _g(key, default):
+        v = p.get(key)
+        return default if v is None or v == "" else v
+
+    mf = str(_g("metric_field", "avail_rate"))
     out = {
         "metric_field": mf,
-        "k": min(10.0, max(1.5, float(p.get("k") or DEFAULT_K))),
-        "direction": (p.get("direction") or DEFAULT_DIRECTION.get(mf) or "both"),
-        "min_samples": max(5, int(p.get("min_samples") or DEFAULT_MIN_SAMPLES)),
-        "min_consecutive": max(1, int(p.get("min_consecutive") or DEFAULT_MIN_CONSECUTIVE)),
-        "window_mode": p.get("window_mode") or "rolling",
-        "baseline_days": max(3, int(p.get("baseline_days") or DEFAULT_BASELINE_DAYS)),
-        "baseline_from": str(p.get("baseline_from") or ""),
-        "align": p.get("align") or "hour",
-        "exclude_windows": p.get("exclude_windows") or [],
+        "k": min(10.0, max(1.5, float(_g("k", DEFAULT_K)))),
+        "direction": str(_g("direction", DEFAULT_DIRECTION.get(mf) or "both")),
+        "min_samples": max(5, int(_g("min_samples", DEFAULT_MIN_SAMPLES))),
+        "min_consecutive": max(1, int(_g("min_consecutive", DEFAULT_MIN_CONSECUTIVE))),
+        "window_mode": str(_g("window_mode", "rolling")),
+        "baseline_days": max(3, int(_g("baseline_days", DEFAULT_BASELINE_DAYS))),
+        "baseline_from": str(_g("baseline_from", "")),
+        "align": str(_g("align", "hour")),
+        "exclude_windows": _g("exclude_windows", []) or [],
     }
     if out["direction"] not in ("both", "up", "down"):
         out["direction"] = "both"
@@ -93,9 +100,11 @@ def validate_params(p: dict) -> list[str]:
         q = _with_defaults(p or {})
     except (TypeError, ValueError) as e:
         return [f"参数类型非法: {e}"]
-    mf = q["metric_field"]
-    if p and mf not in METRIC_FIELDS:
-        errs.append(f"metric_field 只支持 {'/'.join(METRIC_FIELDS)}，收到 {mf!r}")
+    # 用**原始入参**校验：_with_defaults 已把非法值静默改成 avail_rate，
+    # 校验规整后的值等于死代码——「bogus」会原样入库并静默按可用率评估（复核 P2）
+    _raw_mf = (p or {}).get("metric_field")
+    if _raw_mf is not None and _raw_mf not in METRIC_FIELDS:
+        errs.append(f"metric_field 只支持 {'/'.join(METRIC_FIELDS)}，收到 {_raw_mf!r}")
     if q["window_mode"] == "fixed" and not q["baseline_from"]:
         errs.append("fixed 窗口必须提供 baseline_from（YYYY-MM-DD）")
     for d in q["exclude_windows"]:

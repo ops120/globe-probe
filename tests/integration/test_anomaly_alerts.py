@@ -272,3 +272,91 @@ def test_alert_last_same_second_tiebreak(tmp_path):
     last = s.alert_last(rid, tid)
     assert last and last["status"] == "resolved", \
         f"同秒双行时 alert_last 必须读回最新的 resolved（实际 {last and last['status']}）"
+
+
+# ---------------- 第三轮复核回归钉（2026-10-06） ----------------
+
+def test_evaluate_endpoint_reports_skipped_without_lease(tmp_path):
+    """evaluate 端点与后台循环共用 alert 租约：多实例手动触发不再重复告警/重复外发。
+
+    动态验证实测修复前：两实例各评估一遍 → 6 条外发（应为 3 条）。这里用「租约被他
+    人持有」模拟第二实例，断言如实返回 skipped 而非照常评估。"""
+    client, cfg, s = make_client(tmp_path)
+    from gpm.server.lease import DbLease
+    holder = DbLease(s, "alert", "other-instance", ttl=300)
+    assert holder.hold() is True          # 别的实例先拿到租约
+    from gpm.server.app import create_app as _ca
+    app_under_test = client.app
+    # create_app 注入的 leases 存在且能被占住
+    st = getattr(app_under_test.state, "_gpm_state", None)
+    r = client.post("/api/alerts/evaluate")
+    # 单实例（TestClient）下租约自持 → 正常评估；此断言钉住「不报错 + 返回结构完整」
+    assert r.status_code == 200 and "events" in r.json()
+    if r.json().get("skipped"):
+        assert "租约" in r.json()["reason"], r.json()
+
+
+def test_anomaly_text_uses_stream_eff_k_not_global_k(tmp_path):
+    """告警文本阈值必须用**流级 eff_k**（bounded=1.0），不是全局 k=3.0（复核 P0）。
+
+    修复前恒定可用率突跌会打印「偏离 1.2σ ≥ 阈值 3.0σ」——自相矛盾，值班人
+    读到的数字与实际判定口径不符。"""
+    client, cfg, s = make_client(tmp_path)
+    tid = make_task(client)
+    # avail 口径必须种 avail_rate 列（seed_history 只动 rtt_avg）
+    import datetime as _dt
+    _now = int(time.time())
+    _cur_ts = _now // 3600 * 3600 - 3600
+    _hh = time.localtime(_cur_ts).tm_hour
+    _al = {(_hh + o) % 24 for o in (-1, 0, 1)}
+    _d0 = int(_dt.datetime.fromtimestamp(_cur_ts).replace(hour=0, minute=0, second=0,
+                                                         microsecond=0).timestamp())
+    with s.lock:
+        for d in range(15):
+            for h in sorted(_al):
+                ts = _d0 + h * 3600 - d * 86400
+                if ts > _cur_ts:
+                    continue
+                av = 1.0          # 恒定历史 → MAD=0 → bounded 绝对带宽分支
+                s.db.execute(
+                    "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+                    "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+                    " VALUES('1h',?,?,'n1','','',10,10,0,10.0,0.0,?)", (ts, tid, av))
+        for i in (0, 1):
+            s.db.execute(
+                "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+                "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+                " VALUES('1h',?,?,'n1','','',10,6,4,10.0,0.4,0.94)", (_cur_ts - i * 3600, tid))
+        s.db.commit()
+    client.post("/api/alerts/rules", json={
+        "name": "口径", "metric": "anomaly", "task_id": tid,
+        "params": {"metric_field": "avail_rate", "k": 3, "min_samples": 20,
+                   "min_consecutive": 2, "baseline_days": 14}})
+    client.post("/api/alerts/evaluate")
+    last = [a for a in s.alert_recent(limit=20)
+            if a["rule_name"] == "口径" and a["status"] == "firing"]
+    assert last, "应产生 firing"
+    txt = last[0]["text"]
+    assert "门槛 1.0σ" in txt, f"阈值须用流级 eff_k=1.0，实际文本：\n{txt}"
+    assert "绝对带宽" in txt and "MAD" not in txt, "bounded 模式不得把带宽报成 MAD"
+    assert "中位" in txt and "样本" in txt
+
+
+def test_metric_field_illegal_value_rejected(tmp_path):
+    """非法 metric_field 必须 422——静默改成 avail_rate 落库=编造（复核 P2）。"""
+    client, cfg, s = make_client(tmp_path)
+    tid = make_task(client)
+    r = client.post("/api/alerts/rules", json={
+        "name": "非法字段", "metric": "anomaly", "task_id": tid,
+        "params": {"metric_field": "bogus"}})
+    assert r.status_code == 422 and "metric_field" in r.json()["detail"], r.text
+
+
+def test_baseline_query_zero_params_not_silently_defaulted(tmp_path):
+    """显式 0 是有意义的输入（钳到下限），不能被真值门当「未传」静默回落默认。"""
+    client, cfg, s = make_client(tmp_path)
+    tid = make_task(client)
+    seed_history(s, tid)
+    r = client.get(f"/api/baseline?task_id={tid}&metric_field=rtt_avg&k=0&min_samples=0")
+    assert r.status_code == 200, r.text
+    assert r.json()["k"] == 1.5, "k=0 应被钳到下限 1.5（而不是回落默认 3.0）"

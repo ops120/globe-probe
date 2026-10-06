@@ -341,7 +341,7 @@ IDC 内网段（如 `10.10.10.0/24` 在上海）直接在全球地图页「IP �
 - **历史对比需要历史**：不足 24h 时「昨日同期」无数据，页面会用自适应窗口的「前一时段」替代并说明原因
 - **写口鉴权**：`server.admin_token` 未配置时，写接口仅在环回监听（127.0.0.1 等）放行；非环回监听一律 403（安全基线）。读接口维持内网信任模型
 - **探测目标安全基线**：链路本地/云元数据地址（169.254.0.0/16、fe80::/10、0.0.0.0/8）不作为服务端外呼目标；域名解析发生在探测时刻，DNS rebinding 不在防护范围
-- **方向决议（2026-10-06）**：主方向=收集必要信息用于监控与快速判断排障。**不做**：浏览器级事务监控、公共 vantage 节点网络（只用自建节点）、多租户/RBAC/SSO；**规划中**：AI 异常检测/动态基线（独立方案见本地 .docs/AI_BASELINE_DESIGN.md）、**server 多机集群防单点（生产 DB 由 PaaS 提供；本机测试保持 SQLite 单节点为硬约束——独立改造方案见本地 .docs/CLUSTER_DESIGN.md，agent 多 server failover 先行）**；**预留已就绪**：入向官方签名校验扩展点（`hooks.SIGNATURE_VERIFIERS` 注册即生效，`/api/external/settings` 的 `signature_modes` 透出各来源模式），待各家凭据到位后实现
+- **方向决议（2026-10-06）**：主方向=收集必要信息用于监控与快速判断排障。**不做**：浏览器级事务监控、公共 vantage 节点网络（只用自建节点）、多租户/RBAC/SSO；**已落地（批次 1/2/3）**：AI 动态基线（动态基线偏离告警 + 基线窗口可手动控制 + 预览基线带；方案 .docs/AI_BASELINE_DESIGN.md）、agent 多 server failover、后台任务 DB 租约单执行者；**server 集群其余阶段规划中**（生产 DB 由 PaaS 提供；本机测试保持 SQLite 单节点为硬约束——方案 .docs/CLUSTER_DESIGN.md）；**预留已就绪**：入向官方签名校验扩展点（`hooks.SIGNATURE_VERIFIERS` 注册即生效，`/api/external/settings` 的 `signature_modes` 透出各来源模式），待各家凭据到位后实现
 - **未做**：多租户、GeoIP 离线库（当前用在线查询 + 自定义网段）
 - **Linux 实机 systemd**：仅在容器内用 shim 验证过单元渲染，上生产前请在目标发行版抽样确认（部署细节见本地 `.docs/DEPLOY.md`，不入库）
 

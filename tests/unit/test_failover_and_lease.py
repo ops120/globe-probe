@@ -197,3 +197,22 @@ def test_app_loops_have_lease_guard():
         assert f'state["leases"]["{name}"]' in src, f"循环 {name} 缺租约守卫"
     # selfcheck 不接租约（注释即声明）
     assert "不接单执行者租约" in src
+
+
+def test_lease_ttl_clamped_to_sane_range(tmp_path):
+    """TTL 收敛到 [60s, 1h]：太短会被慢循环执行中抢占，太长会让 kill 后接管过慢。"""
+    s = Storage(str(tmp_path / "ttl.db"))
+    assert DbLease(s, "x", "h", ttl=5).ttl == 60        # 下限
+    assert DbLease(s, "y", "h", ttl=99999).ttl == 3600  # 上限
+    assert DbLease(s, "z", "h", ttl=300).ttl == 300     # 区间内原值
+
+
+def test_app_lease_ttls_cover_loop_periods():
+    """回归钉：retention 循环 3600s，租约 TTL 必须 ≥3600（否则执行中过期被抢）。
+
+    动态验证实测修复前 retention 租约长期处于 -72s 过期态。"""
+    from pathlib import Path as _P
+    from gpm.server import app
+    src = _P(app.__file__).read_text(encoding="utf-8")
+    assert '"retention": 3600' in src, "retention 租约 TTL 必须 ≥ 循环周期 3600s"
+    assert '"alert": 120' in src and '"digest": 600' in src

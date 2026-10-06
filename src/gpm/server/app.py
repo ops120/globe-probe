@@ -50,12 +50,17 @@ def create_app(cfg, storage: Storage | None = None):
     # holder 每进程唯一；SQLite 单机形态 hold 恒真零开销，多实例时只有持租约节点干活
     import uuid as _uuid
     _holder = _uuid.uuid4().hex[:12]
-    _LEASE_NAMES = ("sweep", "agg", "retention", "alert", "retry",
-                    "digest", "channel_probe", "pull")
+    # TTL 按各自循环周期给：单轮耗时必须 < TTL，否则慢循环执行中租约过期被另一实例
+    # 抢占，两边同时跑（动态验证实测 retention 租约长期 -72s 过期态）。
+    # 循环周期取下表的保守上界；lease.DbLease 再收敛到 [60s, 1h]。
+    _LEASE_TTL = {"sweep": 60, "agg": 60, "retention": 3600, "alert": 120,
+                  "retry": 120, "digest": 600, "channel_probe": 180, "pull": 180}
+    _LEASE_NAMES = tuple(_LEASE_TTL)
     from .lease import DbLease
     state = {"storage": storage, "cfg": cfg, "ingest": ingest,
              "register_token": cfg.agent.get("register_token", "gpm-dev-register"),
-             "leases": {name: DbLease(storage, name, _holder) for name in _LEASE_NAMES}}
+             "leases": {name: DbLease(storage, name, _holder, ttl=_LEASE_TTL[name])
+                        for name in _LEASE_NAMES}}
 
     # 结构化日志开关（GPM_LOG_JSON=1，默认关闭保持原有纯文本行为）。这里与 lifespan
     # 各调一次是故意的：uvicorn.run() 在 create_app 之后才应用自己的日志配置，

@@ -129,11 +129,22 @@ def build_evidence(detail: dict, storage=None) -> list:
         tid = str(inc.get("task_id") or "")
         if tid:
             try:
-                for a in (storage.recent_anomaly_alerts(tid, max(0, int(inc.get("started_at") or 0) - 3600)) or [])[:2]:
+                # 同一 episode 的 firing + remind 会返回多行内容相同的告警——
+                # 按 rule_id 去重只取最新一条，避免同一事实被当成两条独立证据
+                _seen_rules = set()
+                for a in (storage.recent_anomaly_alerts(
+                        tid, max(0, int(inc.get("started_at") or 0) - 3600)) or []):
+                    _rk = a.get("rule_name") or a.get("rule_id")
+                    if _rk in _seen_rules:
+                        continue
+                    _seen_rules.add(_rk)
+                    if len(_seen_rules) > 2:
+                        break
                     z = a.get("z")
                     strong = bool(z is not None and abs(float(z)) >= 6)
-                    push("baseline", "动态基线偏离告警：%s（偏离 %skσ）"
-                         % (a.get("rule_name") or "?", z if z is not None else "?"), strong)
+                    push("baseline", "动态基线偏离告警：%s（偏离 %s）"
+                         % (a.get("rule_name") or "?",
+                            ("%.1fσ" % abs(float(z))) if z is not None else "?"), strong)
             except Exception:
                 pass  # 证据查询失败不影响证据池其余部分
 

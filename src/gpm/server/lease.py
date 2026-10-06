@@ -14,10 +14,18 @@ class DbLease:
         self.s = storage
         self.name = name
         self.holder = holder
-        self.ttl = max(5, int(ttl))
+        # TTL 必须**长于**一次循环耗时（循环按自身周期调 hold：retention 3600s /
+        # digest 300s / retry·pull·probe 60s），否则慢任务执行中租约过期被另一实例
+        # 抢占，两边同时跑（动态验证实测 retention 租约长期处于过期态）。
+        # 上限 1h：足够覆盖最慢的 retention 单轮，又能在持租约进程被 kill 后
+        # 于可接受时间内被接管（实测 60s TTL 接管耗时 58.6s）。
+        self.ttl = max(60, min(3600, int(ttl)))
 
     def hold(self) -> bool:
-        """获取或续约租约。True=本进程持有（可干活）；False=他人持有且未过期。"""
+        """获取或续约租约。True=本进程持有（可干活）；False=他人持有且未过期。
+
+        循环体**开始前**调用一次即完成租约或续约——只要单轮耗时 < TTL 就不会被抢占
+        （TTL 构造时已按周期收敛，见 __init__）。"""
         return self.s.lease_acquire(self.name, self.holder, self.ttl)
 
     def release(self) -> bool:

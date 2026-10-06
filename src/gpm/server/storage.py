@@ -69,12 +69,12 @@ CREATE TABLE IF NOT EXISTS tokens(
   enabled INTEGER DEFAULT 1, created_at INTEGER, last_used_at INTEGER DEFAULT 0,
   revoked_at INTEGER DEFAULT 0);
 
--- GeoIP 结果缓存（避免频繁打外部接口）
+-- 后台任务单执行者租约（server 集群，.docs/CLUSTER_DESIGN.md 阶段 2）：持有者心跳
+-- 续约，超时即可被争夺。时间一律 DB 侧 epoch 秒（strftime('%s','now')），规避时钟漂移。
 CREATE TABLE IF NOT EXISTS lease(
   name TEXT PRIMARY KEY, holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
--- 后台任务单执行者（server 集群，.docs/CLUSTER_DESIGN.md 阶段 2）：持有者心跳续约，
--- 超时即可被争夺。时间一律 DB 侧 epoch 秒（strftime('%s','now')），规避节点时钟漂移。
 
+-- GeoIP 结果缓存（避免频繁打外部接口）
 CREATE TABLE IF NOT EXISTS geo_cache(
   ip TEXT PRIMARY KEY, data_json TEXT DEFAULT '{}', ts INTEGER);
 
