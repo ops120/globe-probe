@@ -16,6 +16,21 @@ function chart(id, option, onClick) {
   // （实测：切到 mtr 任务后点色块走的是首个任务 Ping 时的闭包，联动/单次详情都指向旧任务）
   charts[id].off('click');
   if (onClick) charts[id].on('click', onClick);
+  // 空态：全部 series 的数据点总数为 0 时图中央给「暂无数据」，不再是一片空白 canvas。
+  // 口径：只认 data.length（探测记录存在但值为 null/失败也算有数据——坐标轴/tooltip 仍有信息）；
+  // geo 图自带世界地图底图不算空，排除。实现要点：合并进同一次 setOption（无二次 setOption
+  // 竞态）、不改调用方传入的 option（清态靠下方 clear() 后新 option 不带 title 自然消失）。
+  const total = (option.series || []).reduce((s, x) => s + ((x && x.data) ? x.data.length : 0), 0);
+  if (total === 0 && !option.geo) {
+    option = Object.assign({}, option, {
+      title: {
+        text: '暂无数据', subtext: '该时间窗口内无探测结果（任务可能已停用或节点离线）',
+        left: 'center', top: 'middle',
+        textStyle: { color: C('--faint'), fontSize: 14, fontWeight: 'normal' },
+        subtextStyle: { color: C('--faint'), fontSize: 11 },
+      },
+    });
+  }
   charts[id].clear(); charts[id].setOption(option);
 }
 function chartOf(id) { return charts[id]; }

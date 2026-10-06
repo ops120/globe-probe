@@ -41,12 +41,26 @@ async function pollHealth() {
 /* ---------- 导航 ---------- */
 const PAGENAMES = { overview: '概览', task: '任务分析', compare: '历史对比', geo: '全球地图', alerts: '值班告警', nodes: '节点管理', tasks: '任务管理' };
 const RENDER = { overview: renderOverview, task: renderTask, compare: renderCompare, geo: renderGeo, alerts: renderAlerts, nodes: renderNodes, tasks: renderTasks };
+/* 视图状态持久化：page / task / 任务子页 / 时间窗。
+ * 切页、切子页、切时间窗三处都会改状态，各自调用本函数写 sessionStorage——
+ * 只在 show() 里写会存到旧值（时间窗/子页的切换都发生在 show() 之后）。
+ * sessionStorage 不跨标签页：F5 后回原地，换标签页仍是默认首页。 */
+function persistView() {
+  try {
+    if (state.page) sessionStorage.setItem('gpm-page', state.page);
+    if (state.task) sessionStorage.setItem('gpm-task', state.task);
+    if (state.taskSub) sessionStorage.setItem('gpm-taskSub', state.taskSub);
+    if (state.range) sessionStorage.setItem('gpm-range', String(state.range));
+  } catch (e) { /* 隐私模式无 sessionStorage，忽略 */ }
+}
+
 async function show(page) {
   if (state.page && state.page !== page) {
     state._prevPage = state.page;
     state._prevAlertsSub = (state.page === "alerts") ? state.alertsSub : state._prevAlertsSub;
   }
   state.page = page;
+  persistView();
   $$('.sidebar nav a').forEach(a => a.classList.toggle('active', a.dataset.page === page));
   $$('.page').forEach(p => p.classList.add('hidden'));
   $('#page-' + page).classList.remove('hidden');
@@ -93,7 +107,7 @@ $('#cmp-task').addEventListener('change', e => pickTask(e.target.value, renderCo
 $('#mtr-reset').addEventListener('click', () => renderTask());   // 清零点选轮次 → 回到最新
 $$('#task-range button').forEach(b => b.onclick = () => {
   $$('#task-range button').forEach(x => x.classList.remove('active')); b.classList.add('active');
-  state.range = +b.dataset.r; renderTask();
+  state.range = +b.dataset.r; persistView(); renderTask();
 });
 $$('#cmp-metric button').forEach(b => b.onclick = () => {
   $$('#cmp-metric button').forEach(x => x.classList.remove('active'));
@@ -161,6 +175,35 @@ function applyDeepLink() {
 /* 初始化 */
 (async () => {
   await pollHealth();
-  if (!(await applyDeepLink())) await show('overview');
+  // 深链（?task=xx&ts=xx）优先级最高；否则恢复上次刷新前的页面（sessionStorage）
+  if (!(await applyDeepLink())) {
+    let saved = {};
+    try {
+      saved = {
+        page: sessionStorage.getItem('gpm-page') || '',
+        task: sessionStorage.getItem('gpm-task') || '',
+        taskSub: sessionStorage.getItem('gpm-taskSub') || '',
+        range: parseInt(sessionStorage.getItem('gpm-range')) || 0,
+      };
+    } catch (e) { /* 无 sessionStorage 时走默认 */ }
+    if (saved.page && PAGENAMES[saved.page]) {
+      // 只有回到「任务分析/历史对比」才需先拉任务列表（show('tasks')/show('overview') 自己会拉）：
+      // 无条件拉会与 show() 内的请求竞争，冷启动时白白多等一个 tasks 往返。
+      if (saved.task && (saved.page === 'task' || saved.page === 'compare') && !state.tasks.length) {
+        try { state.tasks = await api('/api/tasks'); } catch (e) { /* 拉不到就走默认任务 */ }
+      }
+      if (saved.task && state.tasks.some(t => t.id === saved.task)) state.task = saved.task;
+      // 时间窗按钮状态与 state 同步（renderTask 读 state.range）
+      if (saved.range) {
+        state.range = saved.range;
+        $$('#task-range button').forEach(b => b.classList.toggle('active', +b.dataset.r === saved.range));
+      }
+      await show(saved.page);
+      // 任务分析子页（概览/指标/链路）也恢复：show() 后 DOM 已可见，切子页 resize 正常
+      if (saved.page === 'task' && saved.taskSub && window.showTaskSub) showTaskSub(saved.taskSub);
+    } else {
+      await show('overview');
+    }
+  }
   setInterval(() => { if (state.page === 'overview') renderOverview().catch(() => { }); }, 30000);
 })();

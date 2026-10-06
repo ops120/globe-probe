@@ -28,7 +28,9 @@ for _s in (sys.stdout, sys.stderr):
 
 from playwright.sync_api import sync_playwright
 
-PAGES = [("overview", "总览"), ("task", "任务详情"), ("compare", "历史对比"),
+# (data-page, 面包屑文案)：文案必须与 gpm-boot.js PAGENAMES 一致
+# （第五轮菜单改名：总览→概览、任务详情→任务分析、告警与报表→值班告警）
+PAGES = [("overview", "概览"), ("task", "任务分析"), ("compare", "历史对比"),
          ("geo", "全球地图"), ("nodes", "节点管理"), ("tasks", "任务管理")]
 
 

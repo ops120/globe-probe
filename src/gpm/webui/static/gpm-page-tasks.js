@@ -4,8 +4,13 @@
  */
 'use strict';
 async function renderTasks() {
-  const [tasks, nodes, groups] = await Promise.all(
-    [api('/api/tasks'), api('/api/nodes'), api('/api/groups')]);
+  // 三个接口并行；任一失败会连累整表不渲染（实测偶发空表）。groups 缺失时退化为「无分组」
+  // 仍出表，nodes 同理——辅助信息缺失不该让整页空白；tasks 失败则如实报错。
+  const [tasks, nodes, groups] = await Promise.all([
+    api('/api/tasks'),
+    api('/api/nodes').catch(() => []),
+    api('/api/groups').catch(() => []),
+  ]);
   state.tasks = tasks;
   state.groups = groups;
   const nmap = Object.fromEntries(nodes.map(n => [n.id, n.name]));
@@ -15,8 +20,11 @@ async function renderTasks() {
     : t.nodes.map(x => x.startsWith('g:')
       ? '📁' + (gmap[x.slice(2)] || x.slice(2))
       : (nmap[x] || x)).join(', ');
-  $('#task-mgr-tbl').innerHTML = '<thead><tr><th>任务名</th><th>类型</th><th>目标</th><th>间隔</th><th>DNS 线路</th><th>URL 数</th><th>分配节点</th><th>config</th><th>启用</th><th>操作</th></tr></thead><tbody>' +
-    tasks.map(t => `<tr><td style="color:var(--fg-strong2)">${esc(t.name)}</td>
+  $('#task-mgr-tbl').innerHTML = '<thead><tr><th>任务名</th><th>类型</th><th>目标</th><th>间隔</th><th>DNS 线路</th><th>URL 数</th><th>分配节点</th><th>config</th><th>启用</th><th>最后数据</th><th>操作</th></tr></thead><tbody>' +
+    tasks.map(t => {
+      // 最后数据时间：启用中但超过 1 小时没数据 = 该任务大概率停跑了，标警示色
+      const stale = t.enabled && t.last_data_ts && (Date.now() / 1000 - t.last_data_ts > 3600);
+      return `<tr style="cursor:pointer" onclick="goTask('${t.id}')" title="点击查看任务分析"><td style="color:var(--fg-strong2)">${esc(t.name)}</td>
       <td><span class="badge ${TYPE_BADGE[t.type] || 'b-off'}">${t.type.toUpperCase()}</span></td>
       <td style="color:var(--muted)">${esc(t.target || (t.urls || []).length + ' URLs')}</td>
       <td>${t.interval_seconds}s</td>
@@ -25,10 +33,14 @@ async function renderTasks() {
       <td style="color:var(--muted)" title="${esc(assigned(t))}">${esc(assigned(t).length > 26 ? assigned(t).slice(0, 26) + '…' : assigned(t))}</td>
       <td class="num" style="color:var(--muted)">v${t.config_version}</td>
       <td>${t.enabled ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-warn">停用</span>'}</td>
-      <td><button class="btn sm" onclick="editTask('${t.id}')">编辑</button>
-      <button class="btn sm ${t.enabled ? 'ghost' : ''}" onclick="toggleTask('${t.id}',${t.enabled ? 0 : 1})">${t.enabled ? '停用' : '启用'}</button>
-      <button class="btn sm danger" onclick="delTask('${t.id}')">删除</button></td></tr>`).join('') + '</tbody>';
+      <td style="color:${stale ? 'var(--warn-fg)' : 'var(--muted)'}" title="${t.last_data_ts ? fmtTS(t.last_data_ts) : '近 24h 无数据'}">${fmtAgo(t.last_data_ts)}</td>
+      <td><button class="btn sm" onclick="event.stopPropagation();editTask('${t.id}')">编辑</button>
+      <button class="btn sm ${t.enabled ? 'ghost' : ''}" onclick="event.stopPropagation();toggleTask('${t.id}',${t.enabled ? 0 : 1})">${t.enabled ? '停用' : '启用'}</button>
+      <button class="btn sm danger" onclick="event.stopPropagation();delTask('${t.id}')">删除</button></td></tr>`;
+    }).join('') + '</tbody>';
 }
+// 点任务行 → 跳转任务分析（openTaskAt 兜底任务不存在/清筛选；返回按钮回任务管理由 _prevPage 自动记录）
+window.goTask = id => { openTaskAt(id); };
 window.editTask = id => { const t = state.tasks.find(x => x.id === id); if (t) taskModal(t); };
 window.toggleTask = async (id, en) => {
   try { await api(`/api/tasks/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: en }) }); toast('已更新，节点将在 15s 内生效'); renderTasks(); }

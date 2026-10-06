@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS probe_results(
 CREATE INDEX IF NOT EXISTS ix_res_ts ON probe_results(ts);
 CREATE INDEX IF NOT EXISTS ix_res_node_ts ON probe_results(node_id, ts);
 CREATE INDEX IF NOT EXISTS ix_res_task_ts ON probe_results(task_id, ts);
+-- 覆盖索引：result_streams() 的「各流最近一条」是 (task_id,node_id,dns,url) 定值 + ts DESC，
+-- 此前只有 ix_res_task_ts(task_id,ts)，每条流都要在该任务的全部结果里扫 ts 找最新
+-- （22 万行 / 18 流的 curl 任务实测 8.3s → /api/tasks 整体 15~24s，超过前端 15s 超时，
+--  概览页与任务管理页直接加载失败）。补建后同查询 2ms。
+CREATE INDEX IF NOT EXISTS ix_res_task_stream_ts ON probe_results(task_id, node_id, dns, url, ts);
 
 CREATE TABLE IF NOT EXISTS aggregates(
   bucket TEXT, ts INTEGER, task_id TEXT, node_id TEXT, dns TEXT DEFAULT '', url TEXT DEFAULT '',
@@ -49,6 +54,9 @@ CREATE TABLE IF NOT EXISTS aggregates(
 -- 必须按 (bucket, task_id, ts) 顺序才能走索引。早期漏建，已补。
 CREATE INDEX IF NOT EXISTS ix_agg_bucket_task_ts ON aggregates(bucket, task_id, ts);
 CREATE INDEX IF NOT EXISTS ix_agg_bucket_node_ts ON aggregates(bucket, node_id, ts);
+-- 覆盖索引：agg_read() 按 (bucket,task_id,node_id,dns,url) 定值 + ts 范围，
+-- 同上（_compute_tasks 逐流读 24h 窗口）。补建后走索引区间扫描而非任务内全扫。
+CREATE INDEX IF NOT EXISTS ix_agg_bucket_stream_ts ON aggregates(bucket, task_id, node_id, dns, url, ts);
 
 CREATE TABLE IF NOT EXISTS incidents(
   id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT, node_id TEXT, dns TEXT, url TEXT,

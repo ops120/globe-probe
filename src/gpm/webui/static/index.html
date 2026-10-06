@@ -346,8 +346,41 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           </div>
           <div id="chart-uptime" class="chart h160"></div>
         </div>
+        <!-- MTR 链路面板与通断条带同页（不拆到「链路」子页）：点条带色块 → 下方明细立刻联动，
+             条带本身留在视野里才能看清高亮的是哪一格。拆开就等于点了没反应。 -->
+        <div id="panels-mtr" class="hidden">
+          <div class="panel"><div class="panel-head">逐跳丢包热力图 <span class="sub" id="mtr-hm-sub">最新一轮</span></div><div id="chart-mtrhm" class="chart h260"></div></div>
+          <div class="panel"><div class="panel-head">路径明细 <span class="sub" id="mtr-sub"></span>
+              <span style="flex:1"></span>
+              <a id="mtr-reset" class="hidden" href="javascript:void(0)" style="font-size:12px;color:#4e8ce6" title="清除点选/流选择，跟随上方筛选显示最新一轮">↺ 回到最新</a></div>
+            <div id="mtr-streams" style="padding:0 0 8px 0"></div>
+            <div id="mtr-tables"></div>
+          </div>
+          <div class="panel" id="mtr-trend-panel">
+            <div class="panel-head">逐跳趋势
+              <span class="sub">窗口内原始路径结果按跳号聚合（均 Loss / 均 RTT / 出现次数，≤500 条）</span>
+              <span style="flex:1"></span>
+              <div class="seg" id="mtr-trend-range">
+                <button data-h="24" class="active">24小时</button>
+                <button data-h="72">72小时</button>
+                <button data-h="168">7天</button>
+              </div>
+              <button class="btn ghost sm" id="mtr-trend-toggle">展开</button>
+            </div>
+            <div id="mtr-trend-body" class="hidden"></div>
+          </div>
+        </div>
         </div>
         <div class="subpage hidden" data-tsubpage="metrics">
+        <div id="panels-none" class="hidden">
+          <div class="panel">
+            <div class="panel-head">本任务类型没有时序指标图</div>
+            <div class="hint" style="padding:26px 4px;line-height:1.9">
+              <span id="panels-none-reason"></span><br>
+              <a id="panels-none-link" href="javascript:void(0)" style="color:var(--accent-2)">→ 去看「概览」子页</a>
+            </div>
+          </div>
+        </div>
         <div id="panels-ping">
           <div class="panel">
             <div class="panel-head">RTT 延迟 <span class="sub" id="gran-note"></span></div>
@@ -372,26 +405,13 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
             <div id="dns-lines"></div>
           </div>
         </div>
-        <div id="panels-mtr" class="hidden">
-          <div class="panel"><div class="panel-head">逐跳丢包热力图 <span class="sub" id="mtr-hm-sub">最新一轮</span></div><div id="chart-mtrhm" class="chart h260"></div></div>
-          <div class="panel"><div class="panel-head">路径明细 <span class="sub" id="mtr-sub"></span>
-              <span style="flex:1"></span>
-              <a id="mtr-reset" class="hidden" href="javascript:void(0)" style="font-size:12px;color:#4e8ce6" title="清除点选/流选择，跟随上方筛选显示最新一轮">↺ 回到最新</a></div>
-            <div id="mtr-streams" style="padding:0 0 8px 0"></div>
-            <div id="mtr-tables"></div>
-          </div>
-          <div class="panel" id="mtr-trend-panel">
-            <div class="panel-head">逐跳趋势
-              <span class="sub">窗口内原始路径结果按跳号聚合（均 Loss / 均 RTT / 出现次数，≤500 条）</span>
-              <span style="flex:1"></span>
-              <div class="seg" id="mtr-trend-range">
-                <button data-h="24" class="active">24小时</button>
-                <button data-h="72">72小时</button>
-                <button data-h="168">7天</button>
-              </div>
-              <button class="btn ghost sm" id="mtr-trend-toggle">展开</button>
+        <div id="panels-nopath" class="hidden">
+          <div class="panel">
+            <div class="panel-head">本任务类型没有链路数据</div>
+            <div class="hint" style="padding:26px 4px;line-height:1.9">
+              <span id="panels-nopath-reason"></span><br>
+              <a href="javascript:void(0)" onclick="showTaskSub('metrics')" style="color:var(--accent-2)">→ 去看「指标」子页</a>
             </div>
-            <div id="mtr-trend-body" class="hidden"></div>
           </div>
         </div>
         <div class="hint">点击图表数据点或通断条带色块 → 该时刻单次探测详情；原始明细仅短窗提供（性能红线），长窗走聚合表</div>

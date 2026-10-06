@@ -12,10 +12,12 @@ function showTaskSub(key) {
   state.taskSub = key;
   $$('#task-subtabs button').forEach(b => b.classList.toggle('active', b.dataset.tsub === key));
   $$('#page-task .subpage').forEach(p => p.classList.toggle('hidden', p.dataset.tsubpage !== key));
+  if (typeof persistView === 'function') persistView();   // 刷新后回到同一子页
   // 切到指标/链路后 echarts 实例需要重算尺寸（否则首次可见时宽度为 0）
   setTimeout(() => { try { Object.values(charts || {}).forEach(c => c.resize()); } catch (e) {} }, 50);
 }
 $$('#task-subtabs button').forEach(b => b.onclick = () => showTaskSub(b.dataset.tsub));
+window.showTaskSub = showTaskSub;   // 子页占位提示里的「去看链路/指标」内联链接要用
 
 async function renderTask() {
   const t = curTask(); if (!t) return;
@@ -29,8 +31,39 @@ async function renderTask() {
   $('#panels-ping').classList.toggle('hidden', !isPingLike);
   $('#panel-loss').classList.toggle('hidden', t.type !== 'ping');
   $('#panels-curl').classList.toggle('hidden', t.type !== 'curl');
+  // mtr 的链路面板已并入概览子页（点条带色块要能立刻看到下方明细联动）；
+  // dns 没有这个联动，解析明细留在「链路」子页
   $('#panels-mtr').classList.toggle('hidden', t.type !== 'mtr');
   $('#panels-dns').classList.toggle('hidden', t.type !== 'dns');
+  // mtr/dns 没有时序 RTT/丢包曲线（数据是逐跳明细与逐线路答案，不进 aggregates 的 rtt/loss），
+  // 「指标」子页会**整个空白**——连 chart() 都不会被调用，空态提示也就不会出现。
+  // 这里按类型给出明确指路，而不是让用户对着一片白页猜「是不是坏了」。
+  const noMetrics = t.type === 'mtr' || t.type === 'dns';
+  $('#panels-none').classList.toggle('hidden', !noMetrics);
+  if (noMetrics) {
+    $('#panels-none-reason').textContent = t.type === 'mtr'
+      ? 'MTR 任务探测的是逐跳路径，没有 RTT/丢包时序曲线。逐跳热力图与路径明细在「概览」子页，与通断条带联动。'
+      : 'DNS 任务探测的是逐线路解析，指标以各线路答案与解析耗时呈现，不画 RTT/丢包时序曲线。';
+    // 指路目标随类型不同：mtr 链路已并入概览，dns 逐线路解析在链路
+    const link = $('#panels-none-link');
+    link.textContent = t.type === 'mtr' ? '→ 去看「概览」子页' : '→ 去看「链路」子页';
+    link.onclick = () => showTaskSub(t.type === 'mtr' ? 'overview' : 'path');
+  }
+  // 子页按钮按类型显隐：mtr 链路在概览，不显示「链路」tab；dns 保留
+  $$('#task-subtabs button').forEach(b => {
+    b.classList.toggle('hidden', t.type === 'mtr' && b.dataset.tsub === 'path');
+  });
+  // mtr 任务当前停在「链路」时（切任务进来）要拉回概览，否则内容看不见
+  if (t.type === 'mtr' && state.taskSub === 'path') showTaskSub('overview');
+  // 对称地：ping/curl/tcp 没有链路数据，「链路」子页同样会整个空白
+  // （mtr 链路已并入概览；dns 解析明细在本子页，都不算「无链路数据」）
+  const hasPath = t.type === 'mtr' || t.type === 'dns';
+  $('#panels-nopath').classList.toggle('hidden', hasPath);
+  if (!hasPath) {
+    $('#panels-nopath-reason').textContent = t.type === 'curl'
+      ? 'CURL 任务探测的是 HTTP 请求，不采集路径信息（逐跳链路需用 MTR 任务）。'
+      : 'PING/TCP 任务只探测目标的可达性与往返时延，不采集路径信息（逐跳链路需用 MTR 任务）。';
+  }
   // 逐跳趋势默认折叠（旧版服务端没有该接口，按需展开才请求）；切任务后需要重新加载
   $('#mtr-trend-body').classList.add('hidden');
   delete $('#mtr-trend-body').dataset.loaded;

@@ -432,6 +432,8 @@ def setup_router(app_state) -> APIRouter:
                 d["skip_reason"] = (newest.get("latest_error")
                                     or newest.get("latest_error_class") or "探测被跳过")
             d["current_status"] = last_status
+            # 最后数据时间：任务管理表格用它判断「任务是否还在跑」（0=近 24h 无任何数据）
+            d["last_data_ts"] = last_ts or None
             out.append(d)
         return out
 
