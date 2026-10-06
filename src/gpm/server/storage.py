@@ -1566,6 +1566,21 @@ class Storage:
             return out
 
     @staticmethod
+    def _num(fields: dict, key: str, default: int) -> int:
+        """取整数字段：缺省判据是「键缺失/值为 None」，**不是真值**。
+
+        `fields.get(key) or default` 会把**显式 0** 静默换成默认值——silence_seconds 的
+        合法区间含 0（= 每轮都提醒），接口也确实收 0，但这里 `or 1800` 会把它吞成
+        30 分钟，用户设了却不知道没生效（复核：与 baseline._with_defaults 同类真值门）。"""
+        v = fields.get(key)
+        if v is None:
+            return default
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default          # 非法值回落默认，与 _clamp_escalate_minutes 同口径
+
+    @staticmethod
     def _clamp_escalate_minutes(v) -> int:
         """升级链阈值钳制：默认 0（关闭），上限 1440 分钟（1 天）。"""
         try:
@@ -1583,12 +1598,12 @@ class Storage:
                     "params_json,enabled,created_at)"
                     " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (rid, fields["name"], fields["metric"], fields["op"], float(fields["threshold"]),
-                     int(fields.get("window_seconds") or 300), fields.get("task_id") or "",
+                     self._num(fields, "window_seconds", 300), fields.get("task_id") or "",
                      fields.get("node_id") or "", fields.get("group_id") or "",
                      fields.get("severity") or "warning",
                      json.dumps(fields.get("channel_ids") or []),
-                     int(fields.get("silence_seconds") or 1800),
-                     self._clamp_escalate_minutes(fields.get("escalate_minutes") or 0),
+                     self._num(fields, "silence_seconds", 1800),
+                     self._clamp_escalate_minutes(self._num(fields, "escalate_minutes", 0)),
                      json.dumps(fields.get("params") or {}, ensure_ascii=False),
                      1 if fields.get("enabled", True) else 0, ts))
             except sqlite3.IntegrityError:

@@ -39,7 +39,9 @@ METRICS = {
     "rtt_p95": ("延迟 P95", "gt", "ms", True),
     "loss": ("丢包率", "gt", "%", True),
     "node_offline": ("节点离线", "eq", "", False),
-    "anomaly": ("动态基线偏离", "gt", "kσ", True),   # 第十期：与自己的历史同时段比，无需手拍阈值
+    "anomaly": ("动态基线偏离", "gt", "σ", True),    # 第十期：与自己的历史同时段比，无需手拍阈值。
+    # 单位是 σ 不是 kσ：z 值本身已是「偏离多少倍标准差」，再乘 k 是二次计量。该元信息经
+    # /api/alerts/rules 的 metrics 字段下发给前端，改动会同步反映到界面（复核：曾标 kσ）。
 }
 OPS = {"lt": "<", "gt": ">", "eq": "=", "ne": "!="}
 
@@ -515,9 +517,10 @@ def _anomaly_changes(storage, rule: dict, task: dict, label: str, ts: int) -> li
                     if ts - last_warn > 600:
                         _ANOMALY_WARN_AT[rule["id"]] = ts
                         log.warning("动态基线预警（未确认）: %s 流 %s 当前值 %.2f 偏离基线 "
-                                    "%.2f±%.2f 达 %.1fkσ——等 1h 桶确认", rule["name"],
+                                    "%.2f±%.2f 达 %.1fσ（门槛 %.1fσ）——等 1h 桶确认", rule["name"],
                                     (r["node_id"], r["dns"], r["url"]), float(r["value"]),
-                                    s0["center"], s0["scale"], abs(z5))
+                                    s0["center"], s0["scale"], abs(z5),
+                                      s0.get("eff_k") or res["k"])
                     break
         except Exception:  # noqa: BLE001 - 预警绝不影响正式评估
             pass
@@ -574,11 +577,19 @@ def _anomaly_changes(storage, rule: dict, task: dict, label: str, ts: int) -> li
         for t, v, z in worst.get("zs", []) if v is not None) or "当前值缺失"
     _wz = worst.get("worst_z")
     _eff = worst.get("eff_k") or res.get("k") or 0
-    # 阈值与门槛必须与实际判定口径一致（复核 P0：bounded 流真实门槛是流级 eff_k=1.0，
-    # 文本曾固定打印 k=3.0 → 「1.2σ 就该有 3σ 的事件」自相矛盾）
-    _judge = ("- 判定：偏离 %.1fσ ≥ 门槛 %.1fσ，连续 %d 个小时桶" % (
-        _wz, _eff, int(res.get("mc") or 0))) if kind != "resolved" \
-        else "- 判定：全部 %d 条流已回到各自滞回带内（恢复）" % len(evaluable_all)
+    # 判定行必须与**本轮真正的触发条件**逐句对应（复核 P0 同类残留）：
+    #   fired 非空 = 确实连续 mc 个小时桶越界 → 才可以说「连续 N 个桶」
+    #   fired 为空但仍有流越界 = remind 的另一条路径，只判了**当前桶**，写「连续 N 个桶」
+    #   会和下一行「各小时桶」自相矛盾（实测：文案称连续 3 桶、桶序列显示最老桶 0.0σ）
+    if kind == "resolved":
+        _judge = "- 判定：全部 %d 条流已回到各自滞回带内（恢复）" % len(evaluable_all)
+    elif fired:
+        _judge = ("- 判定：偏离 %.1fσ ≥ 门槛 %.1fσ，连续 %d 个小时桶"
+                  % (_wz, _eff, int(res.get("mc") or 0)))
+    else:
+        _judge = ("- 判定：当前桶仍越界（偏离 %.1fσ ≥ 门槛 %.1fσ），"
+                  "未满足连续 %d 个小时桶的进入条件"
+                  % (_wz, _eff, int(res.get("mc") or 0)))
     # 基线数字：bounded 模式 scale 是**绝对带宽**不是 MAD——报 MAD=0.05 是编造
     _scale_txt = ("绝对带宽 %.3f（历史恒定，按带宽判定）" % worst["scale"]) \
         if worst.get("mode") == "bounded" else ("MAD×1.4826 %.3f" % worst["scale"])

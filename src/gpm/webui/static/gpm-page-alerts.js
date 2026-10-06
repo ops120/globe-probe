@@ -508,12 +508,21 @@ window.ruleModal = async (rid) => {
   };
   $('#r-scope').onchange = syncScope; syncScope();
   // anomaly 表单联动：隐藏阈值语义行、强制任务范围、回填编辑值
+  // 数值取值一律「空串/非数才回落默认」，不能写 Number(x) || dflt：
+  // 显式 0 在这里是**有意义的输入**（k=0 会被后端钳到下限 1.5、min_samples=0 钳到 5），
+  // 用 || 会在前端就把它悄悄换成 3/20/2，后端的 is None 修复根本走不到（复核：前端同一类真值门）。
+  const numOf = (sel, dflt) => {
+    const raw = String($(sel).value).trim();
+    if (raw === '') return dflt;
+    const v = Number(raw);
+    return Number.isFinite(v) ? v : dflt;
+  };
   const collectParams = () => ({
-    metric_field: $('#r-a-field').value, k: Number($('#r-a-k').value) || 3,
+    metric_field: $('#r-a-field').value, k: numOf('#r-a-k', 3),
     direction: $('#r-a-dir').value, window_mode: $('#r-a-mode').value,
-    baseline_days: parseInt($('#r-a-days').value) || 14, baseline_from: $('#r-a-from').value.trim(),
-    align: $('#r-a-align').value, min_samples: parseInt($('#r-a-mins').value) || 20,
-    min_consecutive: parseInt($('#r-a-mc').value) || 2,
+    baseline_days: numOf('#r-a-days', 14), baseline_from: $('#r-a-from').value.trim(),
+    align: $('#r-a-align').value, min_samples: numOf('#r-a-mins', 20),
+    min_consecutive: numOf('#r-a-mc', 2),
     exclude_windows: $('#r-a-excl').value.split('\n').map(s => s.trim()).filter(Boolean),
   });
   const syncMetric = () => {
@@ -548,7 +557,9 @@ window.ruleModal = async (rid) => {
       const r = await api('/api/baseline?' + q.toString());
       const lines = (r.streams || []).slice(0, 8).map(s => (s.node_id || '') + (s.dns ? '·' + s.dns : '')
         + (s.url ? '·' + s.url : '') + '：' + (s.evaluable
-          ? '中位 ' + s.center + '（MAD ' + s.scale + '，n=' + s.samples + '，' + s.mode + '）当前 '
+          ? '中位 ' + s.center + '（' + (s.mode === 'bounded'
+                ? '绝对带宽 ' + s.scale + '（历史恒定，按带宽判定）' : 'MAD×1.4826 ' + s.scale)
+              + '，n=' + s.samples + '，' + s.mode + '）当前 '
             + (s.cur_v != null ? s.cur_v : '—') + '，z=' + (s.worst_z != null ? s.worst_z : '—')
           : (s.reason || '不可评估')));
       $('#r-a-preview-out').textContent = (r.evaluable ? '基线可行 ✓\n' : '不可评估 ✗\n') + lines.join('\n');

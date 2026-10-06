@@ -620,3 +620,33 @@ def test_sla_mtta_mttr_segments(tmp_path):
     assert d2["mtta"] == {"p50_s": None, "mean_s": None}
     assert d2["mttr"] == {"p50_s": None, "mean_s": None}
     assert "MTTA 无法计算" in d2["mtta_note"] and "无法计算" in d2["mttr_note"]
+
+# ---------------- 第四轮复核回归钉（2026-10-06）：显式 0 真值门 ----------------
+
+def test_rule_create_keeps_explicit_zero_silence(tmp_path):
+    """silence_seconds=0 是合法值（= 每轮都提醒），新建规则必须原样落库。
+
+    复核发现：api_web 声明该字段合法区间含 0 且确实收下，但 storage.create_rule 写的是
+    int(fields.get("silence_seconds") or 1800)——显式 0 是假值，被静默换成 30 分钟，
+    用户设了却不知道没生效（update_rule 用 is not None 所以改一次就对了，两条路径不一致）。
+    变异测试：还原成 or 1800 时本用例必须红。"""
+    client, cfg, s = make_client(tmp_path)
+    r = client.post("/api/alerts/rules", json={
+        "name": "零静默", "metric": "avail", "op": "lt", "threshold": 0.5,
+        "window_seconds": 60, "silence_seconds": 0, "channel_ids": []})
+    assert r.status_code == 200, r.text
+    assert r.json()["silence_seconds"] == 0, \
+        f"显式 0 必须落库为 0，实际 {r.json()['silence_seconds']}"
+    row = next(x for x in s.list_rules() if x["id"] == r.json()["id"])
+    assert row["silence_seconds"] == 0, row
+
+
+def test_rule_create_keeps_default_when_field_absent(tmp_path):
+    """反向对照：字段缺失时才用默认值（防把「缺省」也一起改坏）。"""
+    client, cfg, s = make_client(tmp_path)
+    r = client.post("/api/alerts/rules", json={
+        "name": "不传静默", "metric": "avail", "op": "lt", "threshold": 0.5,
+        "channel_ids": []})
+    assert r.status_code == 200, r.text
+    assert r.json()["silence_seconds"] == 1800, r.json()
+

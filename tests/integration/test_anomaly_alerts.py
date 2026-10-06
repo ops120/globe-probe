@@ -284,16 +284,25 @@ def test_evaluate_endpoint_reports_skipped_without_lease(tmp_path):
     client, cfg, s = make_client(tmp_path)
     from gpm.server.lease import DbLease
     holder = DbLease(s, "alert", "other-instance", ttl=300)
-    assert holder.hold() is True          # 别的实例先拿到租约
-    from gpm.server.app import create_app as _ca
-    app_under_test = client.app
-    # create_app 注入的 leases 存在且能被占住
-    st = getattr(app_under_test.state, "_gpm_state", None)
+    assert holder.hold() is True          # 别的实例先拿到 alert 租约且未过期
     r = client.post("/api/alerts/evaluate")
-    # 单实例（TestClient）下租约自持 → 正常评估；此断言钉住「不报错 + 返回结构完整」
-    assert r.status_code == 200 and "events" in r.json()
-    if r.json().get("skipped"):
-        assert "租约" in r.json()["reason"], r.json()
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # 无条件下断言：本钉曾经写成「if body.get(skipped)」的条件式，把租约检查整个删掉
+    # （= 修复前行为）它照样通过，等于没钉。变异测试：lease 分支改成 if False 时本用例必须红。
+    assert body.get("skipped") is True, \
+        "他人持有 alert 租约时必须如实 skipped 而非照常评估，实际返回：" + json.dumps(body)
+    assert body["events"] == [], body
+    assert "租约" in body["reason"], body
+
+
+def test_evaluate_endpoint_runs_when_lease_is_free(tmp_path):
+    """反向对照：租约没人占时 evaluate 端点必须真评估（防钉修过头把功能改坏）。"""
+    client, cfg, s = make_client(tmp_path)
+    r = client.post("/api/alerts/evaluate")
+    assert r.status_code == 200, r.text
+    assert not r.json().get("skipped"), r.json()   # 键缺省即「没跳过」
+    assert "events" in r.json()
 
 
 def test_anomaly_text_uses_stream_eff_k_not_global_k(tmp_path):
@@ -350,6 +359,135 @@ def test_metric_field_illegal_value_rejected(tmp_path):
         "name": "非法字段", "metric": "anomaly", "task_id": tid,
         "params": {"metric_field": "bogus"}})
     assert r.status_code == 422 and "metric_field" in r.json()["detail"], r.text
+
+
+def test_remind_text_does_not_claim_consecutive_buckets(tmp_path):
+    """remind 的两条触发路径判定依据不同，文案必须各说各的（复核：P0 同类残留）。
+
+    remind 有两条路径：
+      a) 本轮仍有流满足「连续 mc 桶」→ 可以说「连续 N 个桶」；
+      b) fired 为空、只是**当前桶**仍越界 → 说「连续 N 个桶」就是编造。
+    修复前两条共用同一句，实测 b 路径文案写「连续 3 个小时桶」，而紧邻的桶序列里
+    最老桶是 0.0σ（只有 2 个桶偏离）——值班人读到自相矛盾的两行。
+    顺带钉住 silence_seconds=0 在新建规则时真的落 0（本用例要靠它才能走到 remind）。"""
+    client, cfg, s = make_client(tmp_path)
+    tid = make_task(client)
+    import datetime as _dt
+    _now = int(time.time())
+    _cur_ts = _now // 3600 * 3600 - 3600
+    _hh = time.localtime(_cur_ts).tm_hour
+    _al = {(_hh + o) % 24 for o in (-2, -1, 0, 1)}
+    _d0 = int(_dt.datetime.fromtimestamp(_cur_ts).replace(
+        hour=0, minute=0, second=0, microsecond=0).timestamp())
+    with s.lock:
+        for d in range(15):
+            for h in sorted(_al):
+                ts = _d0 + h * 3600 - d * 86400
+                if ts <= _cur_ts:
+                    s.db.execute(
+                        "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+                        "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+                        " VALUES('1h',?,?,'n1','','',10,10,0,10.0,0.0,1.0)", (ts, tid))
+        s.db.commit()
+
+    def _put(ts, av):
+        with s.lock:
+            s.db.execute(
+                "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+                "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+                " VALUES('1h',?,?,'n1','','',10,10,0,10.0,0.0,?)", (ts, tid, av))
+            s.db.commit()
+
+    rr = client.post("/api/alerts/rules", json={
+        "name": "提醒口径", "metric": "anomaly", "task_id": tid,
+        "silence_seconds": 0,
+        "params": {"metric_field": "avail_rate", "k": 3, "min_samples": 20,
+                   "min_consecutive": 3, "baseline_days": 14}})
+    assert rr.status_code == 200, rr.text
+    assert rr.json()["silence_seconds"] == 0, "新建规则必须原样落 0（显式 0 不被当缺省）"
+    rid = rr.json()["id"]
+
+    for i in (0, 1, 2):                    # 3 个评估桶全偏离 → firing
+        _put(_cur_ts - i * 3600, 0.94)
+    client.post("/api/alerts/evaluate")
+    assert s.alert_last(rid, tid)["title"].startswith("【告警】")
+
+    _put(_cur_ts - 2 * 3600, 1.0)          # 最老桶回基线 → fired 失效、当前桶仍越界
+    client.post("/api/alerts/evaluate")
+    # 同秒可能写两行，用有 id DESC 兜底的 alert_last 取最新；
+    # 注意 remind 行落库 status 仍是 firing（remind = 未恢复告警的再次提醒，
+    # 见 alerting._evaluate_impl 的 dkind 归并），要靠标题/正文区分，不能看 status
+    last = s.alert_last(rid, tid)
+    assert last["title"].startswith("【提醒】"), \
+        f"应为提醒通知，实际标题 {last['title']!r}"
+    txt = last["text"]
+    assert "当前桶仍越界" in txt, f"判定行须如实说明只判了当前桶：\n{txt}"
+    assert "未满足连续 3 个小时桶" in txt, txt
+    assert "连续 3 个小时桶 ≥" not in txt and "≥ 门槛" in txt, txt
+    assert "0.0σ" in txt, "桶序列里最老桶应显示 0.0σ（佐证确实没连续 3 桶）"
+
+
+def test_anomaly_metric_unit_is_sigma_not_k_sigma(tmp_path):
+    """z 值本身就是「偏离几倍 σ」，再乘 k 是二次计量——单位只能标 σ。
+
+    该元信息经 /api/alerts/rules 的 metrics 下发给前端，改它等于改界面口径。"""
+    client, cfg, s = make_client(tmp_path)
+    m = client.get("/api/alerts/rules").json()["metrics"]
+    assert m["anomaly"][2] == "σ", f"anomaly 单位应为 σ，实际 {m['anomaly'][2]!r}"
+
+
+def test_5m_prewarning_log_labels_sigma_and_prints_threshold(tmp_path, caplog):
+    """5m 快路径预警日志同样把 σ 值标成 kσ，且不报门槛（复核 P2 漏改处）。
+
+    实测口径：z5 与告警正文同源（流级 eff_k），日志必须写「Nσ（门槛 Ms）」，
+    否则值班人拿日志和告警正文对不上（一个说 1.2kσ 一个说门槛 1.0σ）。"""
+    import logging as _lg
+    client, cfg, s = make_client(tmp_path)
+    tid = make_task(client)
+    import datetime as _dt
+    _now = int(time.time())
+    _cur_ts = _now // 3600 * 3600 - 3600
+    _hh = time.localtime(_cur_ts).tm_hour
+    _al = {(_hh + o) % 24 for o in (-1, 0, 1)}
+    _d0 = int(_dt.datetime.fromtimestamp(_cur_ts).replace(
+        hour=0, minute=0, second=0, microsecond=0).timestamp())
+    with s.lock:
+        for d in range(15):
+            for h in sorted(_al):
+                ts = _d0 + h * 3600 - d * 86400
+                if ts <= _cur_ts:
+                    s.db.execute(
+                        "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+                        "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+                        " VALUES('1h',?,?,'n1','','',10,10,0,10.0,0.0,1.0)", (ts, tid))
+        s.db.commit()
+    # 当前 1h 评估桶全部正常 → fired=False，才会走 5m 快路径
+    for i in (0, 1):
+        with s.lock:
+            s.db.execute(
+                "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+                "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+                " VALUES('1h',?,?,'n1','','',10,10,0,10.0,0.0,1.0)", (_cur_ts - i * 3600, tid))
+            s.db.commit()
+    # 5m 桶放一个越界值：z5=(1.0-0.90)/0.05=2.0 ≥ 门槛 1.0
+    t5 = _now // 300 * 300 - 300
+    with s.lock:
+        s.db.execute(
+            "INSERT OR REPLACE INTO aggregates(bucket,ts,task_id,node_id,dns,url,"
+            "count,ok,fail,rtt_avg,loss_rate,avail_rate)"
+            " VALUES('5m',?,?,'n1','','',10,9,1,10.0,0.1,0.90)", (t5, tid))
+        s.db.commit()
+    client.post("/api/alerts/rules", json={
+        "name": "5m预警", "metric": "anomaly", "task_id": tid,
+        "params": {"metric_field": "avail_rate", "k": 3, "min_samples": 20,
+                   "min_consecutive": 2, "baseline_days": 14}})
+    with caplog.at_level(_lg.WARNING, logger="gpm.alerts"):
+        client.post("/api/alerts/evaluate")
+    lines = [x for x in caplog.messages if "动态基线预警" in x]
+    assert lines, "应产出 5m 快路径预警日志"
+    msg = lines[0]
+    assert "kσ" not in msg, f"σ 值不得标成 kσ：{msg}"
+    assert "σ" in msg and "门槛" in msg, f"须同时报偏离倍数与门槛：{msg}"
 
 
 def test_baseline_query_zero_params_not_silently_defaulted(tmp_path):
