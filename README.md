@@ -24,7 +24,7 @@
 - 📈 **历史对比**：延迟 / 可用率 / 丢包率三指标可选；昨日 / 上周同日 / 30 天前 + **前一时段**（窗口按已有历史自适应，刚上线也能比）；无对比数据时说明原因
 - 🖥 **中文 WebUI**：总览 / 任务详情（通断条带 + 10s 曲线 + 单次详情弹窗 + mtr 多节点并排）/ 历史对比 / 全球地图 / 节点管理（接入示例、分组、Token、IP 段映射）/ 任务管理；**白天·夜间主题一键切换**
 - 🔔 **告警闭环**：通知渠道（通用 Webhook / 企业微信 / 钉钉（含加签）/ 飞书 / **Teams（MessageCard）** / SMTP 邮件，支持「测试发送」）；
-  规则支持**可用率 / 延迟均值 / 延迟 P95 / 丢包率 / 节点离线**，可按任务或节点生效；
+  规则支持**可用率 / 延迟均值 / 延迟 P95 / 丢包率 / 节点离线 / 动态基线偏离（anomaly）**，可按任务或节点生效；
   含**静默期去重**、**恢复通知**、**维护窗口豁免**、**抑制与聚合**（同一轮多目标合并成一条，不刷屏）、
   **失败自动重投**（60s/300s/900s 退避 3 次，队列可手动重投）；告警历史记录每次送达结果与失败原因
 - 🧲 **告警聚合平台（第八期）**：外部告警 7 源接入——Grafana / Zabbix / 腾讯云 / GCP webhook（或 Grafana/Zabbix API 拉取）、
@@ -151,20 +151,20 @@ docker run -d --name gpm-agent-node --add-host=host.docker.internal:host-gateway
 .
 ├── src/gpm/
 │   ├── server/          # FastAPI：装配/存储/接入/事件/Web API/Agent API/GeoIP
-│   ├── agent/           # 节点：拉配置、jitter 调度、上报、离线缓冲
-│   ├── probers/         # 探测器：ping / curl / mtr（含 Windows tracert 降级）
-│   │   ├── alerting.py  # 告警规则评估与派发（静默期/恢复/维护窗口）
-│   │   ├── notify.py    # 通知渠道发送器（Webhook/企业微信/钉钉/飞书/SMTP）
+│   │   ├── alerting.py  # 告警规则评估与派发（静默期/恢复/维护窗口/动态基线偏离）
+│   │   ├── notify.py    # 通知渠道发送器（Webhook/企业微信/钉钉/飞书/Teams/SMTP）
 │   │   ├── metrics.py   # Prometheus 指标渲染
 │   │   ├── report.py    # SLA 报表与巡检摘要
 │   │   ├── audit.py     # 操作审计（中文动作映射 / 查询 / CSV）
 │   │   └── eventview.py # 事件详情（时间线 / 影响范围 / 曲线）
+│   ├── agent/           # 节点：拉配置、jitter 调度、上报、离线缓冲、多 server failover
+│   ├── probers/         # 探测器：ping / curl / mtr（含 Windows tracert 降级）/ tcp / dns + base
 │   ├── common/          # 协议模型、DNS 解析器（UDP/TCP/DoH/DoT）、工具
 │   └── webui/static/    # 中文 WebUI（原生 JS + 本地 ECharts + 精简世界地图）
 ├── tests/unit/          # 解析器/DNS 线路/Agent 解析路径
 ├── tests/integration/   # 全链路、节点管理、分组/Token/GeoIP、历史对比
-├── scripts/             # e2e_real.py / ui_acceptance.py / benchmark.py / verify_linux_install.sh
-├── deploy/              # Dockerfile.agent / install-agent.sh / install-agent.ps1 / uninstall-agent.ps1
+├── scripts/             # e2e_real.py / ui_acceptance.py / benchmark.py / backup_db.py / verify_linux_install.sh
+├── deploy/              # Dockerfile.agent / install-agent.sh / install-agent.ps1 / uninstall-agent.ps1 / 看门狗四件套
 ├── assets/preview/      # README 界面预览截图
 ├── docker-compose.yml / Dockerfile
 ├── .docs/（本地、不入库） # 架构/数据模型/算法/部署/进展记录（ARCHITECTURE / DATA_MODEL / ALGORITHM / DEPLOY / PROGRESS 等）
@@ -268,10 +268,10 @@ docker run -d --name gpm-agent-node --add-host=host.docker.internal:host-gateway
 | `/api/query/mtr` | GET | 路径明细（每流最近一条 / 指定轮次），含并排对比所需数据 |
 | `/api/query/incidents` | GET | 探测事件（通断状态机） |
 | `/api/query/incidents_all` | GET | 全量事件（含节点离线/恢复，带 kind/node_name） |
-| `/api/compare` | GET | 历史对比（mode=yesterday·lastweek·lastmonth·prev，metric=rtt·avail·loss） |
+| `/api/compare` | GET | 历史对比（mode=prev·yesterday·lastweek·lastmonth·lastyear（同比），metric=rtt·avail·loss） |
 | `/api/detail` | GET | 单次探测详情（条带色块点击） |
 | `/api/export` | GET | 导出 JSON / CSV |
-| `/api/alerts/channels` | GET / POST | 通知渠道列表 / 新建（webhook·企业微信·钉钉·飞书·SMTP） |
+| `/api/alerts/channels` | GET / POST | 通知渠道列表 / 新建（webhook·企业微信·钉钉·飞书·Teams·SMTP） |
 | `/api/alerts/channels/{id}` | PUT / DELETE | 编辑·启停 / 删除 |
 | `/api/alerts/channels/{id}/test` | POST | 测试发送（返回成功与否与原因） |
 | `/api/alerts/rules` | GET / POST | 告警规则列表 / 新建 |
