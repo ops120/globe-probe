@@ -229,9 +229,16 @@ def call_llm(question: str, facts: dict, cfg_ai: dict) -> str:
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         raw = json.loads(resp.read().decode("utf-8", "replace"))
     try:
-        return raw["choices"][0]["message"]["content"].strip()
+        content = (raw["choices"][0]["message"]["content"] or "").strip()
     except (KeyError, IndexError, TypeError) as e:
         raise RuntimeError(f"网关响应格式异常: {e!r}") from e
+    # 推理型模型（如 MiniMax-M3）带 <think>…</think> 思考前缀——剥掉只留正文；
+    # 未闭合的 <think>（截断）也兜底：取 </think> 后内容，没有则取末段。
+    if "</think>" in content:
+        content = content.split("</think>", 1)[1].strip()
+    elif content.startswith("<think>"):
+        content = content[len("<think>"):].strip()
+    return content
 
 
 def ai_enabled(cfg_ai: dict) -> bool:

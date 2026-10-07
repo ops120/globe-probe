@@ -71,6 +71,9 @@ function renderAiFacts(facts) {
   const exts = facts.external_alerts || [];
   const clusters = facts.clusters || [];
   let html = `<div class="sub">故障 ${facts.total ?? incs.length} 起（本地事件 ${incs.length} · 外部告警 ${exts.length}）</div>`;
+  if (!incs.length && !exts.length) {
+    html += '<div class="sub" style="padding:8px 0">该时间窗内没有故障记录（探测正常或任务未覆盖该时段）</div>';
+  }
   if (incs.length) {
     html += '<table class="tbl"><thead><tr><th>事件</th><th>类型</th><th>开始</th><th>恢复</th><th>错误类</th></tr></thead><tbody>'
       + incs.map(i => `<tr><td>${esc(i.title || '')}</td><td>${esc(i.kind || '')}</td>`
