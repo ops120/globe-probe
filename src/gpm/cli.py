@@ -15,7 +15,17 @@ def setup_logging(cfg_logging: dict, verbose: bool):
     handlers: list = [logging.StreamHandler(sys.stdout)]
     if cfg_logging.get("file"):
         Path(cfg_logging["file"]).parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(cfg_logging["file"], encoding="utf-8"))
+        # 轮转（.docs 欠账：FileHandler 只追加，长期运行日志无上限）。
+        # 默认单文件 20MiB × 5 份；config logging.rotate_mb=0 可关掉回到裸 FileHandler。
+        rotate_mb = float(cfg_logging.get("rotate_mb") or 20)
+        if rotate_mb > 0:
+            from logging.handlers import RotatingFileHandler
+            handlers.append(RotatingFileHandler(
+                cfg_logging["file"], maxBytes=int(rotate_mb * 1048576),
+                backupCount=int(cfg_logging.get("rotate_files") or 5),
+                encoding="utf-8"))
+        else:
+            handlers.append(logging.FileHandler(cfg_logging["file"], encoding="utf-8"))
     logging.basicConfig(level=level, handlers=handlers,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
 

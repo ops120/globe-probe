@@ -144,3 +144,5 @@ probe:
 logging:
   level: "INFO"
   file: ""                         # 非空则同时落文件（建议 logs/gpm.log，目录已 gitignore）
+  rotate_mb: 20                    # 单文件超此大小轮转（默认 20MiB；0 = 关闭轮转，只追加）
+  rotate_files: 5                  # 轮转保留份数（gpm.log.1 .. .5）

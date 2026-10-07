@@ -146,7 +146,7 @@ DEFAULTS = {
         "stale_after_seconds": 21600,
         "jitter_ratio": 0.1,
     },
-    "logging": {"level": "INFO", "file": ""},
+    "logging": {"level": "INFO", "file": "", "rotate_mb": 20, "rotate_files": 5},
 }
 
 

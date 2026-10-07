@@ -1,6 +1,6 @@
 """WebUI 浏览器验收：Playwright(Chrome) 逐页截图 + 真实交互 + 控制台错误收集。
 
-覆盖：总览 / 任务详情 / 历史对比 / 节点管理（详情弹窗、编辑保存）/ 任务管理（编辑保存）。
+覆盖：概览 / 任务分析 / 历史对比 / 节点管理（详情弹窗、编辑保存）/ 任务管理（编辑保存）。
 交互只做「可回滚」的改动（改标签/间隔后立即改回），不做删除。
 
 用法：
@@ -983,8 +983,8 @@ def main() -> int:
         page.wait_for_timeout(600)
         ck.ok(not page.evaluate("document.body.classList.contains('light')"), "可切回夜间主题")
 
-        # ---- 任务详情：mtr 类型（条带含被跳过的流 + 跳数热力图 + 末跳判定）----
-        print("→ 任务详情：mtr 任务")
+        # ---- 任务分析：mtr 类型（条带含被跳过的流 + 跳数热力图 + 末跳判定）----
+        print("→ 任务分析：mtr 任务")
         page.click('nav a[data-page="task"]')
         wait_page(page, "task")
         # 优先选「启用且最近有数据」的 mtr 任务：任务列表里可能混有已停用/无数据的
@@ -1449,7 +1449,7 @@ def main() -> int:
             except Exception:  # noqa: BLE001
                 pass
 
-        # 5) 停用任务展示 + 启停审计：总览「已停用」徽章 → API 启用 → 徽章变正常 →
+        # 5) 停用任务展示 + 启停审计：概览「已停用」徽章 → API 启用 → 徽章变正常 →
         #    API 停用还原（漂移检测兜底）→ /api/audit 最近条目含「启用任务」「停用任务」
         dis = page.evaluate("""() => {
             const ts = state.tasks || [];
@@ -1465,10 +1465,10 @@ def main() -> int:
             page.wait_for_timeout(600)
             row = page.locator("#ov-task-body tr", has_text=dis["name"]).first
             if row.count() == 0:
-                ck.ok(True, f"（总览任务表未见 {dis['name']} 行，跳过停用展示断言）")
+                ck.ok(True, f"（概览任务表未见 {dis['name']} 行，跳过停用展示断言）")
             else:
                 rtxt = row.inner_text()
-                ck.ok("已停用" in rtxt, f"总览里停用任务 {dis['name']} 显示「已停用」徽章")
+                ck.ok("已停用" in rtxt, f"概览里停用任务 {dis['name']} 显示「已停用」徽章")
                 ck.ok("故障" not in rtxt, "停用任务当前状态不显示为故障")
             st_on = page.evaluate("""async (id) => {
                 const r = await fetch('/api/tasks/' + id, { method: 'PUT',
@@ -1477,7 +1477,7 @@ def main() -> int:
                 return r.status;
             }""", dis["id"])
             ck.ok(st_on == 200, f"API 启用停用任务 {dis['name']}（HTTP {st_on}）")
-            page.click('nav a[data-page="task"]')      # 离开总览再回来，强制重取任务列表
+            page.click('nav a[data-page="task"]')      # 离开概览再回来，强制重取任务列表
             wait_page(page, "task")
             page.click('nav a[data-page="overview"]')
             wait_page(page, "overview")
@@ -1486,7 +1486,7 @@ def main() -> int:
                 # 窗口内（实测 6s 会假失败），20s 覆盖 TTL + 一次重画。
                 # 注意：注释必须写在 JS 字符串**外面** —— 之前把 `#` 注释写进了三引号里，
                 # 浏览器拿到的是带 `#` 的 JS → 谓词每次 SyntaxError（「Invalid or unexpected token」），
-                # 表现为「启用后总览徽章未变正常」+ 一条控制台报错，查了很久才发现是自己写的。
+                # 表现为「启用后概览徽章未变正常」+ 一条控制台报错，查了很久才发现是自己写的。
                 page.wait_for_function(
                     """(name) => {
                         const r = [...document.querySelectorAll('#ov-task-body tr')]
@@ -1495,12 +1495,12 @@ def main() -> int:
                     }""", arg=dis["name"], timeout=20000)
                 row2 = page.locator("#ov-task-body tr", has_text=dis["name"]).first
                 ck.ok(row2.count() > 0,
-                      f"启用后总览徽章变正常（{row2.inner_text().splitlines()[:2]}）")
+                      f"启用后概览徽章变正常（{row2.inner_text().splitlines()[:2]}）")
             except Exception:  # noqa: BLE001 - 超时后如实报出当时的行内容
                 rtxt2 = (page.locator("#ov-task-body tr", has_text=dis["name"]).first
                          .inner_text() if page.locator("#ov-task-body tr",
                                                        has_text=dis["name"]).count() else "（无行）")
-                ck.ok(False, f"启用后总览徽章未变正常（{rtxt2[:80]}）")
+                ck.ok(False, f"启用后概览徽章未变正常（{rtxt2[:80]}）")
             st_off = page.evaluate("""async (id) => {
                 const r = await fetch('/api/tasks/' + id, { method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -1519,9 +1519,9 @@ def main() -> int:
                             .find(x => x.textContent.includes(name));
                         return r && r.textContent.includes('已停用');
                     }""", arg=dis["name"], timeout=6000)
-                ck.ok(True, "还原后总览重新显示「已停用」")
+                ck.ok(True, "还原后概览重新显示「已停用」")
             except Exception:  # noqa: BLE001
-                ck.ok(False, "还原后总览未恢复「已停用」徽章")
+                ck.ok(False, "还原后概览未恢复「已停用」徽章")
             aud = page.evaluate("""async () => {
                 const j = await (await fetch('/api/audit?limit=50')).json();
                 return (j.items || []).map(a => ({ action: a.action || '', detail: a.detail || '' }));
