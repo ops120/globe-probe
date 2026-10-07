@@ -54,7 +54,7 @@ def wait_for(fn, what, timeout, interval=2):
         try:
             if fn():
                 return True
-        except Exception:  # noqa: BLE001 - 未就绪时接口可能尚未监听
+        except Exception:
             pass
         time.sleep(interval)
     raise TimeoutError(f"等待超时：{what}（{timeout}s）")
@@ -282,7 +282,7 @@ def main() -> int:
         rc = acc.returncode
         print(f"[ui_ci] 浏览器验收退出码 {rc}")
         return rc
-    except Exception as e:  # noqa: BLE001 - CI 脚本要给出可定位的失败原因
+    except Exception as e:
         print(f"[ui_ci] 失败：{e!r}")
         return 2
     finally:

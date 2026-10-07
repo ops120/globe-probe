@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+
 from ..common.util import IS_WINDOWS
 
 

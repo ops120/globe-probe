@@ -86,7 +86,7 @@ def fetch(url: str, timeout: float) -> tuple[int, str | None]:
             return r.status, None
     except urllib.error.HTTPError as e:
         return e.code, None
-    except Exception as e:  # noqa: BLE001 - 压测脚本要统计所有失败形态
+    except Exception as e:
         return 0, type(e).__name__
 
 
@@ -94,7 +94,7 @@ def health_threads(base_url: str, timeout: float = 5.0) -> int | None:
     try:
         with urllib.request.urlopen(base_url + "/api/health", timeout=timeout) as r:
             return int(json.loads(r.read().decode()).get("threads") or 0)
-    except Exception:  # noqa: BLE001 - health 打不通时如实返回 None
+    except Exception:
         return None
 
 

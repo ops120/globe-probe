@@ -6,7 +6,7 @@ params.ip_version ∈ auto|4|6：auto 维持原行为（解析 A / getaddrinfo A
 from __future__ import annotations
 
 from ..common.dnsres import DnsError, resolve_a, resolve_aaaa
-from ..common.util import is_ip, run_cmd, ToolMissing, ToolTimeout, validate_target
+from ..common.util import ToolMissing, ToolTimeout, is_ip, run_cmd, validate_target
 from .base import make_result, parse_ping, ping_cmd
 
 

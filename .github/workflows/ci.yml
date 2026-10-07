@@ -33,8 +33,23 @@ jobs:
           ruff check src/ --select E9,F63,F7,F82 --ignore E402
       - name: Tests
         run: python -m pytest tests/ -v
-      - name: Doctor（真实工具链自检）
-        run: gpm doctor || true   # CI 环境无 mtr，容忍该项
+      - name: Doctor（真实工具链自检，失败不吞——输出到 CI 摘要）
+        # 旧写法 `|| true` 把失败静默吞掉（PROGRESS.md 欠账）：自检挂了没人知道。
+        # doctor 是「报告型」命令：exit 0 = 全部就绪；非 0 = 有缺失（如 CI 无 mtr）。
+        # 现改为失败时用 ::warning:: 显式标注到 job 页面，摘要里也留一行，不再静默。
+        if: always()
+        run: |
+          set +e
+          out=$(gpm doctor 2>&1); rc=$?
+          echo "$out"
+          if [ $rc -ne 0 ]; then
+            echo "::warning::gpm doctor 退出码 $rc（CI 容器通常缺 mtr 等工具，属预期；完整工具链需实机验证）"
+            echo "doctor-exit=$rc" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "doctor-exit=0（工具链完整）" >> $GITHUB_STEP_SUMMARY
+          fi
+          exit 0
+        shell: bash
 
   mypy:
     runs-on: ubuntu-latest

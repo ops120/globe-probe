@@ -83,7 +83,7 @@ def _decode_cert_not_after(der: bytes) -> int | None:
         import ssl as _ssl
         info = _ssl._ssl._test_decode_cert(path)  # type: ignore[attr-defined]
         return _parse_not_after(info.get("notAfter", ""))
-    except Exception:  # noqa: BLE001 - 解析失败不判失败
+    except Exception:
         return None
     finally:
         if path:
@@ -135,7 +135,7 @@ def run_tcp(task: dict, target: str, resolved_ip: str, dns_server: str,
     t0 = time.monotonic()
     try:
         sock = socket.create_connection(addr, timeout=timeout)
-    except socket.timeout:
+    except TimeoutError:
         return make_result(ts, "fail", "timeout", f"{connect_host}:{port} 连接超时({timeout}s)",
                            dns_server, resolved_ip, dns_time_ms)
     except ConnectionRefusedError:

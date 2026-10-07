@@ -522,7 +522,7 @@ def setup_router(app_state) -> APIRouter:
                              ts=now(), detail=f"{task['name']}: enabled "
                                               f"{task['enabled']} -> {fields['enabled']}",
                              action=act)
-            except Exception as e:  # noqa: BLE001 - 审计失败绝不影响业务
+            except Exception as e:
                 log.debug("启停审计跳过: %s", e)
         _invalidate_tasks_cache()
         return updated
@@ -1800,7 +1800,7 @@ def setup_router(app_state) -> APIRouter:
             from . import notify
             for c in out:
                 c["valid"] = notify.validate({"type": c["type"], **(c.get("config") or {})}) is None
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         return out
 
@@ -1818,7 +1818,7 @@ def setup_router(app_state) -> APIRouter:
         try:
             notify = importlib.import_module("gpm.server.notify")
             err = notify.validate({"type": ctype, **(conf or {})})
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             err = f"通知模块不可用: {e}"
         if err:
             raise HTTPException(422, err)
@@ -2280,7 +2280,7 @@ def setup_router(app_state) -> APIRouter:
             from . import audit
             items = audit.query(s, limit=max(1, min(limit, 500)), action=action,
                                 target=target, since=since)
-        except Exception as e:  # noqa: BLE001 - 审计模块缺失/异常不应 5xx
+        except Exception as e:
             items = []
             log.warning("审计查询失败: %s", e)
         return {"items": items, "counts": s.audit_counts()}

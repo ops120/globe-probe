@@ -1,5 +1,4 @@
 """基准：批量上报吞吐、去重开销、聚合重算耗时。"""
-import json
 import sys
 import time
 from pathlib import Path

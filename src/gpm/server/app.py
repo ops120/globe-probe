@@ -71,7 +71,15 @@ def warn_admin_token_startup(cfg) -> None:
             log.warning("server.admin_token 已配置但为弱值（%s）：所有写接口将按该弱 token "
                         "鉴权，知道该值的人即可改任务/配置。请换强随机值"
                         "（生成：openssl rand -hex 24）后重启；本次仅警告，不拒绝启动。", why)
-    except Exception as e:  # noqa: BLE001 - 提示失败不影响启动
+        # 生产引导 Token 告警（PROGRESS 安全协作欠账）：register_token 仍是默认值时
+        # 任何人都能注册节点进你的平台。非环回监听（真部署形态）必须提醒；环回不吵。
+        reg = str(cfg.agent.get("register_token") or "")
+        if reg in ("gpm-dev-register", "gpm-change-me") and \
+                not listen_is_loopback(str(cfg.server.get("listen") or "")):
+            log.warning("agent.register_token 仍是默认引导值（%s）且监听在非环回地址："
+                        "任何知道该值的人都能注册节点接入本平台。请在配置里改为强随机值"
+                        "（生成：openssl rand -hex 24）后重启。", reg)
+    except Exception as e:
         log.debug("admin_token 启动提示失败: %s", e)
 
 
@@ -83,7 +91,7 @@ def create_app(cfg, storage: Storage | None = None):
     try:
         if str(cfg.server.get("public_url") or "").strip():
             storage.setting_set("public_url", str(cfg.server["public_url"]).strip())
-    except Exception as e:  # noqa: BLE001 - 配置写入失败不影响起服务
+    except Exception as e:
         log.warning("public_url 写入设置失败: %s", e)
     machine = IncidentMachine(storage, cfg.probe.get("fail_threshold", 3),
                               cfg.probe.get("recover_threshold", 2),
@@ -120,7 +128,7 @@ def create_app(cfg, storage: Storage | None = None):
             n = machine.rebuild_all()
             if n:
                 log.info("事件状态重建：%d 条仍有未恢复事件的流", n)
-        except Exception as e:  # noqa: BLE001 - 重建失败不影响起服务
+        except Exception as e:
             log.error("事件状态重建失败: %s", e)
         tasks = [
             asyncio.create_task(_sweep_loop(state, stop)),
@@ -139,13 +147,13 @@ def create_app(cfg, storage: Storage | None = None):
             import anyio.to_thread
             tokens = int(cfg.server.get("thread_pool_tokens", 40) or 40)
             anyio.to_thread.current_default_thread_limiter().total_tokens = max(1, tokens)
-        except Exception as e:  # noqa: BLE001 - 调整失败不影响启动
+        except Exception as e:
             log.warning("线程池上限设置失败（保持 AnyIO 默认）: %s", e)
         # systemd sd_notify 看门狗：仅 NOTIFY_SOCKET 存在时启用（见 deploy/gpm-server.service）
         try:
             from . import sdwatch
             tasks += sdwatch.spawn_tasks(stop)
-        except Exception as e:  # noqa: BLE001 - sd_notify 失败绝不影响主流程
+        except Exception as e:
             log.debug("sd_notify 未启用: %s", e)
         jsonlog.setup()   # 见 create_app 顶部说明：覆盖 uvicorn.run 重置过的 handler
         log.info("服务端启动: %s (db=%s)", cfg.server["listen"], cfg.server["database"])
@@ -161,7 +169,18 @@ def create_app(cfg, storage: Storage | None = None):
 
     # 把 cfg 注入到所有持有「模块级 _cfg」的组件。它们启动时就读 cfg.*，
     # 之后所有函数调用都从 _cfg 拿新值；不依赖入参下传，调用方零改动。
-    from . import alerting, api_web, correlation, eventview, hooks, jev, metrics, notify, pullers, report
+    from . import (
+        alerting,
+        api_web,
+        correlation,
+        eventview,
+        hooks,
+        jev,
+        metrics,
+        notify,
+        pullers,
+        report,
+    )
     for _mod in (hooks, pullers, jev, alerting, notify, report, metrics, api_web, correlation):
         if hasattr(_mod, "init"):
             _mod.init(cfg)
@@ -199,7 +218,7 @@ def create_app(cfg, storage: Storage | None = None):
                 audit.record(storage, method=request.method, path=request.url.path,
                              status=resp.status_code, who=who, ip=ip, ts=now(),
                              detail=request.url.path)
-        except Exception as e:  # noqa: BLE001 - 审计失败绝不影响业务
+        except Exception as e:
             log.debug("审计中间件跳过: %s", e)
         return resp
 
@@ -209,7 +228,7 @@ def create_app(cfg, storage: Storage | None = None):
         try:
             from . import metrics
             body = metrics.render(storage, ingest)
-        except Exception as e:  # noqa: BLE001 - 指标不可用不应影响服务
+        except Exception as e:
             body = "# gpm metrics unavailable: " + type(e).__name__ + ": " + str(e)[:200] + "\n"
         return PlainTextResponse(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
@@ -267,7 +286,7 @@ def channel_selfcheck_tick(s: Storage, ts: int | None = None, sender=None,
     ts = int(ts or now())
     try:
         minutes = int(s.setting_get("channel_selfcheck_minutes", "10") or 10)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.debug("channel_selfcheck_minutes 读取失败，按默认 10: %s", e)
         minutes = 10
     if minutes <= 0:
@@ -296,11 +315,11 @@ def channel_selfcheck_tick(s: Storage, ts: int | None = None, sender=None,
                 from . import notify  # 延迟导入：与 alerting/事件路径同款约束
                 ok, msg = notify.send(flat, title, text)
             ok, msg = bool(ok), str(msg)
-        except Exception as e:  # noqa: BLE001 - 发送异常按失败处理
+        except Exception as e:
             ok, msg = False, f"{type(e).__name__}: {e}"
         try:
             s.channel_touch(cid, ok, "" if ok else msg[:200], ts)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.error("渠道自检结果写回失败 (%s): %s", cid, e)
         out.append({"channel_id": cid, "name": str(ch.get("name") or cid),
                     "ok": ok, "detail": msg})
@@ -320,11 +339,11 @@ async def _channel_probe_loop(state: dict, stop: asyncio.Event):
                 for r in results:
                     (log.info if r["ok"] else log.warning)(
                         "渠道自检 %s(%s): %s", r["name"], r["channel_id"], r["detail"])
-        except Exception as e:  # noqa: BLE001 - 自检失败绝不影响主流程
+        except Exception as e:
             log.error("渠道自检失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
@@ -347,11 +366,11 @@ async def _pull_loop(state: dict, stop: asyncio.Event):
                     elif r.get("fetched"):
                         log.info("拉取 %s：%d 条（新增 %d 更新 %d）",
                                  src, r["fetched"], r["created"], r["updated"])
-        except Exception as e:  # noqa: BLE001 - 拉取失败不影响主流程
+        except Exception as e:
             log.error("第三方告警拉取失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=60)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
@@ -364,7 +383,7 @@ async def _sweep_loop(state: dict, stop: asyncio.Event):
                 n = s.sweep_offline(state["cfg"].server.get("heartbeat_timeout", 60), now())
                 if n:
                     log.warning("%d 个节点心跳超时，标记离线", n)
-        except Exception as e:  # noqa
+        except Exception as e:
             log.error("离线 sweep 失败: %s", e)
         try:
             # 陈旧事件自动收口：「沉默 ≠ 故障」。任务停用/节点移除后不再产生结果，
@@ -373,11 +392,11 @@ async def _sweep_loop(state: dict, stop: asyncio.Event):
             closed = s.close_stale_incidents(now(), stale)
             if closed:
                 log.warning("陈旧事件自动收口 %d 条（>%ds 无新样本）", len(closed), stale)
-        except Exception as e:  # noqa
+        except Exception as e:
             log.error("陈旧事件 sweep 失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=15)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
@@ -395,11 +414,11 @@ async def _alert_loop(state: dict, stop: asyncio.Event):
                 events = await asyncio.to_thread(alerting.evaluate, s, now())
                 if events:
                     log.warning("告警评估产生 %d 条事件（firing/remind/resolved）", len(events))
-        except Exception as e:  # noqa
+        except Exception as e:
             log.error("告警评估失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
@@ -414,15 +433,15 @@ async def _selfcheck_loop(state: dict, stop: asyncio.Event):
             try:
                 import psutil  # 可选依赖（agent 的 stats extra 里带）
                 rss = psutil.Process().memory_info().rss / 1048576.0
-            except Exception:  # noqa: BLE001 - 没装 psutil 就只记线程数
+            except Exception:
                 pass
             log.info("selfcheck: rss=%s threads=%d", ("%.1f MB" % rss) if rss > 0 else "n/a",
                      threading.active_count())
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.debug("selfcheck 失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
@@ -439,11 +458,11 @@ async def _retry_loop(state: dict, stop: asyncio.Event):
                 if done:
                     log.info("通知重投：%d 条（成功 %d）", len(done),
                              sum(1 for d in done if d["status"] == "done"))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.error("通知重投失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
@@ -462,11 +481,11 @@ async def _digest_loop(state: dict, stop: asyncio.Event):
                     # push_digest 汇总报表并对每渠道做阻塞网络发送 → 丢线程池
                     r = await asyncio.to_thread(alerting.push_digest, s, hours, ids, now())
                     log.warning("巡检报告已推送：%s（渠道 %d/%d 成功）", r["title"], r["ok"], r["channels"])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.error("巡检报告推送失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
@@ -493,11 +512,11 @@ async def _agg_loop(state: dict, stop: asyncio.Event):
                 s.meta_set(f"agg_cursor_{bucket}", str(complete_to))
         except _LeaseSkip:
             pass                                   # 未持租约实例本轮跳过（单执行者）
-        except Exception as e:  # noqa
+        except Exception as e:
             log.error("聚合 sweep 失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=20)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 
@@ -525,9 +544,9 @@ async def _retention_loop(state: dict, stop: asyncio.Event):
                 log.info("保留策略清理完成: %s", n)
         except _LeaseSkip:
             pass
-        except Exception as e:  # noqa
+        except Exception as e:
             log.error("保留策略清理失败: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=3600)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass

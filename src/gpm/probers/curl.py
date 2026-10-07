@@ -21,7 +21,7 @@ import tempfile
 import time
 from urllib.parse import urlparse
 
-from ..common.util import IS_WINDOWS, run_cmd, ToolMissing, ToolTimeout
+from ..common.util import IS_WINDOWS, ToolMissing, ToolTimeout, run_cmd
 from .base import make_result
 
 _CURL_EXIT = {6: "dns_error", 7: "connect_timeout", 28: "response_timeout",

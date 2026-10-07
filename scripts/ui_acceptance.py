@@ -56,7 +56,7 @@ def wait_rows(page, selector, timeout=8000):
     try:
         page.wait_for_selector(selector, timeout=timeout)
         return True
-    except Exception:  # noqa: BLE001 - 超时即视为未渲染
+    except Exception:
         return False
 
 
@@ -158,7 +158,7 @@ def series_lines_support(base):
             if e.code == 400:
                 return False, e.read().decode("utf-8", "replace")[:80]
             return None, f"HTTP {e.code}"
-    except Exception as e:  # noqa: BLE001 - 探测失败只决定该组断言是否 skip
+    except Exception as e:
         return None, repr(e)
 
 
@@ -194,7 +194,7 @@ def main() -> int:
             st = ""
             try:
                 st = " | " + " <- ".join((getattr(e, "stack", "") or "").strip().splitlines()[:3])
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             console_errors.append(f"pageerror: {e}{st}")
         page.on("pageerror", _on_pageerror)
@@ -293,7 +293,7 @@ def main() -> int:
                 # 地图要等 world.json + flows 两次异步加载，先等 canvas 出现再断言
                 try:
                     page.wait_for_selector("#chart-geo canvas", timeout=10000)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
                 ck.ok(page.locator("#chart-geo canvas").count() >= 1, "世界地图已渲染")
                 ck.ok("未定位节点" in (page.text_content("#page-geo") or ""), "含未定位节点说明")
@@ -335,7 +335,7 @@ def main() -> int:
                       "分组/Token 各有新建入口")
                 try:
                     page.wait_for_selector("#tok-tbl tbody tr", timeout=8000)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
                 # 表里可能已有真实 Token（用户建的）也可能是空态提示行，统一按「有行」判定已加载
                 ck.ok(page.locator("#tok-tbl tbody tr").count() >= 1, "Token 表已加载")
@@ -627,7 +627,7 @@ def main() -> int:
                     _code = _r.status
             except urllib.error.HTTPError as _e:
                 _code = _e.code
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _code = -1
             ck.ok(_code == 401, "未配置 Token 时拒绝接收（HTTP %s）" % _code)
         else:
@@ -714,7 +714,7 @@ def main() -> int:
                           and all(isinstance(_bak.get(k), list)
                                   for k in ("tasks", "groups", "channels", "rules", "windows")),
                           f"{_ep} 返回 200 且配置备份 kind=gpm-config-backup（五段齐全）")
-            except Exception as _e:  # noqa: BLE001 - 接口不可达/格式错都要如实报失败
+            except Exception as _e:
                 ck.ok(False, f"{_ep} 导出契约失败：{_e!r}")
 
         # —— 回到事件与告警子页：事件详情弹窗（含新增诊断块）——
@@ -878,7 +878,7 @@ def main() -> int:
             try:
                 with urllib.request.urlopen(args.base + "/index.html", timeout=10) as r:
                     idx_ok = r.status < 400
-            except Exception:  # noqa: BLE001 - 404/不可达都退回根路径
+            except Exception:
                 idx_ok = False
             ck.ok(idx_ok, "通知深链路径 /index.html 可达（它就是通知里发给运维的 URL）")
             dl_path = "/index.html" if idx_ok else "/"
@@ -897,12 +897,12 @@ def main() -> int:
                 page.wait_for_selector("#modal-mask:not(.hidden)", timeout=10000)
                 modal_txt = page.text_content("#modal-body") or ""
                 ck.ok("单次探测详情" in modal_txt, "深链打开该时刻的单次详情弹窗")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 ck.ok(False, "深链未打开单次详情弹窗")
             shot("deeplink-task-ts")
             try:
                 close_modal(page)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
         # 提示条可读性（曾出现白天主题「深底深字」）
@@ -954,13 +954,13 @@ def main() -> int:
                 shot("curl-detail")
             else:
                 ck.ok(True, "（无 curl 探测数据，跳过详情断言）")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             ck.ok(True, f"（curl 详情步骤跳过：{type(e).__name__}）")
         finally:
             # 无论断言成功与否都要关掉弹窗，否则会遮住后续页面的点击
             try:
                 close_modal(page)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
         # ---- 主题：夜间 / 白天 ----
@@ -1142,7 +1142,7 @@ def main() -> int:
         try:
             page.wait_for_selector("#chart-nodemet canvas", timeout=6000)
             ck.ok(True, "资源时序图已渲染")
-        except Exception:  # noqa: BLE001 - 超时后确认是否为「无数据空态」
+        except Exception:
             ck.ok("暂未上报" in (page.text_content("#modal-body") or ""),
                   "资源时序区已渲染（该节点无 CPU/内存上报 → 空态说明）")
         shot("node-detail-modal")
@@ -1180,11 +1180,11 @@ def main() -> int:
             page.wait_for_selector("#task-mgr-tbl tbody tr:has-text('curl-baidu-multi')",
                                    timeout=4000)
             curl_row = page.locator("#task-mgr-tbl tbody tr", has_text="curl-baidu-multi").first
-        except Exception:  # noqa: BLE001
+        except Exception:
             try:
                 page.wait_for_selector("#task-mgr-tbl tbody tr:has-text('CURL')", timeout=4000)
                 curl_row = page.locator("#task-mgr-tbl tbody tr", has_text="CURL").first
-            except Exception:  # noqa: BLE001
+            except Exception:
                 curl_row = None
         if not curl_row or curl_row.count() == 0:
             ck.ok(True, "（实例无 curl 任务，跳过 curl 空 target 编辑回归；该回归有单测兜底）")
@@ -1313,7 +1313,7 @@ def main() -> int:
                 ck.ok(True, "（tcp-ci 暂无成功的探测记录，跳过单次详情断言）")
             try:
                 close_modal(page)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             if prev_task:
                 page.select_option("#task-select", prev_task)
@@ -1389,7 +1389,7 @@ def main() -> int:
                             "跳过关键字详情断言）")
             try:
                 close_modal(page)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
         # 4) curl 证书：单次详情含「cert N 天」徽章且 N>0；无 https 出口（skipped/无证书字段）时
@@ -1446,7 +1446,7 @@ def main() -> int:
                 ck.ok(True, "（curl-cert-ci 暂无成功记录，跳过证书详情断言）")
             try:
                 close_modal(page)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
         # 5) 停用任务展示 + 启停审计：概览「已停用」徽章 → API 启用 → 徽章变正常 →
@@ -1496,7 +1496,7 @@ def main() -> int:
                 row2 = page.locator("#ov-task-body tr", has_text=dis["name"]).first
                 ck.ok(row2.count() > 0,
                       f"启用后概览徽章变正常（{row2.inner_text().splitlines()[:2]}）")
-            except Exception:  # noqa: BLE001 - 超时后如实报出当时的行内容
+            except Exception:
                 rtxt2 = (page.locator("#ov-task-body tr", has_text=dis["name"]).first
                          .inner_text() if page.locator("#ov-task-body tr",
                                                        has_text=dis["name"]).count() else "（无行）")
@@ -1520,7 +1520,7 @@ def main() -> int:
                         return r && r.textContent.includes('已停用');
                     }""", arg=dis["name"], timeout=6000)
                 ck.ok(True, "还原后概览重新显示「已停用」")
-            except Exception:  # noqa: BLE001
+            except Exception:
                 ck.ok(False, "还原后概览未恢复「已停用」徽章")
             aud = page.evaluate("""async () => {
                 const j = await (await fetch('/api/audit?limit=50')).json();

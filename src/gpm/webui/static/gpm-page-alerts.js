@@ -248,8 +248,13 @@ async function renderAlertHistory() {
       + '<tbody><tr><td colspan="6" style="color:var(--faint)">暂无告警记录</td></tr></tbody>';
     return;
   }
+  // remind 行（持续未恢复但非新触发）落库 status 也是 firing——语义上「最新行」口径要保住
+  // （alert_open/alert_last 依赖），UI 靠标题前缀【提醒】区分展示，不再误标「告警」。
   const statusBadge = a => a.status === 'firing'
-    ? '<span class="badge b-fail">告警</span>' : '<span class="badge b-ok">恢复</span>';
+    ? (/【提醒】/.test(a.title || '')
+        ? '<span class="badge b-warn" title="持续未恢复的提醒（非新触发）">提醒</span>'
+        : '<span class="badge b-fail">告警</span>')
+    : '<span class="badge b-ok">恢复</span>';
   const deliver = a => a.delivered
     ? '<span class="badge b-ok">' + a.n_ok + '/' + a.n_channels + '</span>'
     : '<span class="badge b-warn">0/' + a.n_channels + '</span>';

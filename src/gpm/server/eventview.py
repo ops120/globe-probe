@@ -722,19 +722,19 @@ def detail(storage, iid: int, ts: int | None = None, max_points: int = 120) -> d
     # ---- 故障快速定位四块（只加键，不改既有键；任何取数失败退化为空态说明）----
     try:
         out["changes"] = _changes(storage, started, end)
-    except Exception:  # noqa: BLE001
+    except Exception:
         out["changes"] = _empty_changes("同期变更数据读取失败")
     try:
         out["dns_changes"] = _dns_changes(storage, inc, task, end)
-    except Exception:  # noqa: BLE001
+    except Exception:
         out["dns_changes"] = _empty_dns_changes("DNS 变更数据读取失败")
     try:
         out["scope_matrix"] = _scope_matrix(storage, inc, task, started, end)
-    except Exception:  # noqa: BLE001
+    except Exception:
         out["scope_matrix"] = _empty_matrix("范围矩阵数据读取失败")
     try:
         dying = _dying(storage, inc, started)
-    except Exception:  # noqa: BLE001
+    except Exception:
         dying = _empty_dying("节点心跳资源数据读取失败")
     if dying is not None:
         out["dying"] = dying            # probe 事件无此键（契约约定）

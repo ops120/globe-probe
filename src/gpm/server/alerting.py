@@ -27,7 +27,7 @@ from . import diagnose as _diagnose
 
 try:  # 通知模块由独立模块提供；缺失时降级为「仅记录、不发送」
     from . import notify as _notify
-except Exception:  # noqa: BLE001
+except Exception:
     _notify = None  # type: ignore[assignment]
 
 log = logging.getLogger("gpm.alerts")
@@ -182,7 +182,7 @@ def _safe_call(storage, name: str, *args, default=None, **kw):
         return default
     try:
         return fn(*args, **kw)
-    except Exception as e:  # noqa: BLE001 - 诊断段落缺失绝不影响告警主流程
+    except Exception as e:
         log.warning("告警诊断数据 %s 读取失败（该段落将以空态出现在告警文本里）: %s", name, e)
         return default
 
@@ -360,7 +360,7 @@ def _dispatch(storage, channels: list[dict], title: str, text: str, ts: int):
     for ch in channels:
         try:
             ok, msg = _notify.send(flatten(ch), title, text)
-        except Exception as e:  # noqa: BLE001 - 通知失败绝不影响评估
+        except Exception as e:
             ok, msg = False, "异常: " + type(e).__name__ + ": " + str(e)[:120]
         storage.channel_touch(ch["id"], ok, "" if ok else msg, ts)
         n_ok += 1 if ok else 0
@@ -386,7 +386,7 @@ def retry_pending(storage, ts: int = 0, limit: int = 10) -> list[dict]:
             continue
         try:
             ok, msg = _notify.send(flatten(ch), row["title"], row["text"])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             ok, msg = False, "异常: " + type(e).__name__ + ": " + str(e)[:120]
         attempts = int(row["attempts"] or 0)
         if ok:
@@ -418,7 +418,7 @@ def retry_one(storage, oid: int, ts: int = 0) -> tuple[bool, str]:
         return False, "通知模块不可用"
     try:
         ok, msg = _notify.send(flatten(ch), row["title"], row["text"])
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         ok, msg = False, "异常: " + type(e).__name__ + ": " + str(e)[:120]
     storage.channel_touch(ch["id"], ok, "" if ok else msg, ts)
     if ok:
@@ -474,7 +474,7 @@ def _anomaly_changes(storage, rule: dict, task: dict, label: str, ts: int) -> li
     task_id = str(task["id"])
     try:
         res = _bl.baseline(storage, task_id, p, ts)
-    except Exception as e:  # noqa: BLE001 - 基线计算失败绝不影响其它规则评估
+    except Exception as e:
         log.warning("动态基线计算失败 rule=%s task=%s: %s", rule["name"], task_id, e)
         return []
     if not res.get("evaluable"):
@@ -522,7 +522,7 @@ def _anomaly_changes(storage, rule: dict, task: dict, label: str, ts: int) -> li
                                     s0["center"], s0["scale"], abs(z5),
                                       s0.get("eff_k") or res["k"])
                     break
-        except Exception:  # noqa: BLE001 - 预警绝不影响正式评估
+        except Exception:
             pass
 
     # 当前桶偏离度（滞回判定）：恢复=当前桶 |z| < 0.8k，而非「连续序列仍偏离」——
@@ -681,7 +681,7 @@ def _evaluate_impl(storage, ts: int = 0) -> list[dict]:
                 # 告警即诊断：firing/remind 追加固定段落；resolved 保持原样（向后兼容）
                 try:
                     extra = _diagnosis_lines(storage, rule, key, label, stats, ts, node_names)
-                except Exception:  # noqa: BLE001 - 诊断段落绝不影响告警主流程
+                except Exception:
                     extra = []
                 if extra:
                     text = text + "\n" + "\n".join(extra)
@@ -739,7 +739,7 @@ def _evaluate_impl(storage, ts: int = 0) -> list[dict]:
     # ---- 升级链：firing 超过 escalate_minutes 未确认 → 【升级】重新通知 ----
     try:
         out.extend(_escalations(storage, rules, chans, tasks, nodes, node_names, ts))
-    except Exception as e:  # noqa: BLE001 - 升级链绝不影响评估主流程
+    except Exception as e:
         log.warning("升级链扫描失败: %s: %s", type(e).__name__, e)
     return out
 
@@ -825,7 +825,7 @@ def _escalations(storage, rules: list[dict], chans: dict, tasks: dict, nodes: di
             ]
             try:
                 extra = _diagnosis_lines(storage, rule, key, label, stats, ts, node_names)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 extra = []
             text = "\n".join(body + extra)
             channels = [chans[c] for c in rule["channel_ids"] if c in chans]
@@ -861,7 +861,7 @@ def test_channel(storage, channel: dict, ts: int = 0) -> tuple[bool, str]:
         return False, "通知模块（notify.py）不可用"
     try:
         ok, msg = _notify.send(flatten(channel), title, text)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         ok, msg = False, "异常: " + type(e).__name__ + ": " + str(e)[:120]
     storage.channel_touch(channel["id"], ok, "" if ok else msg, ts)
     return ok, msg

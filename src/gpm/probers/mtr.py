@@ -16,7 +16,7 @@ import json
 import re
 
 from ..common.dnsres import is_fake_ip
-from ..common.util import IS_WINDOWS, run_cmd, ToolMissing, ToolTimeout
+from ..common.util import IS_WINDOWS, ToolMissing, ToolTimeout, run_cmd
 from .base import make_result
 
 _TEXT_HOP = re.compile(

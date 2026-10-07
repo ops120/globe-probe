@@ -317,10 +317,36 @@ IDC 内网段（如 `10.10.10.0/24` 在上海）直接在全球地图页「IP �
 ## 安全
 
 - **数据全部本地**：SQLite 单文件，无云依赖；除「在线 GeoIP 查询」（结果缓存 24h，可不用）外无外部请求
-- **注册 Token**：可多枚、可吊销；吊销后该 Token 注册的节点立即被拒；写接口可加 `admin_token` 二次保护
+- **注册 Token**：可多枚、可吊销；吊销后该 Token 注册的节点立即被拒；写接口可加 `admin_token` 二次保护（启动时弱 token / 默认引导 token 会打 WARNING）
 - **不主动连节点**：节点出站 pull，天然适配 NAT / 内网 / 动态 IP
 - **输入白名单**：任务目标、URL、DNS 线路均校验，拒绝 shell 元字符；子进程一律数组参数、**禁 shell**
 - **静态资源本地托管**：无 CDN、无外链
+- **数据备份**：`python scripts/backup_db.py`（SQLite 在线热备份，`--keep 30` 清理过期、`--verify` 完整性校验+行数摘要；恢复：停服务端 → 覆盖 `data/gpm.db` → 删 `-wal/-shm` → 重启）
+
+### 跨网段部署：Nginx 反代 + TLS（最小示例）
+
+跨网段/公网访问时不要裸奔 HTTP（admin token 与注册 token 都在明文头里）。GPM 自身不带 TLS，前置一层反代即可：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name gpm.example.com;
+    ssl_certificate     /etc/letsencrypt/live/gpm.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/gpm.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8620;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # 服务端据此取真实出口 IP
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;       # WebSocket（事件流 /api/event/ws）
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 3600s;                      # 长连接事件流
+    }
+}
+```
+
+Caddy 更简（自动证书）：`gpm.example.com { reverse_proxy 127.0.0.1:8620 }`。反代后把 `server.public_url` 配成 `https://gpm.example.com`（通知深链才会带正确前缀），并收紧服务端监听到 `127.0.0.1:8620`。
 
 ## 性能与保留策略
 

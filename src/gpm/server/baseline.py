@@ -202,7 +202,7 @@ def baseline(storage, task_id: str, p: dict, ts_now: int) -> dict:
         for ts_b in cand:
             if not storage.in_maintenance(ts_b, task_id=task_id):
                 kept.append(ts_b)
-    except Exception:  # noqa: BLE001 - 维护窗口查询失败按「无维护窗口」处理
+    except Exception:
         kept = list(cand)
     cand = kept
 

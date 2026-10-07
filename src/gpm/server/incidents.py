@@ -4,7 +4,6 @@ from __future__ import annotations
 import threading
 
 
-
 class IncidentMachine:
     def __init__(self, storage, fail_threshold: int = 3, recover_threshold: int = 2,
                  flap_window: int = 600, flap_max: int = 6 * 3600):
@@ -60,7 +59,7 @@ class IncidentMachine:
             try:
                 self.rebuild_stream(row["task_id"], row["node_id"], row["dns"], row["url"])
                 n += 1
-            except Exception:               # noqa: BLE001 - 单条流重建失败不影响启动
+            except Exception:
                 continue
         return n
 

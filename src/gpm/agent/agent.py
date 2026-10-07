@@ -37,7 +37,7 @@ def _post_json(url: str, payload: dict, timeout: float = 10) -> tuple[int, dict]
         body = ""
         try:
             body = e.read().decode("utf-8")[:200]
-        except Exception:  # noqa
+        except Exception:
             pass
         return e.code, {"detail": body}
     except (urllib.error.URLError, OSError, TimeoutError) as e:
@@ -47,7 +47,7 @@ def _post_json(url: str, payload: dict, timeout: float = 10) -> tuple[int, dict]
 def _system_info() -> dict:
     """节点系统信息：OS 名称/版本/内核/架构 + Python（供「节点详情」展示）。"""
     import platform
-    info = {
+    info: dict = {
         "os": platform.system().lower() or ("windows" if IS_WINDOWS else "linux"),
         "release": platform.release(),
         "version": platform.version(),
@@ -57,7 +57,7 @@ def _system_info() -> dict:
     }
     try:
         if IS_WINDOWS:
-            import winreg  # noqa: PLC0415 - 仅 Windows 存在
+            import winreg
             key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
                                  r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
             vals = {}
@@ -79,7 +79,7 @@ def _system_info() -> dict:
                     if line.startswith("PRETTY_NAME="):
                         info["pretty"] = line.split("=", 1)[1].strip().strip('"')
                         break
-    except Exception:  # noqa: BLE001 - 系统信息拿不到不影响探测
+    except Exception:
         pass
     # 系统 DNS（「节点默认」线路的真实后端）：注册时上报，任务表单直接展示，
     # 用户不用再猜「节点默认到底用的哪台 DNS」。采集失败不写入（如实缺省）。
@@ -96,7 +96,7 @@ def _system_dns_servers() -> list[str]:
     try:
         if IS_WINDOWS:
             # 解析注册表 DhcpNameServer/NameServer：按网卡枚举，合并去重保序
-            import winreg  # noqa: PLC0415 - 仅 Windows 存在
+            import winreg
             root = winreg.OpenKey(
                 winreg.HKEY_LOCAL_MACHINE,
                 r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces")
@@ -125,7 +125,7 @@ def _system_dns_servers() -> list[str]:
                     parts = line.split()
                     if len(parts) >= 2 and parts[0] in ("nameserver",):
                         out.append(parts[1])
-    except Exception:  # noqa: BLE001 - 拿不到不影响探测
+    except Exception:
         return []
     # 去重保序 + 只保留合法 IP；127/8 环回多为本地代理 DNS（如 Clash），
     # 一起展示会让「节点默认」显得诡异，过滤掉并在 UI 标注有本地代理时更清晰
@@ -156,7 +156,7 @@ def _local_ip(server_url: str) -> str:
             return s.getsockname()[0]
         finally:
             s.close()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return ""
 
 
@@ -183,7 +183,7 @@ def _system_stats(tasks: int = 0) -> dict:
         vm = psutil.virtual_memory()
         stats["cpu"] = psutil.cpu_percent(interval=None)
         stats["mem"] = vm.percent
-    except Exception:  # noqa
+    except Exception:
         # psutil 缺失（如精简容器）→ 上报 null，服务端存 NULL，UI 显示「—」，
         # 避免把「采集不到」伪装成 0% 占用
         stats["cpu"] = None
@@ -223,7 +223,7 @@ def resolve_for(task: dict, dns_server: str, cache: DnsCache,
                     log.info("系统 DNS 返回 fake-ip(%s)，改用 DoH(%s) 解析 %s → %s",
                              ip, srv, host, ips[0])
                     return ips[0], round(ms2, 2), f"doh:{srv}"
-            except Exception:  # noqa: BLE001 - DoH 不可用则继续试下一个
+            except Exception:
                 continue
     return ip, ms, "system"
 
@@ -287,7 +287,7 @@ class Agent:
             await self.sync_once()
             log.warning("首选 server 恢复，已切回 %s", self.servers[0])
             self._sync_fails = 0
-        except Exception as e:  # noqa: BLE001 - 回探失败仅保持现状，不影响探测
+        except Exception as e:
             self.server, self._active = old_server, old_active
             log.warning("首选 server 仍不可达（%s），继续使用 %s", e, self.server)
 
@@ -297,7 +297,7 @@ class Agent:
                 d = json.loads(self.cred_file.read_text(encoding="utf-8"))
                 self.node_id, self.token = d.get("node_id", ""), d.get("token", "")
                 log.info("已载入本地凭据 node_id=%s", self.node_id)
-            except Exception as e:  # noqa
+            except Exception as e:
                 log.warning("凭据文件损坏，将重新注册: %s", e)
 
     def save_creds(self):
@@ -468,7 +468,7 @@ class Agent:
                     self._remember_dns(task["id"], ok_answers)
             else:
                 return
-        except Exception as e:  # noqa
+        except Exception as e:
             log.exception("探测执行异常 task=%s: %s", task.get("name"), e)
             r = {"ts": ts, "status": "fail", "error_class": "other", "error": str(e)[:200],
                  "dns_server": dns, "resolved_ip": "", "dns_time_ms": None, "metrics": {}}
@@ -581,7 +581,7 @@ class Agent:
                     last_hb = t0
                     self.backoff = 1
                     self._sync_fails = 0
-                except Exception as e:  # noqa
+                except Exception as e:
                     self.backoff = min(max(self.backoff * 2, 2), 60)
                     next_sync_try = t0 + self.backoff
                     self._sync_fails += 1
@@ -599,7 +599,7 @@ class Agent:
             if t0 - last_rep >= rep_i:
                 try:
                     await self.report_once()
-                except Exception as e:  # noqa
+                except Exception as e:
                     log.warning("上报异常: %s", e)
                 last_rep = t0
             await asyncio.sleep(1)

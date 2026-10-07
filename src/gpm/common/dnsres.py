@@ -31,7 +31,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Optional
 
 DOH_ENDPOINTS = {
     "223.5.5.5": "https://223.5.5.5/resolve?name={host}&type=1",
@@ -246,7 +245,7 @@ def _read_name(msg: bytes, off: int) -> tuple[str, int]:
     return ".".join(labels), (end if jumped else off)
 
 
-def _parse_response(msg: bytes, qid: Optional[int]) -> list[tuple[int, int, str]]:
+def _parse_response(msg: bytes, qid: int | None) -> list[tuple[int, int, str]]:
     """返回 [(type, ttl, value)]。qid=None 时跳过事务ID校验（DoH/工具路径）。"""
     if len(msg) < 12:
         raise DnsError("dns_formerr", "响应过短")
@@ -346,7 +345,7 @@ def _udp_query(host: str, server: str, timeout: float, rrtype: int = 1) -> bytes
     try:
         s.sendto(q, (server, 53))
         msg, _ = s.recvfrom(4096)
-    except socket.timeout:
+    except TimeoutError:
         raise DnsError("dns_timeout", f"{server} 查询 {host} 超时")
     except OSError as e:
         raise DnsError("dns_timeout", f"{server} 不可达: {e}")
@@ -383,7 +382,7 @@ def _dot_query(host: str, server: str, timeout: float = 2.0, port: int = 853,
     q = _build_query(host, qid, rrtype)
     try:
         sock = socket.create_connection((server, port), timeout=timeout)
-    except (socket.timeout, TimeoutError) as e:
+    except TimeoutError as e:
         raise DnsError("dns_timeout", f"DoT {server}:{port} 连接超时: {e}")
     except ConnectionRefusedError as e:
         raise DnsError("dns_servfail", f"DoT {server}:{port} 连接被拒绝: {e}")
@@ -396,7 +395,7 @@ def _dot_query(host: str, server: str, timeout: float = 2.0, port: int = 853,
         raise DnsError("dns_timeout", f"DoT {server}:{port} 设置超时失败: {e}")
     try:  # 握手阶段单独标注：TLS/证书/对端非 TLS 都归为 handshake 失败
         tls = _dot_ssl_context().wrap_socket(sock, server_hostname=server)
-    except (socket.timeout, TimeoutError) as e:
+    except TimeoutError as e:
         sock.close()
         raise DnsError("dns_timeout", f"DoT {server}:{port} TLS 握手超时: {e}")
     except ssl.SSLError as e:
@@ -407,7 +406,7 @@ def _dot_query(host: str, server: str, timeout: float = 2.0, port: int = 853,
         raise DnsError("dns_servfail", f"DoT {server}:{port} TLS 握手失败: {e}")
     try:
         raw = _dot_exchange(tls, q, timeout)
-    except (socket.timeout, TimeoutError) as e:
+    except TimeoutError as e:
         raise DnsError("dns_timeout", f"DoT {server}:{port} 超时: {e}")
     except ssl.SSLError as e:
         raise DnsError("dns_servfail", f"DoT {server}:{port} TLS 传输失败: {e}")
@@ -458,7 +457,7 @@ def _http_get(url: str, timeout: float) -> bytes:
     except urllib.error.HTTPError as e:  # URLError 子类，必须先捕获
         kind = "dns_refused" if e.code in (401, 403, 404) else "dns_servfail"
         raise DnsError(kind, f"DoH HTTP {e.code} {url}")
-    except (socket.timeout, TimeoutError) as e:
+    except TimeoutError as e:
         raise DnsError("dns_timeout", f"DoH 超时 {url}: {e}")
     except urllib.error.URLError as e:
         raise DnsError("dns_timeout", f"DoH 请求失败 {url}: {e}")
@@ -528,7 +527,7 @@ class DnsCache:
         self.ttl, self.max_ttl, self.max_items = ttl, max_ttl, max_items
         self._d: dict[tuple, tuple] = {}
 
-    def get(self, key: str, server: str) -> Optional[tuple]:
+    def get(self, key: str, server: str) -> tuple | None:
         v = self._d.get((key, server))
         if v and v[1] > time.time():
             return v
@@ -579,9 +578,9 @@ def _wire_transport(host: str, server: str, transport: str, timeout: float,
 def _dot_transport(host: str, server: str, port: int, timeout: float,
                    rrtype: int = 1) -> tuple[list[str], int]:
     if rrtype == 1:  # A：保持旧调用形态（兼容既有打桩/单测）
-        query = lambda h: _dot_query(h, server, timeout, port=port)  # noqa: E731
+        query = lambda h: _dot_query(h, server, timeout, port=port)
     else:
-        query = lambda h: _dot_query(h, server, timeout, port=port, rrtype=rrtype)  # noqa: E731
+        query = lambda h: _dot_query(h, server, timeout, port=port, rrtype=rrtype)
     answers = _extract_answers(query(host))
     ips, min_ttl = _collect_ips(answers, rrtype)
     if not ips:
@@ -661,8 +660,8 @@ def _resolve_forced(host: str, sp: dict, timeout: float,
     return ips, ttl, "doh"
 
 
-def _resolve_cached(host: str, spec, timeout: float, cache: Optional[DnsCache],
-                    rrtype: int) -> tuple[list[str], float, str, Optional[int]]:
+def _resolve_cached(host: str, spec, timeout: float, cache: DnsCache | None,
+                    rrtype: int) -> tuple[list[str], float, str, int | None]:
     """缓存查找 + 一次真实解析。返回 (ips, 耗时ms, transport 标签, ttl秒)。
 
     ttl：真实解析时为 DNS 应答 TTL；命中缓存时为剩余有效秒数（如实标注）。
@@ -690,7 +689,7 @@ def _resolve_cached(host: str, spec, timeout: float, cache: Optional[DnsCache],
 
 
 def resolve(host: str, spec, timeout: float = 2.0,
-            cache: Optional[DnsCache] = None, rrtype: int = 1) -> tuple[list[str], float, str]:
+            cache: DnsCache | None = None, rrtype: int = 1) -> tuple[list[str], float, str]:
     """一等地解析任意线路写法。返回 (ips, 耗时ms, transport 标签)。
 
     标签：'udp' / 'tcp' / 'dot' / 'doh'（显式线路）；
@@ -702,14 +701,14 @@ def resolve(host: str, spec, timeout: float = 2.0,
 
 
 def resolve_detail(host: str, spec, timeout: float = 2.0,
-                   cache: Optional[DnsCache] = None,
-                   rrtype: int = 1) -> tuple[list[str], float, str, Optional[int]]:
+                   cache: DnsCache | None = None,
+                   rrtype: int = 1) -> tuple[list[str], float, str, int | None]:
     """同 resolve，额外返回 DNS TTL（dnsmon 逐线路展示用）。"""
     return _resolve_cached(host, spec, timeout, cache, rrtype)
 
 
 def resolve_a(host: str, server: str, timeout: float = 2.0,
-              cache: Optional[DnsCache] = None) -> tuple[list[str], float, str]:
+              cache: DnsCache | None = None) -> tuple[list[str], float, str]:
     """向后兼容入口（agent/prober 在用，签名与返回三元组不变）。
 
     server 既可以是裸 IP（auto：UDP → TCP → DoH），也可以是 doh:/dot:/udp:/tcp: 线路写法。
@@ -718,7 +717,7 @@ def resolve_a(host: str, server: str, timeout: float = 2.0,
 
 
 def resolve_aaaa(host: str, server: str, timeout: float = 2.0,
-                 cache: Optional[DnsCache] = None) -> tuple[list[str], float, str]:
+                 cache: DnsCache | None = None) -> tuple[list[str], float, str]:
     """AAAA 记录解析（ip_version=6 的任务）。传输与回退链路同 resolve_a：
     UDP → TCP → DoH（auto 线路时），fake-ip 升级只对 A 生效，此处不参与。"""
     return resolve(host, server, timeout=timeout, cache=cache, rrtype=28)

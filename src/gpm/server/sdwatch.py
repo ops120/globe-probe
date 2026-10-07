@@ -65,7 +65,7 @@ def send(path: str, message: str) -> bool:
         with socket.socket(family, socket.SOCK_DGRAM) as s:
             s.sendto(message.encode("utf-8"), path)
         return True
-    except Exception as e:  # noqa: BLE001 - 套接字失效/权限等一律不影响主流程
+    except Exception as e:
         log.debug("sd_notify 发送失败: %s", e)
         return False
 
@@ -91,11 +91,11 @@ async def watchdog_loop(interval: float, stop: asyncio.Event, sender=None):
         try:
             if not send_fn("WATCHDOG=1"):
                 log.debug("WATCHDOG=1 上报失败（NOTIFY_SOCKET 不可用？）")
-        except Exception as e:  # noqa: BLE001 - 看门狗上报绝不影响主流程
+        except Exception as e:
             log.debug("WATCHDOG 上报异常: %s", e)
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
 

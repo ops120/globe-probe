@@ -3,11 +3,18 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from typing import Literal, Optional
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .util import (is_ip, validate_dns_spec, validate_domain, validate_host_port,
-                   validate_target, validate_url)
+from .util import (
+    is_ip,
+    validate_dns_spec,
+    validate_domain,
+    validate_host_port,
+    validate_target,
+    validate_url,
+)
 
 TASK_TYPES = ("ping", "curl", "mtr", "tcp", "dns")
 _HTTP_METHODS = ("GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS")
@@ -40,7 +47,7 @@ class ProbeResultIn(BaseModel):
     error: str = ""
     dns_server: str = ""
     resolved_ip: str = ""
-    dns_time_ms: Optional[float] = None
+    dns_time_ms: float | None = None
     metrics: dict = Field(default_factory=dict)
     config_version: int = 0
 
@@ -197,14 +204,14 @@ class TaskUpdate(BaseModel):
     """部分更新：仅校验出现的字段。"""
     model_config = ConfigDict(validate_default=False)
 
-    name: Optional[str] = Field(default=None, min_length=1, max_length=64)
-    target: Optional[str] = None
-    urls: Optional[list[str]] = Field(default=None, max_length=10)
-    interval_seconds: Optional[int] = Field(default=None, ge=10, le=86400)
-    dns: Optional[list[str]] = Field(default=None, max_length=6)
-    nodes: Optional[list[str]] = Field(default=None, max_length=200)
-    enabled: Optional[bool] = None
-    params: Optional[dict] = None
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    target: str | None = None
+    urls: list[str] | None = Field(default=None, max_length=10)
+    interval_seconds: int | None = Field(default=None, ge=10, le=86400)
+    dns: list[str] | None = Field(default=None, max_length=6)
+    nodes: list[str] | None = Field(default=None, max_length=200)
+    enabled: bool | None = None
+    params: dict | None = None
 
     @field_validator("target")
     @classmethod
@@ -242,5 +249,5 @@ class TaskUpdate(BaseModel):
 class NodeUpdate(BaseModel):
     model_config = ConfigDict(validate_default=False)
 
-    name: Optional[str] = Field(default=None, min_length=1, max_length=64)
-    tags: Optional[dict] = None
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    tags: dict | None = None

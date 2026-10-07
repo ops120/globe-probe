@@ -157,7 +157,6 @@ def main(duration: int = 120):
                        mtr[0]["error_class"] if mtr else "无"))
 
         # 聚合与导出
-        import datetime
         to = int(time.time())
         up = api(f"/api/query/uptime?task_id={t_curl['id']}&bucket=60&t_from={to - 600}&t_to={to}")
         checks.append(("通断条带有行", len(up["rows"]) >= 1, f"{len(up['rows'])} 行"))

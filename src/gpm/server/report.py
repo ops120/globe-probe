@@ -167,7 +167,7 @@ def _read_window(storage, task_id: str, t_from: int, t_to: int, bucket: str):
 def _streams(storage, task_id: str) -> int:
     try:
         return len(storage.result_streams(task_id) or [])
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # 存储故障伪装成「该任务零流」违反本模块红线（无数据给 None 绝不给 0）：
         # 至少把原因留下，别让 SLA 页看起来像任务自己没流
         log.warning("result_streams(%s) 读取失败，SLA 报表按 0 流展示: %s", task_id, e)
@@ -180,7 +180,7 @@ def _node_avail(storage, node_id: str, t_from: int, task_ids, t_to: int = 0) -> 
         r = storage.node_avail(node_id, t_from, task_ids, t_to)
     except TypeError:            # 兼容没有 t_to 的旧实现
         r = storage.node_avail(node_id, t_from, task_ids)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         # 同 _streams：存储故障不能伪装成「该节点零样本」还不留痕迹
         log.warning("node_avail(%s) 读取失败，SLA 报表按 0 样本展示: %s", node_id, e)
         r = None

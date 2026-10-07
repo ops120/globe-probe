@@ -583,7 +583,7 @@ def validate_signature(source: str, headers, body) -> tuple:
     try:
         ok, msg = fn(headers, body)
         return bool(ok), str(msg or "")
-    except Exception as e:  # noqa: BLE001 - 签名环节异常视为校验失败
+    except Exception as e:
         return False, f"{type(e).__name__}: {e}"
 
 

@@ -22,14 +22,14 @@ LOG_DEFAULT = pathlib.Path("artifacts/hook.log")
 class Handler(http.server.BaseHTTPRequestHandler):
     log_path: pathlib.Path = LOG_DEFAULT
 
-    def do_POST(self):  # noqa: N802 - http.server 约定
+    def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
         stamp = datetime.now().strftime("%H:%M:%S")
         pretty = raw
         try:                     # 尽量格式化，便于阅读；非 JSON 也照样打印
             pretty = json.dumps(json.loads(raw), ensure_ascii=False, indent=2)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         print("[" + stamp + "] " + self.path + " <- " + str(n) + " 字节")
         print(pretty)
@@ -38,7 +38,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.log_path.open("a", encoding="utf-8") as f:
                 f.write(stamp + " " + raw + chr(10))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print("  (写日志失败: " + str(e) + ")")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

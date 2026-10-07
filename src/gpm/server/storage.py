@@ -687,11 +687,13 @@ class Storage:
                     n = len(items)
                     oks = sum(1 for r in items if r["status"] == "ok")
                     rtts = sorted(float(r["rtt"]) for r in items if r["rtt"] is not None)
-                    def pct(p):
-                        if not rtts:
+                    # B023：闭包引用循环变量 rtts——同迭代内即用、实际风险低；
+                    # 按默认参数绑定收口，防未来重构成延迟调用时踩坑
+                    def pct(p, _rtts=rtts):
+                        if not _rtts:
                             return None
-                        k = max(0, min(len(rtts) - 1, int(round(p / 100 * (len(rtts) - 1)))))
-                        return rtts[k]
+                        k = max(0, min(len(_rtts) - 1, int(round(p / 100 * (len(_rtts) - 1)))))
+                        return _rtts[k]
                     losses = [float(r["loss"]) for r in items if r["loss"] is not None]
                     codes: dict = {}
                     for r in items:

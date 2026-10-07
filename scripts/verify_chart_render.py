@@ -111,7 +111,7 @@ def main() -> int:
             with urllib.request.urlopen(base + "/api/health", timeout=5) as r:
                 h = json.load(r)
             check("服务可达", bool(h.get("ok")), f"config v{h.get('config_version')}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             check("服务可达", False, str(e))
             print("\n服务不可达，先启动：python -m gpm server")
             br.close()

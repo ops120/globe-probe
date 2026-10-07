@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """Browser 验证规矩固化脚本（2026-10-06 起强制）。"""
 from __future__ import annotations
-import argparse, json, sys, urllib.request, urllib.error
+
+import argparse
+import json
+import sys
+import urllib.error
+import urllib.request
+
 for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, 'reconfigure'): _s.reconfigure(encoding='utf-8', errors='replace')
 problems = []

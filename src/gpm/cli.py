@@ -32,6 +32,7 @@ def setup_logging(cfg_logging: dict, verbose: bool):
 
 def cmd_server(args, cfg):
     import uvicorn
+
     from .server.app import create_app
     app = create_app(cfg)
     host, _, port = cfg.server["listen"].rpartition(":")
@@ -41,6 +42,7 @@ def cmd_server(args, cfg):
 
 def cmd_agent(args, cfg):
     import asyncio
+
     from .agent.agent import Agent
     if args.server:
         cfg.agent["server_url"] = args.server
@@ -63,7 +65,7 @@ def cmd_doctor(args, cfg):
             code, out, err = run_cmd(tool, 8)
             first = (out or err).strip().splitlines()[0][:60] if (out or err) else "ok"
             checks.append((f"工具 {tool[0]}", code == 0 or tool[0] != "mtr", first))
-        except Exception as e:  # noqa
+        except Exception as e:
             ok = tool[0] == "mtr"  # mtr 缺失可容忍（Windows/未装）
             checks.append((f"工具 {tool[0]}", ok, f"不可用: {e}"))
 
@@ -74,7 +76,7 @@ def cmd_doctor(args, cfg):
                      "", None, now())
         checks.append(("ping 探测(127.0.0.1)", r["status"] == "ok",
                        f"status={r['status']} rtt_avg={r['metrics'].get('rtt_avg')}"))
-    except Exception as e:  # noqa
+    except Exception as e:
         checks.append(("ping 探测(127.0.0.1)", False, str(e)))
 
     # curl 实测
@@ -83,7 +85,7 @@ def cmd_doctor(args, cfg):
         r = run_curl({"params": {"timeout": 8}}, "https://www.baidu.com", "", "", None, now())
         checks.append(("curl 探测(baidu)", r["status"] == "ok",
                        f"http={r['metrics'].get('http_code')} total={r['metrics'].get('total_time')}ms"))
-    except Exception as e:  # noqa
+    except Exception as e:
         checks.append(("curl 探测(baidu)", False, str(e)))
 
     # DNS 指定服务器解析（走 DoH 兜底链）
@@ -91,7 +93,7 @@ def cmd_doctor(args, cfg):
         from .common.dnsres import resolve_a
         ips, ms, tr = resolve_a("www.baidu.com", "223.5.5.5", timeout=3)
         checks.append(("DNS 解析(223.5.5.5)", True, f"{ips[0]} via {tr} {ms:.0f}ms"))
-    except Exception as e:  # noqa
+    except Exception as e:
         checks.append(("DNS 解析(223.5.5.5)", False, str(e)))
 
     # 数据库可写
@@ -102,7 +104,7 @@ def cmd_doctor(args, cfg):
         s = Storage(db)
         s.meta_set("doctor_last", str(now()))
         checks.append(("数据库可写", True, db))
-    except Exception as e:  # noqa
+    except Exception as e:
         checks.append(("数据库可写", False, str(e)))
 
     # 服务端连通
@@ -110,7 +112,7 @@ def cmd_doctor(args, cfg):
         import urllib.request
         with urllib.request.urlopen(cfg.agent["server_url"] + "/api/health", timeout=5) as r:
             checks.append(("服务端连通", r.status == 200, cfg.agent["server_url"]))
-    except Exception as e:  # noqa
+    except Exception as e:
         checks.append(("服务端连通", False, f"{cfg.agent['server_url']}: {e}"))
 
     print("\n=== gpm doctor 环境自检 ===")
