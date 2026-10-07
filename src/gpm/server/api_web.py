@@ -2128,6 +2128,7 @@ def setup_router(app_state) -> APIRouter:
         **前置门禁（第七期 38）**：不可信事件数 != 0 时**直接拒绝**，不调用判据 ——
         输入若是僵尸/陈旧证据，模型只会把噪声包装成结论。
         """
+        check_write(x_admin_token)   # 写口：与其余 36 处一致（P2-1），曾漏配
         from . import eventview as _ev
         from . import jev as _jev
         if not force:

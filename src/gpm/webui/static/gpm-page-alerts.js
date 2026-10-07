@@ -224,6 +224,18 @@ async function renderWindows() {
 }
 
 async function renderAlertHistory() {
+  // 事件（窗口内）表 #sla-incs 物理上在本子页（index.html），但渲染函数
+  // renderSlaIncidents 挂在 report 子页的 renderSla 里——懒加载拆分后直接
+  // 进 events 子页时它永远空表（第五轮改造的回归）。这里兜底：表还没内容
+  // 就自己拉一次 SLA 数据把事件表补上（renderSlaIncidents 幂等，重复调用无害）。
+  if (!$('#sla-incs').querySelector('tbody')) {
+    try {
+      const _to = Math.floor(Date.now() / 1000), _from = _to - (state.slaHours || 24) * 3600;
+      const _d = await api('/api/report/sla?t_from=' + _from + '&t_to=' + _to);
+      state.slaData = _d;   // 平铺/折叠按钮重画依赖它（858 行），直进本子页时也要有
+      renderSlaIncidents(_d);
+    } catch (e) { /* 事件表拉不到时告警表照常渲染；guard 已有 toast */ }
+  }
   const st = state.alFilter || '';
   const d = await api('/api/alerts?limit=80' + (st ? '&status=' + st : ''));
   const rows = d.items || [];
@@ -1109,11 +1121,13 @@ window.eventModal = async (iid) => {
     + '<div id="ev-chart" style="height:180px"></div>'
     + '<div class="sub" style="margin:14px 0 4px">时间线</div><div>' + tl + '</div>'
       // 事件详情内快捷跳转（批 4）：不必离开上下文就能看第三方告警/关联分析，降级为辅助入口
-      + '<div class="sub" style="margin:14px 0 4px">相关视图</div>',
-      + '<div style="display:flex;gap:8px;flex-wrap:wrap">',
-      + '<button class="btn ghost sm" onclick="evJump(\'external\')">查看第三方告警</button>',
-      + '<button class="btn ghost sm" onclick="evJump(\'corr\')">查看关联分析</button>',
-      + '</div>',
+      // 注意：这 4 行末尾曾是逗号（表达式语句）而非拼接 —— innerHTML 在「相关视图」处截断，
+      // 影响范围/JEV/确认备注全部丢失，且节点侧事件的后续 onclick 绑定在 null 上崩溃。
+      + '<div class="sub" style="margin:14px 0 4px">相关视图</div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
+      + '<button class="btn ghost sm" onclick="evJump(\'external\')">查看第三方告警</button>'
+      + '<button class="btn ghost sm" onclick="evJump(\'corr\')">查看关联分析</button>'
+      + '</div>'
     + '<div class="sub" style="margin:14px 0 4px">影响范围（同期异常）</div>' + blast
     + evExtraBlocks(d)
     + '<details class="ev-x" id="ev-x-jev"><summary>JEV 故障判断（人话翻译 + 详细）'

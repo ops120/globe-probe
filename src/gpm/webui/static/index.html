@@ -188,6 +188,8 @@ select,input[type=text]{background:var(--input-bg);border:1px solid var(--input-
 body.light .code-block pre{color:var(--fg)}
 .tgl{background:var(--btn);color:var(--accent-2);border:1px solid var(--accent-bd);border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit}
 .tgl:hover{background:var(--btn-hover)}
+/* 🔑 按钮未设置管理 token 时的半透明降级态（refreshAdminTokenBtn 切换） */
+.tgl.dim{opacity:.55}
 .mtr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px}
 .mtr-card{border:1px solid var(--bd);border-radius:8px;padding:8px 10px;background:var(--panel)}
 .mtr-card h4{font-size:12px;color:var(--fg-strong2);margin-bottom:6px;font-weight:500;display:flex;justify-content:space-between;gap:8px}
@@ -287,6 +289,20 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           <div class="card"><div class="k">在线节点</div><div class="v" id="ov-nodes-v">–</div><div class="s" id="ov-nodes-s"></div></div>
           <div class="card bad"><div class="k">进行中事件</div><div class="v" id="ov-inc">–</div><div class="s">连续失败阈值触发</div></div>
           <div class="card up"><div class="k">24h 平均可用率</div><div class="v" id="ov-avail">–</div><div class="s" id="ov-results"></div></div>
+        </div>
+        <!-- 首次使用引导：全新部署（0 任务/0 节点）时由 renderOverview 显示，任一有数据即隐藏 -->
+        <div class="panel hidden" id="ov-guide">
+          <div class="panel-head">快速开始 <span class="sub">还没有任何任务和节点 —— 三步把拨测跑起来</span></div>
+          <div class="cards" style="margin-bottom:0;grid-template-columns:repeat(3,1fr)">
+            <div class="card"><div class="k">① 装节点</div>
+              <div class="s" style="line-height:1.7;margin:6px 0 8px">节点管理页有 Linux/Docker/Windows 一键接入示例，复制命令到目标机器执行即可</div>
+              <button class="btn sm" onclick="show('nodes')">→ 去节点管理</button></div>
+            <div class="card"><div class="k">② 建任务</div>
+              <div class="s" style="line-height:1.7;margin:6px 0 8px">任务管理页新建 ping/curl/mtr/dns/tcp 拨测任务并分配节点</div>
+              <button class="btn sm" onclick="show('tasks')">→ 去任务管理</button></div>
+            <div class="card"><div class="k">③ 配告警</div>
+              <div class="s" style="line-height:1.7;margin:6px 0 8px">值班告警 → 通知配置里加通知渠道与告警规则</div></div>
+          </div>
         </div>
         <div class="panel">
           <div class="panel-head">任务状态 <span class="sub">按任务聚合 · 最近 24 小时（1h 聚合表）· 已停用任务标灰，其可用率为停用前的历史值</span></div>
@@ -721,22 +737,22 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=45"></script>
+<script src="/static/echarts.min.js?v=48"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=45"></script>
-<script src="/static/gpm-api.js?v=45"></script>
-<script src="/static/gpm-theme.js?v=45"></script>
-<script src="/static/gpm-charts.js?v=45"></script>
-<script src="/static/gpm-page-overview.js?v=45"></script>
-<script src="/static/gpm-page-task.js?v=45"></script>
-<script src="/static/gpm-page-compare.js?v=45"></script>
-<script src="/static/gpm-page-geo.js?v=45"></script>
-<script src="/static/gpm-page-external.js?v=45"></script>
-<script src="/static/gpm-page-corr.js?v=45"></script>
-<script src="/static/gpm-page-oncall.js?v=45"></script>
-<script src="/static/gpm-page-alerts.js?v=45"></script>
-<script src="/static/gpm-page-nodes.js?v=45"></script>
-<script src="/static/gpm-page-tasks.js?v=45"></script>
-<script src="/static/gpm-boot.js?v=45"></script>
+<script src="/static/gpm-utils.js?v=48"></script>
+<script src="/static/gpm-api.js?v=48"></script>
+<script src="/static/gpm-theme.js?v=48"></script>
+<script src="/static/gpm-charts.js?v=48"></script>
+<script src="/static/gpm-page-overview.js?v=48"></script>
+<script src="/static/gpm-page-task.js?v=48"></script>
+<script src="/static/gpm-page-compare.js?v=48"></script>
+<script src="/static/gpm-page-geo.js?v=48"></script>
+<script src="/static/gpm-page-external.js?v=48"></script>
+<script src="/static/gpm-page-corr.js?v=48"></script>
+<script src="/static/gpm-page-oncall.js?v=48"></script>
+<script src="/static/gpm-page-alerts.js?v=48"></script>
+<script src="/static/gpm-page-nodes.js?v=48"></script>
+<script src="/static/gpm-page-tasks.js?v=48"></script>
+<script src="/static/gpm-boot.js?v=48"></script>
 </body>
 </html>

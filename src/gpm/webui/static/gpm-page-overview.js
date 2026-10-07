@@ -17,6 +17,9 @@ async function renderOverview() {
   $('#ov-avail').textContent = ov.avail_24h == null ? '–' : (ov.avail_24h * 100).toFixed(2) + '%';
   $('#ov-inc').textContent = ov.incidents_open;
   $('#ov-results').textContent = `累计结果 ${ov.results_total.toLocaleString()} 条`;
+  // 首次使用引导：只有全新部署（0 任务且 0 节点）才显示，任一有数据即隐藏
+  const guide = $('#ov-guide');
+  if (guide) guide.classList.toggle('hidden', !(tasks.length === 0 && nodes.length === 0));
   const tb = $('#ov-task-body'); tb.innerHTML = '';
   for (const t of tasks) {
     const on = t.enabled !== 0 && t.enabled !== false;

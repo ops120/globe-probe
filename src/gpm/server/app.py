@@ -30,6 +30,50 @@ class _LeaseSkip(Exception):
 AUTHOR = "ops120"
 REPO = "https://github.com/ops120/globe-probe"
 
+# 弱 admin token 特征（P0-1）：配了 token 但值是示例/占位（change-me 前缀，含
+# change-me-admin / gpm-change-me）或过短（< 16 字符）时，写口鉴权形同虚设 ——
+# 知道示例值的人都能建任务/改渠道。只警告不拒绝启动；环回监听（本地开发）也照样提醒。
+_WEAK_ADMIN_TOKEN_PREFIXES = ("change-me", "gpm-change-me")
+
+
+def weak_admin_token_reason(token: str) -> str | None:
+    """admin_token 命中弱值特征时返回原因文案；强值/未配置返回 None。
+
+    纯函数（不读配置不打日志），便于测试直接做特征矩阵断言。
+    """
+    t = str(token or "").strip()
+    if not t:
+        return None
+    low = t.lower()
+    if any(low.startswith(p) for p in _WEAK_ADMIN_TOKEN_PREFIXES):
+        return "示例/占位值（change-me 前缀）"
+    if len(t) < 16:
+        return "长度不足 16 字符，熵不足可被猜出"
+    return None
+
+
+def warn_admin_token_startup(cfg) -> None:
+    """启动时的写口鉴权形态提示（lifespan 调用；测试可直接调用并用 caplog 断言）。
+
+    - 未配 token + 非环回监听：check_write 已 fail-closed（写口全 403），说明原因
+      与开放方法，避免运维以为是服务坏了；
+    - 已配 token 但为弱值：**写接口将按该弱 token 鉴权**，提示用 openssl rand -hex 24
+      生成强值后重启。环回监听也照样提醒（本地开发也该知道自己在用弱值）。
+      只警告，不拒绝启动。
+    """
+    try:
+        tok = str(cfg.server.get("admin_token") or "")
+        if not tok and not listen_is_loopback(str(cfg.server.get("listen") or "")):
+            log.warning("server.admin_token 未配置且监听在非环回地址：所有写接口返回 403。"
+                        "配置 server.admin_token（或环境变量 GPM_ADMIN_TOKEN）后重启开放。")
+        why = weak_admin_token_reason(tok)
+        if why:
+            log.warning("server.admin_token 已配置但为弱值（%s）：所有写接口将按该弱 token "
+                        "鉴权，知道该值的人即可改任务/配置。请换强随机值"
+                        "（生成：openssl rand -hex 24）后重启；本次仅警告，不拒绝启动。", why)
+    except Exception as e:  # noqa: BLE001 - 提示失败不影响启动
+        log.debug("admin_token 启动提示失败: %s", e)
+
 
 def create_app(cfg, storage: Storage | None = None):
     storage = storage or Storage(cfg.server["database"])
@@ -106,14 +150,9 @@ def create_app(cfg, storage: Storage | None = None):
         jsonlog.setup()   # 见 create_app 顶部说明：覆盖 uvicorn.run 重置过的 handler
         log.info("服务端启动: %s (db=%s)", cfg.server["listen"], cfg.server["database"])
         # 写口鉴权形态提示：api_web.check_write 对「未配 token + 非环回监听」已 fail-closed，
-        # 这里把原因讲清楚，避免运维以为是服务坏了
-        try:
-            if not (cfg.server.get("admin_token") or "") and not listen_is_loopback(
-                    str(cfg.server.get("listen") or "")):
-                log.warning("server.admin_token 未配置且监听在非环回地址：所有写接口返回 403。"
-                            "配置 server.admin_token（或环境变量 GPM_ADMIN_TOKEN）后重启开放。")
-        except Exception:  # noqa: BLE001 - 提示失败不影响启动
-            pass
+        # 这里把原因讲清楚（见 warn_admin_token_startup），避免运维以为是服务坏了；
+        # 弱 token（change-me 前缀 / 过短）也在这里提醒。
+        warn_admin_token_startup(cfg)
         yield
         stop.set()
         for t in tasks:

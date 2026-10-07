@@ -88,18 +88,42 @@ async function show(page) {
 $('#theme-toggle').addEventListener('click', () =>
   applyTheme(document.body.classList.contains('light') ? 'dark' : 'light'));
 /* 🔑 管理 token 设置：存 localStorage（gpm-admin-token），api() 会把它带进每个请求头。
- * 清空即删除。保存后立即验证一次（对 /api/tasks 发一个无害的读请求没意义——读口不鉴权，
- * 所以直接重画当前页让用户在下一个写操作里看到效果，失败 toast 会给出指引）。 */
-$('#admin-token-btn').addEventListener('click', () => {
+ * 清空即删除。保存非空 token 后立即做一次**真实验证**：读口不鉴权、验不出 token 对错，
+ * 所以对无害写口 PUT /api/settings/public-url 写回当前值（等于不改）——token 不对当场暴露，
+ * 而不是等第一次业务写操作才失败。验证失败保留已输入的 token（可能只是网络问题，用户可再改）。 */
+$('#admin-token-btn').addEventListener('click', async () => {
   const cur = adminToken();
   const v = prompt('管理 token（X-Admin-Token）\n服务端配置了 admin_token 时用于写操作鉴权；留空并确定则清除已保存的 token。', cur);
   if (v === null) return;                       // 取消：不动
+  const tok = v.trim();
   try {
-    if (v.trim()) localStorage.setItem('gpm-admin-token', v.trim());
+    if (tok) localStorage.setItem('gpm-admin-token', tok);
     else localStorage.removeItem('gpm-admin-token');
   } catch (e) { toast('无法访问 localStorage，token 未保存', 'err'); return; }
-  toast(v.trim() ? '管理 token 已保存，写操作将携带 X-Admin-Token' : '管理 token 已清除', 'ok');
+  refreshAdminTokenBtn();                       // 增删后立即同步按钮视觉（任务 2）
+  if (!tok) { toast('管理 token 已清除', 'ok'); return; }
+  toast('管理 token 已保存，正在验证…');
+  try {
+    let pub = '';
+    try { pub = (await api('/api/settings/public-url')).public_url || ''; }
+    catch (e) { /* 读不到（旧服务端/瞬断）按空值写回；写口结果同样能说明 token 对错 */ }
+    await api('/api/settings/public-url', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ public_url: pub }) });
+    toast('管理 token 验证通过', 'ok');
+  } catch (e) {
+    // e.message（api 在 403 时抛的 Error）自带「点右上 🔑」指引文案，直接透出
+    toast('token 验证失败：可能是 token 不对；' + (e.message || e), 'err');
+  }
 });
+
+/* 🔑 按钮状态视觉：未设置 token → .tgl.dim（半透明）+ title 提示；已设置 → 正常 + title 说明。
+ * 页面加载（初始化段）与每次 token 增删后调用。 */
+function refreshAdminTokenBtn() {
+  const btn = $('#admin-token-btn');
+  if (!btn) return;
+  const set = !!adminToken();
+  btn.classList.toggle('dim', !set);
+  btn.title = set ? '管理 token 已设置' : '未设置管理 token';
+}
 
 function fillTaskSelects() {
   const opts = state.tasks.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join('');
@@ -145,9 +169,10 @@ $('#btn-export').addEventListener('click', () => {
 window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
 setInterval(pollHealth, 10000);
 
-/* ---------- 深链：/index.html?task=<task_id>&ts=<ts> ----------
+/* ---------- 深链：/index.html?task=<task_id>&ts=<ts> 与 ?sub=<alerts 子页> ----------
  * 值班总览「去处理」与外部链接共用 openTaskAt：导航到任务页、把时间窗覆盖到 ts、
  * 打开该时刻的单次详情弹窗（复用现有 openDetail 路径）。进页面后清掉 query，幂等可刷新。
+ * ?sub=xx 直达「值班告警」的某个子页（通知深链/外部书签用），优先级 task > sub。
  */
 // 记录「上一个页面」，让任务分析页能返回（批 4：任务列表/告警入口进任务分析后，原本无返回路径）
 function goBackToPrev() {
@@ -180,16 +205,33 @@ async function openTaskAt(taskId, ts) {
   }
   return true;
 }
+/* 告警子页深链（?sub=xx）：先 show('alerts') 再模拟点击对应 [data-sub] 按钮——
+ * active 态切换、懒渲染/每次现算（oncall/corr）的策略全部复用既有绑定，最稳。 */
+const ALERTS_SUBS = ['oncall', 'report', 'events', 'external', 'corr', 'notify', 'audit'];
+async function openAlertsSub(sub) {
+  await show('alerts');
+  const btn = document.querySelector('[data-sub="' + sub + '"]');
+  if (btn) btn.click();
+  return true;
+}
 function applyDeepLink() {
   const q = new URLSearchParams(location.search);
   const taskId = q.get('task'), ts = Number(q.get('ts')) || 0;
-  if (!taskId) return Promise.resolve(false);
-  history.replaceState(null, '', location.pathname);   // 清掉 query：刷新/回退不会重复处理
-  return openTaskAt(taskId, ts).catch(e => { toast('深链打开失败: ' + (e.message || e)); return false; });
+  const sub = q.get('sub') || '';
+  if (taskId) {                                 // 任务深链优先级最高
+    history.replaceState(null, '', location.pathname);   // 清掉 query：刷新/回退不会重复处理
+    return openTaskAt(taskId, ts).catch(e => { toast('深链打开失败: ' + (e.message || e)); return false; });
+  }
+  if (ALERTS_SUBS.includes(sub)) {              // 告警子页深链；白名单外的值忽略，走常规初始化
+    history.replaceState(null, '', location.pathname);
+    return openAlertsSub(sub).catch(e => { toast('深链打开失败: ' + (e.message || e)); return false; });
+  }
+  return Promise.resolve(false);
 }
 
 /* 初始化 */
 (async () => {
+  refreshAdminTokenBtn();        // 🔑 按钮初始视觉：未设置 token → dim（gpm-api.js 的 adminToken 已可用）
   await pollHealth();
   // 深链（?task=xx&ts=xx）优先级最高；否则恢复上次刷新前的页面（sessionStorage）
   if (!(await applyDeepLink())) {

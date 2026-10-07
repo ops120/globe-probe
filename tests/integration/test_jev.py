@@ -29,6 +29,16 @@ def make_client(tmp_path):
     return TestClient(create_app(cfg, storage)), cfg, storage
 
 
+def make_client_with_token(tmp_path, admin_token="k1f9c0ffee24beef7acc0de"):
+    """带 admin_token 的 client（P2-1：JEV run 曾漏配 check_write 的回归用）。"""
+    from gpm.server.storage import Storage
+    db = str(tmp_path / "jev-auth.db")
+    cfg = Config({"server": {"database": db, "listen": "127.0.0.1:0",
+                             "admin_token": admin_token}})
+    storage = Storage(db)
+    return TestClient(create_app(cfg, storage)), cfg, storage, admin_token
+
+
 def register(client, cfg, name):
     reg = cfg.agent["register_token"]
     r = client.post("/api/agent/register", json={
@@ -190,6 +200,39 @@ def test_precheck_gate_blocks_when_zombies_present(tmp_path):
     assert r.status_code == 409, r.status_code
     assert "证据不可信" in r.json()["detail"]
     assert s.db.execute("SELECT COUNT(*) FROM jev_traces").fetchone()[0] == 0
+
+
+def test_run_requires_admin_token(tmp_path):
+    """P2-1 回归：POST /api/jev/{id}/run 是写口，必须与其余写口一样过 check_write。
+
+    该端点曾声明了 x_admin_token Header 却从不校验 —— 配了 admin_token 时
+    任何人都能触发 JEV 判断。矩阵：无 token 403 / 错 token 403 / 对 token 放行。
+    """
+    client, cfg, s, tok = make_client_with_token(tmp_path)
+    nid, token = register(client, cfg, "n1")   # 节点注册/上报不带 admin token，不受影响
+    # 建任务也要 token（本用例顺带证明这套 client 的 token 真的在拦写口）
+    r = client.post("/api/tasks", json={
+        "name": "t", "type": "ping", "target": "1.1.1.1", "interval_seconds": 10})
+    assert r.status_code == 403, r.status_code
+    tid = client.post("/api/tasks", json={
+        "name": "t", "type": "ping", "target": "1.1.1.1", "interval_seconds": 10},
+        headers={"X-Admin-Token": tok}).json()["id"]
+    open_incident(client, nid, token, tid)
+    iid = s.list_incidents(1, open_only=True)[0]["id"]
+
+    # 无 token / 错 token：403，且不产生轨迹、不算一次判断
+    assert client.post("/api/jev/%d/run" % iid).status_code == 403
+    r = client.post("/api/jev/%d/run" % iid, headers={"X-Admin-Token": "wrong"})
+    assert r.status_code == 403, r.status_code
+    assert "X-Admin-Token" in r.json()["detail"]
+    assert s.db.execute("SELECT COUNT(*) FROM jev_traces").fetchone()[0] == 0
+
+    # 正确 token：放行（200 走完判断或 409 撞前置门禁都算放行，这里无僵尸应为 200）
+    r = client.post("/api/jev/%d/run" % iid, headers={"X-Admin-Token": tok})
+    assert r.status_code == 200, r.text
+    assert r.json()["incident_id"] == iid
+    # 读口不受影响（GET /api/jev/{iid} 本来就不需要 token）
+    assert client.get("/api/jev/%d" % iid).status_code == 200
 
 
 def test_http_judge_is_pluggable_and_checked():
