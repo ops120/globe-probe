@@ -277,10 +277,12 @@ function oncallCard(g) {
     + '</div>'
     + (advice ? '<div class="oc-advice">建议：' + esc(advice) + '</div>' : '')
     // 第三期 13：「建议」是散文，这里给能直接粘贴的第一条命令
-    + (g.runbook ? '<div class="oc-runbook"><span class="oc-rb-lbl">下一步命令</span>'
-        + '<code>' + esc(g.runbook) + '</code>'
-        + '<button class="btn sm ghost" onclick="oncallCopy(this,&quot;'
-        + esc(g.runbook).replace(/"/g, '&quot;') + '&quot;)">复制</button></div>' : '')
+    // UI审查报告 P2：命令块改 pre 语义（不换行）+横向滚动，复制按钮独立右上角，
+    // 不再与命令挤同一行（窄列内换行拥挤、尾部被裁）。
+    + (g.runbook ? '<div class="oc-runbook" style="position:relative"><span class="oc-rb-lbl">下一步命令</span>'
+        + '<button class="btn sm ghost" style="position:absolute;top:0;right:0" onclick="oncallCopy(this,&quot;'
+        + esc(g.runbook).replace(/"/g, '&quot;') + '&quot;)">复制</button>'
+        + '<code style="display:block;white-space:pre;overflow-x:auto;padding-right:64px">' + esc(g.runbook) + '</code></div>' : '')
     // 第三期 14：同期变更（±30 分钟内动过这个任务/节点）——「刚改完就炸」最省时间的线索
     // 第六期 28：已关联的第三方告警作为**旁证**折叠在本地卡里（不再单独占一张卡）
     // 已关联的第三方告警作为**旁证**折叠进本地卡；第三方独立卡本身就是那条告警，
@@ -324,7 +326,7 @@ window.oncallAck = async (iid) => {
     + '<div class="m-sub">确认表示已知晓/认领该故障，会记录操作者与备注（与事件详情弹窗共用同一接口）</div>'
     + '<div class="form-row" style="align-items:flex-start"><label>备注</label>'
     + '<textarea id="oc-note" rows="2" style="flex:1" placeholder="例如：已通知值班 / 属上游抖动，已知悉"></textarea></div>'
-    + '<div style="text-align:right;margin-top:12px"><button class="btn ghost" onclick="closeModal()">取消</button>'
+    + '<div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>'
     + '<button class="btn" id="oc-ack-save">确认</button></div>';
   $('#modal-mask').classList.remove('hidden');
   $('#oc-ack-save').onclick = async () => {

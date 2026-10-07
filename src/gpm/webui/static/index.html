@@ -11,7 +11,7 @@
   --bg:#0f1114; --bg-2:#15171b; --bg-3:#1b1e23; --bg-4:#22262c; --panel:#171a1e;
   --bd:#26292e; --bd-2:#33373d; --bd-soft:#1f2226; --input-bg:#101215; --input-bd:#2a2e34;
   --fg:#c9cdd4; --fg-2:#d5d9de; --fg-strong:#e8eaed; --fg-strong2:#dfe3e8;
-  --muted:#8a919c; --faint:#5b6470; --nav:#aab1bb;
+  --muted:#8a919c; --faint:#98a2b3; --nav:#aab1bb;
   --accent:#4e8ce6; --accent-2:#7cabf0; --accent-3:#39c0ed; --accent-4:#a78bfa; --nav-active:#5b9cf0;
   --accent-bg:#1c2430; --accent-bd:#2c3a52; --btn:#243042; --btn-hover:#2b3a52;
   --ok:#30a46c; --ok-fg:#4cc38a; --fail:#e5484d; --fail-fg:#f2666b;
@@ -29,7 +29,7 @@ body.light{
   --bg:#f2f4f7; --bg-2:#ffffff; --bg-3:#eef1f6; --bg-4:#e4e8ee; --panel:#ffffff;
   --bd:#dde2ea; --bd-2:#c6cdd8; --bd-soft:#eef1f5; --input-bg:#ffffff; --input-bd:#cfd6e0;
   --fg:#2c323b; --fg-2:#3a424d; --fg-strong:#12161c; --fg-strong2:#1d232b;
-  --muted:#5f6874; --faint:#8b939f; --nav:#3f4753;
+  --muted:#5f6874; --faint:#5f6874; --nav:#3f4753;
   --accent:#2f6fd0; --accent-2:#2f6fd0; --accent-3:#0b83b0; --accent-4:#7c5cd6; --nav-active:#2f6fd0;
   --accent-bg:#e4edfb; --accent-bd:#bcd2f2; --btn:#e4edfb; --btn-hover:#d3e2fa;
   --ok:#1f8a53; --ok-fg:#1f8a53; --fail:#d13b40; --fail-fg:#c9302f;
@@ -61,6 +61,7 @@ body{font-family:"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;backgroun
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
 .topbar{height:48px;flex-shrink:0;background:var(--bg-2);border-bottom:1px solid var(--bd);display:flex;align-items:center;justify-content:space-between;padding:0 20px}
 .crumb{font-size:14px;font-weight:600;color:var(--fg-strong)}
+h1.crumb{margin:0;font-size:14px;font-weight:600;display:inline}
 .top-actions{display:flex;align-items:center;gap:14px;font-size:12px;color:var(--muted)}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
 .dot.g{background:var(--ok);box-shadow:0 0 6px rgba(48,163,107,.8)}
@@ -71,23 +72,26 @@ main.content{flex:1;overflow-y:auto;padding:16px 20px}
 .card .k{color:var(--muted);font-size:12px}
 .card .v{font-size:24px;font-weight:600;color:var(--fg-strong);margin:4px 0 2px;font-variant-numeric:tabular-nums}
 .card .v small{font-size:13px;color:var(--muted);font-weight:400}
-.card .s{font-size:11px;color:var(--faint)}
+.card .s{font-size:12px;color:var(--faint)}
 .card.bad .v{color:var(--fail)}
 .card.up .v{color:var(--ok)}
 .panel{background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:14px 16px;margin-bottom:14px}
 .panel-head{font-size:14px;font-weight:600;color:var(--fg-strong);margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.panel-head .sub{font-size:11px;color:var(--faint);font-weight:400}
+.panel-head .sub{font-size:12px;color:var(--faint);font-weight:400}
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 @media(max-width:1100px){.grid-2{grid-template-columns:1fr}.cards{grid-template-columns:repeat(2,1fr)}}
 .chart{width:100%}
 .h160{height:160px}.h220{height:220px}.h260{height:260px}.h300{height:300px}.h340{height:340px}
-.hint{color:var(--faint);font-size:11px;text-align:center;padding:2px 0 14px}
+.hint{color:var(--faint);font-size:12px;text-align:center;padding:2px 0 14px}
 table.tbl{width:100%;border-collapse:collapse}
-.tbl th{text-align:left;color:var(--muted);font-size:11px;padding:8px 10px;border-bottom:1px solid var(--bd);font-weight:500;white-space:nowrap}
+.tbl th{text-align:left;color:var(--muted);font-size:12px;padding:8px 10px;border-bottom:1px solid var(--bd);font-weight:500;white-space:nowrap}
+/* 操作列默认淡出、行 hover 显现（触屏/键盘可达性不受影响——opacity 变化不移除焦点） */
+.tbl td.ops{opacity:.25;transition:opacity .12s;white-space:nowrap}
+.tbl tr:hover td.ops,.tbl tr:focus-within td.ops{opacity:1}
 .tbl td{padding:9px 10px;border-bottom:1px solid var(--bd-soft);white-space:nowrap;font-variant-numeric:tabular-nums}
 .tbl tr:last-child td{border-bottom:none}
 .tbl tr:hover td{background:var(--row-hover)}
-.badge{display:inline-block;padding:1px 9px;border-radius:10px;font-size:11px;line-height:18px}
+.badge{display:inline-block;padding:1px 9px;border-radius:10px;font-size:12px;line-height:18px}
 .b-ping{background:rgba(48,163,107,.14);color:var(--ok-fg)}
 .b-curl{background:rgba(78,140,230,.14);color:var(--accent-2)}
 .b-mtr{background:rgba(167,139,250,.14);color:var(--b-mtr-fg)}
@@ -104,7 +108,7 @@ table.tbl{width:100%;border-collapse:collapse}
 .btn:hover{background:var(--btn-hover)}
 .btn.ghost{background:var(--bg-4);color:var(--nav)}
 .btn.danger{background:rgba(229,72,77,.12);color:var(--fail-fg)}
-.btn.sm{padding:3px 10px;font-size:11px;border-radius:5px}
+.btn.sm{padding:3px 10px;font-size:12px;border-radius:5px}
 /* 告警与报表二级子导航（值班总览/报表/事件与告警/通知配置/操作审计）：双主题全走 CSS 变量 */
 .subtabs{display:flex;gap:6px;flex-wrap:wrap;background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:6px;margin-bottom:14px}
 .subtabs button{background:none;border:none;color:var(--nav);font-size:13px;padding:7px 14px;border-radius:6px;cursor:pointer;font-family:inherit}
@@ -132,9 +136,9 @@ table.tbl{width:100%;border-collapse:collapse}
 .jev-row{display:flex;gap:14px;flex-wrap:wrap;margin:6px 0}
 .jev-col{flex:1;min-width:260px;background:var(--bg-2);border:1px solid var(--bd);
   border-radius:8px;padding:8px 10px;font-size:12px}
-.jev-lbl{color:var(--muted);font-size:11px;margin:8px 0 3px;text-transform:none}
+.jev-lbl{color:var(--muted);font-size:12px;margin:8px 0 3px;text-transform:none}
 .jev-code{display:block;background:var(--bg-3);border:1px solid var(--bd);border-radius:6px;
-  padding:4px 8px;font-size:11px;margin-top:5px;word-break:break-all;color:var(--fg-2)}
+  padding:4px 8px;font-size:12px;margin-top:5px;word-break:break-all;color:var(--fg-2)}
 .oc-ext-lbl{font-size:12px;color:var(--muted);margin-bottom:3px}
 .oc-extrow{display:flex;align-items:center;gap:10px;font-size:12px;padding:3px 0}
 .oc-extt{color:var(--fg-2);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -174,7 +178,7 @@ details.ev-x>summary{cursor:pointer;color:var(--fg-strong2);font-size:13px;font-
 details.ev-x>summary::marker{color:var(--muted)}
 details.ev-x table{margin-top:8px}
 select,input[type=text]{background:var(--input-bg);border:1px solid var(--input-bd);color:var(--fg);border-radius:6px;padding:6px 10px;font-size:12px;font-family:inherit;outline:none}
-.chip{display:inline-block;padding:3px 10px;border-radius:12px;background:var(--bg-3);color:var(--muted);font-size:11px;cursor:pointer;border:1px solid transparent;user-select:none;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip{display:inline-block;padding:3px 10px;border-radius:12px;background:var(--bg-3);color:var(--muted);font-size:12px;cursor:pointer;border:1px solid transparent;user-select:none;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .chip.active{background:var(--accent-bg);color:var(--accent-2);border-color:var(--accent-bd)}
 .chip:hover{color:var(--fg)}
 .fsel{position:relative;display:inline-block;vertical-align:middle}
@@ -194,9 +198,9 @@ body.light .code-block pre{color:var(--fg)}
 .mtr-card{border:1px solid var(--bd);border-radius:8px;padding:8px 10px;background:var(--panel)}
 .mtr-card h4{font-size:12px;color:var(--fg-strong2);margin-bottom:6px;font-weight:500;display:flex;justify-content:space-between;gap:8px}
 .mtr-card h4 span{color:var(--faint);font-weight:400}
-.grp-chip{display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;background:var(--accent-bg);color:var(--accent-2);border:1px solid var(--accent-bd);margin:2px 4px 2px 0}
+.grp-chip{display:inline-block;padding:2px 9px;border-radius:10px;font-size:12px;background:var(--accent-bg);color:var(--accent-2);border:1px solid var(--accent-bd);margin:2px 4px 2px 0}
 .grp-box{border:1px solid var(--bd);border-radius:6px;padding:8px 10px;max-height:120px;overflow:auto}
-.code-inline{font-family:Consolas,monospace;font-size:11px;color:var(--mono);background:var(--input-bg);border:1px solid var(--bd);border-radius:4px;padding:1px 5px}
+.code-inline{font-family:Consolas,monospace;font-size:12px;color:var(--mono);background:var(--input-bg);border:1px solid var(--bd);border-radius:4px;padding:1px 5px}
 body.light .code-inline{color:var(--fg)}
 .fdrop{position:absolute;top:34px;left:0;z-index:40;background:var(--bg-3);border:1px solid var(--bd-2);border-radius:8px;min-width:260px;box-shadow:0 8px 24px var(--shadow);padding:8px}
 .fdrop input{width:100%;margin-bottom:6px}
@@ -213,15 +217,21 @@ body.light .code-inline{color:var(--fg)}
 .evt .bar{width:3px;border-radius:2px;align-self:stretch;flex-shrink:0}
 .evt .bar.fail{background:var(--fail)}.evt .bar.warn{background:var(--warn)}.evt .bar.nodata{background:var(--muted)}
 .evt .t1{font-size:12px;color:var(--fg-2)}
-.evt .t2{font-size:11px;color:var(--faint);margin-top:3px}
-.evt .when{font-size:11px;color:var(--muted);width:96px;flex-shrink:0;padding-top:1px}
+.evt .t2{font-size:12px;color:var(--faint);margin-top:3px}
+.evt .when{font-size:12px;color:var(--muted);width:96px;flex-shrink:0;padding-top:1px}
 .node-chip{display:inline-flex;align-items:center;gap:7px;background:var(--bg-3);border:1px solid var(--bd);border-radius:8px;padding:7px 11px;font-size:12px;margin:0 8px 8px 0}
 .node-chip b{color:var(--fg-strong2);font-weight:500}
-.node-chip span{color:var(--faint);font-size:11px}
+.node-chip span{color:var(--faint);font-size:12px}
 .prog{width:70px;height:5px;background:var(--bg-4);border-radius:3px;display:inline-block;vertical-align:middle;margin-right:6px;overflow:hidden}
 .prog i{display:block;height:100%;border-radius:3px}
 .modal-mask{position:fixed;inset:0;background:var(--mask);display:flex;align-items:center;justify-content:center;z-index:50}
 .modal{background:var(--panel);border:1px solid var(--bd-2);border-radius:10px;width:640px;max-width:94vw;max-height:86vh;overflow:auto;padding:18px 22px;box-shadow:0 12px 40px var(--shadow)}
+/* 模态底部操作行吸底（UI审查报告 P0-1）：1366×768 打开新建任务弹窗时内容总高 813px
+ * 超出视口，「取消/创建」被推出视口须先滚模态才能提交。sticky 在 .modal 的
+ * overflow:auto 滚动容器内生效，任意分辨率按钮恒贴可视底部。负 margin 抵消
+ * .modal 自身 padding，让吸底条通栏。 */
+.m-foot{position:sticky;bottom:-18px;margin:14px -22px -18px;padding:10px 22px 14px;
+        background:var(--panel);border-top:1px solid var(--bd);text-align:right}
 .m-title{font-size:15px;font-weight:600;color:var(--fg-strong);margin-bottom:4px}
 .m-sub{font-size:12px;color:var(--muted);margin-bottom:14px;word-break:break-all}
 .m-close{float:right;color:var(--faint);cursor:pointer;font-size:16px;line-height:1;padding:2px 6px}
@@ -233,10 +243,13 @@ body.light .code-inline{color:var(--fg)}
 .wf-label{width:78px;color:var(--muted);font-size:12px;flex-shrink:0}
 .wf-track{flex:1;height:14px;background:var(--input-bg);border-radius:3px;overflow:hidden}
 .wf-bar{height:100%;border-radius:3px}
-.wf-val{width:64px;text-align:right;font-size:11px;color:var(--muted);flex-shrink:0;font-variant-numeric:tabular-nums}
+.wf-val{width:64px;text-align:right;font-size:12px;color:var(--muted);flex-shrink:0;font-variant-numeric:tabular-nums}
 .m-note{background:var(--accent-bg);border:1px solid var(--accent-bd);color:var(--note-fg);border-radius:6px;padding:9px 12px;font-size:12px;margin-top:12px;line-height:1.7}
 .m-note.gray{background:var(--bg-3);border-color:var(--input-bd);color:var(--muted)}
-.form-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+/* wrap（UI审查报告 P0-1b）：跨行说明 span 用 flex-basis:100% 换行，但没有 wrap 时
+ * 会被压缩成窄列断词；说明类子元素统一 margin-left:0 从行首起（旧内联 130px 与
+ * label 实宽 90px 不符导致错位——JS 内联样式已同步清理） */
+.form-row{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}
 /* 仅作用于直接子级 label：分配节点选择器里的 .fcheck 标签不能被压成窄列 */
 .form-row>label{width:90px;color:var(--muted);font-size:12px;flex-shrink:0;text-align:right}
 .fcheck span{line-height:1.35}
@@ -276,7 +289,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
   </aside>
   <div class="main">
     <header class="topbar">
-      <div class="crumb" id="crumb">总览</div>
+      <h1 class="crumb" id="crumb">总览</h1>
       <div class="top-actions"><span id="srv-status"><i class="dot r"></i>连接中…</span><span id="srv-time"></span>
         <button class="tgl" id="admin-token-btn" title="设置管理 token（写操作鉴权）">🔑 Token</button>
         <button class="tgl" id="theme-toggle" title="切换白天/夜间主题">☀ 白天</button></div>
@@ -311,14 +324,16 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
             <tbody id="ov-task-body"></tbody>
           </table>
         </div>
-        <div class="grid-2">
+        <!-- UI审查报告 P1-1：事件流长、节点状态短，1:1 等宽让右列大片空白 →
+             改 7:5 不等宽（最小改动；节点状态卡在数据多时仍可撑高对齐） -->
+        <div class="grid-2" style="grid-template-columns:7fr 5fr">
           <div class="panel">
             <div class="panel-head">事件 <span class="sub">灰色条目为节点侧，不计入目标故障</span></div>
             <div id="evt-list"></div>
           </div>
-          <div class="panel">
+          <div class="panel" style="display:flex;flex-direction:column">
             <div class="panel-head">节点状态 <span class="sub">心跳超时 60s 判定离线</span></div>
-            <div id="ov-nodes" style="padding-top:4px"></div>
+            <div id="ov-nodes" style="padding-top:4px;flex:1"></div>
           </div>
         </div>
       </section>
@@ -363,6 +378,9 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           </div>
           <div id="chart-uptime" class="chart h160"></div>
         </div>
+        <!-- UI审查报告 P1-1：单流任务条带下方约 60% 留白 → 24h 摘要卡填充
+             （数据现成：/api/tasks 的 avail_24h/streams/current_status） -->
+        <div class="cards" id="task-sum-cards" style="grid-template-columns:repeat(4,1fr)"></div>
         <!-- MTR 链路面板与通断条带同页（不拆到「链路」子页）：点条带色块 → 下方明细立刻联动，
              条带本身留在视野里才能看清高亮的是哪一格。拆开就等于点了没反应。 -->
         <div id="panels-mtr" class="hidden">
@@ -737,22 +755,22 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=50"></script>
+<script src="/static/echarts.min.js?v=51"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=50"></script>
-<script src="/static/gpm-api.js?v=50"></script>
-<script src="/static/gpm-theme.js?v=50"></script>
-<script src="/static/gpm-charts.js?v=50"></script>
-<script src="/static/gpm-page-overview.js?v=50"></script>
-<script src="/static/gpm-page-task.js?v=50"></script>
-<script src="/static/gpm-page-compare.js?v=50"></script>
-<script src="/static/gpm-page-geo.js?v=50"></script>
-<script src="/static/gpm-page-external.js?v=50"></script>
-<script src="/static/gpm-page-corr.js?v=50"></script>
-<script src="/static/gpm-page-oncall.js?v=50"></script>
-<script src="/static/gpm-page-alerts.js?v=50"></script>
-<script src="/static/gpm-page-nodes.js?v=50"></script>
-<script src="/static/gpm-page-tasks.js?v=50"></script>
-<script src="/static/gpm-boot.js?v=50"></script>
+<script src="/static/gpm-utils.js?v=51"></script>
+<script src="/static/gpm-api.js?v=51"></script>
+<script src="/static/gpm-theme.js?v=51"></script>
+<script src="/static/gpm-charts.js?v=51"></script>
+<script src="/static/gpm-page-overview.js?v=51"></script>
+<script src="/static/gpm-page-task.js?v=51"></script>
+<script src="/static/gpm-page-compare.js?v=51"></script>
+<script src="/static/gpm-page-geo.js?v=51"></script>
+<script src="/static/gpm-page-external.js?v=51"></script>
+<script src="/static/gpm-page-corr.js?v=51"></script>
+<script src="/static/gpm-page-oncall.js?v=51"></script>
+<script src="/static/gpm-page-alerts.js?v=51"></script>
+<script src="/static/gpm-page-nodes.js?v=51"></script>
+<script src="/static/gpm-page-tasks.js?v=51"></script>
+<script src="/static/gpm-boot.js?v=51"></script>
 </body>
 </html>

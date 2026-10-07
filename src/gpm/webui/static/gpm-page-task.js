@@ -31,6 +31,18 @@ async function renderTask() {
     : '节点默认 = 该节点自己的系统 DNS（企业内网 DNS / 运营商分配），各节点可能不同';
   $('#task-meta').innerHTML = `目标 ${esc(t.target || (t.urls || []).join(', '))} · 间隔 ${t.interval_seconds}s · DNS <span title="${esc(dnsTitle)}" style="text-decoration:underline dotted;cursor:help">${esc(dnsLabel)}</span> · config v${t.config_version}`;
   $('#gran-note').textContent = secs <= 3600 ? '10s 原始明细 · 滚轮缩放' : secs <= 86400 ? '1m 聚合' : '5m 聚合';
+  // 24h 摘要卡（UI审查报告 P1-1：单流任务概览子页条带下方约 60% 留白）。
+  // 数据全部来自 /api/tasks 列表现字段，不额外发请求。
+  const sumEl = $('#task-sum-cards');
+  if (sumEl) {
+    const card = (k, v, s) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`;
+    const stTxt = { ok: '<span style="color:var(--ok)">正常</span>', fail: '<span style="color:var(--fail)">故障</span>', skipped: '工具缺失' }[t.current_status] || (t.current_status || '—');
+    sumEl.innerHTML =
+      card('24h 可用率', t.avail_24h == null ? '—' : (t.avail_24h * 100).toFixed(2) + '%', `结果流 ${t.streams || 1} 条`) +
+      card('当前状态', stTxt, t.enabled ? '连续失败阈值判定' : '任务已停用') +
+      card('探测间隔', t.interval_seconds + 's', `config v${t.config_version}`) +
+      card('分配', !t.nodes || !t.nodes.length ? '全部节点' : t.nodes.length + ' 个节点/组', t.enabled ? '' : '停用任务保留历史值');
+  }
   // tcp 与 ping 共用 RTT 面板（tcp 的 metrics.rtt_ms 会同时写 rtt_avg 进聚合）；丢包面板仅 ping 有
   const isPingLike = t.type === 'ping' || t.type === 'tcp';
   $('#panels-ping').classList.toggle('hidden', !isPingLike);
@@ -130,6 +142,8 @@ function filterSelect(mountId, label, options, current, onPick, hint) {
 }
 document.addEventListener('click', () => document.querySelectorAll('.fdrop').forEach(d => d.classList.add('hidden')));
 async function renderUptime(t, from, to) {
+  // 24h 档用 300s 聚合格（UI审查报告 P2：原 60s 上千格过密，点击几乎无法命中；
+  // 点击下钻走原始表不受影响）。7d 维持 1800s。
   const step = state.range <= 3600 ? 60 : state.range <= 86400 ? 300 : 1800;
   const u = await api(`/api/query/uptime?task_id=${t.id}&bucket=${step}&t_from=${from}&t_to=${to}`);
   const data = [], times = [];
@@ -288,7 +302,7 @@ async function renderCodes(t, from, to) {
     legend: { data: cls, textStyle: { color: C('--chart-label'), fontSize: 11 }, itemWidth: 14 },
     tooltip: Object.assign({}, TIP, { trigger: 'axis' }),
     xAxis: Object.assign({}, AXC, { type: 'category', data: r.points.map(p => state.range >= 604800 ? fmtMDHM(p.ts) : fmtHM(p.ts)), axisLabel: Object.assign({}, AXC.axisLabel, { interval: Math.max(0, Math.floor(r.points.length / 8) - 1) }) }),
-    yAxis: Object.assign({}, SPLIT, { type: 'value', name: '次', nameTextStyle: { color: C('--faint') }, axisLabel: AXC.axisLabel }),
+    yAxis: Object.assign({}, SPLIT, { type: 'value', name: '次', nameTextStyle: { color: C('--faint') }, axisLabel: AXC.axisLabel, minInterval: 1 }),  // 计数轴整数刻度（UI审查 P2：0.2/0.4 小数无意义）
     series: cls.map(k => ({ name: k, type: 'line', stack: 't', data: r.points.map(p => p[k] || 0), showSymbol: false, lineStyle: { width: .6, color: cols[k] }, areaStyle: { color: cols[k], opacity: .78 } })),
   });
 }

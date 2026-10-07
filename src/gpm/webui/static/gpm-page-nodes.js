@@ -60,7 +60,7 @@ async function renderGroups() {
       const mem = (g.member_names || []).map(n => `<span class="badge b-off" style="margin-right:4px">${esc(n)}</span>`).join('') || '—';
       return `<tr><td style="color:var(--fg-strong2)">${esc(g.name)}${g.note ? ` <span class="sub">${esc(g.note)}</span>` : ''}</td>
         <td>${mem}</td><td class="num">${(g.members || []).length}</td>
-        <td><button class="btn sm ghost" onclick="grpModal('${g.id}')">改名</button>
+        <td class="ops"><button class="btn sm ghost" onclick="grpModal('${g.id}')">改名</button>
         <button class="btn sm danger" onclick="delGroup('${g.id}')">删除</button></td></tr>`;
     }).join('') : '<tr><td colspan="4" style="color:var(--faint)">还没有分组 —— 点右上「+ 新建分组」，然后在「编辑节点」里勾选成员</td></tr>') +
     '</tbody>';
@@ -73,7 +73,7 @@ window.grpModal = async (gid) => {
     <div class="m-sub">分组用于「任务按组分配」：任务里勾选分组，组内节点自动执行</div>
     <div class="form-row"><label>分组名</label><input type="text" id="grp-name" value="${esc(g ? g.name : '')}" placeholder="如 华东电信 / cn-north"></div>
     <div class="form-row"><label>备注</label><input type="text" id="grp-note" value="${esc(g ? g.note || '' : '')}" placeholder="可选，如 北京机房 BGP 线路"></div>
-    <div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>
+    <div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>
     <button class="btn" id="grp-save">保存</button></div>`;
   $('#modal-mask').classList.remove('hidden');
   $('#grp-save').onclick = async () => {
@@ -107,7 +107,7 @@ async function renderTokens() {
       <td>${t.enabled ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-off">已吊销</span>'}</td>
       <td style="color:var(--muted)">${fmt(t.created_at)}</td>
       <td style="color:var(--muted)">${t.last_used_at ? fmt(t.last_used_at) : '未使用'}</td>
-      <td><button class="btn sm ${t.enabled ? 'ghost' : ''}" onclick="toggleToken('${t.id}',${t.enabled ? 0 : 1})">${t.enabled ? '吊销' : '恢复'}</button>
+      <td class="ops"><button class="btn sm ${t.enabled ? 'ghost' : ''}" onclick="toggleToken('${t.id}',${t.enabled ? 0 : 1})">${t.enabled ? '吊销' : '恢复'}</button>
       <button class="btn sm danger" onclick="delToken('${t.id}')">删除</button></td></tr>`).join('')
       : '<tr><td colspan="6" style="color:var(--faint)">还没有独立 Token —— 当前使用服务端配置里的引导 Token（开发默认 gpm-dev-register）；点右上「+ 新建 Token」可为每批机器发独立凭证</td></tr>') +
     '</tbody>';
@@ -118,7 +118,7 @@ window.newToken = async () => {
     <div class="m-sub">明文只显示一次；吊销后，用该 Token 注册的节点会在下次同步被拒（需用新 Token 重新注册）</div>
     <div class="form-row"><label>名称</label><input type="text" id="tk-name" placeholder="如 华东机房-2026Q4"></div>
     <div class="form-row"><label>备注</label><input type="text" id="tk-note" placeholder="可选"></div>
-    <div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>
+    <div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>
     <button class="btn" id="tk-save">生成</button></div>`;
   $('#modal-mask').classList.remove('hidden');
   $('#tk-save').onclick = async () => {
@@ -171,7 +171,7 @@ async function renderNodes() {
         <td>${n.cpu != null ? `<span class="prog"><i style="width:${n.cpu}%;background:var(--accent)"></i></span>${n.cpu.toFixed(0)}%` : '—'}</td>
         <td>${n.mem != null ? `<span class="prog"><i style="width:${n.mem}%;background:${n.mem > 70 ? 'var(--warn)' : 'var(--ok)'}"></i></span>${n.mem.toFixed(0)}%` : '—'}</td>
         <td style="color:var(--muted)">${n.last_heartbeat ? fmtTS(n.last_heartbeat) : '—'}</td>
-        <td><button class="btn sm" onclick="nodeDetailModal('${n.id}')">详情</button>
+        <td class="ops"><button class="btn sm" onclick="nodeDetailModal('${n.id}')">详情</button>
         <button class="btn sm ghost" onclick="editNodeModal('${n.id}')">编辑</button>
         <button class="btn sm danger" onclick="delNode('${n.id}')">删除</button></td></tr>`;
     }).join('') + '</tbody>';
@@ -263,7 +263,7 @@ window.editNodeModal = nid => {
       </div>
       <div class="m-note gray">标签只用于归类与展示（详情/列表都会显示），不影响探测行为；分组用于「任务按组分配」。<br>
         改名注意：改名后原 agent 以旧名注册会被视为新节点 —— 请同步修改 agent 的 --name 参数。</div>
-      <div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>
+      <div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>
       <button class="btn" id="nf-save">保存</button></div>`;
     $('#modal-mask').classList.remove('hidden');
     $$('#modal-body [data-tag]').forEach(c => c.onclick = () => {

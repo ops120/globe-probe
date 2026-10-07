@@ -437,7 +437,7 @@ window.chModal = async (cid) => {
     + '<div class="form-row"><label>名称</label><input type="text" id="ch-name" value="' + esc(c ? c.name : '') + '" placeholder="如 运维群-钉钉"></div>'
     + '<div class="form-row"><label>类型</label><select id="ch-type">' + opts + '</select></div>'
     + '<div id="ch-fields">' + chFieldRows(type, c ? c.config : null) + '</div>'
-    + '<div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>'
+    + '<div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>'
     + '<button class="btn" id="ch-save">保存</button></div>';
   $('#modal-mask').classList.remove('hidden');
   $('#ch-type').onchange = e => {
@@ -537,7 +537,7 @@ window.ruleModal = async (rid) => {
     + '<div class="form-row" id="r-task-row"><label>任务</label><select id="r-task">' + topts + '</select></div>'
     + '<div class="form-row" id="r-node-row"><label>节点</label><select id="r-node">' + nopts + '</select></div>'
     + '<div class="form-row" style="align-items:flex-start"><label>通知渠道</label><div class="grp-box" style="flex:1">' + chks + '</div></div>'
-    + '<div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>'
+    + '<div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>'
     + '<button class="btn" id="r-save">保存</button></div>';
   $('#modal-mask').classList.remove('hidden');
   const syncScope = () => {
@@ -651,7 +651,7 @@ window.mwModal = async () => {
     + '<div class="form-row" id="m-task-row"><label>任务</label><select id="m-task">' + topts + '</select></div>'
     + '<div class="form-row" id="m-node-row"><label>节点</label><select id="m-node">' + nopts + '</select></div>'
     + '<div class="form-row"><label>备注</label><input type="text" id="m-note" placeholder="可选"></div>'
-    + '<div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>'
+    + '<div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>'
     + '<button class="btn" id="m-save">保存</button></div>';
   $('#modal-mask').classList.remove('hidden');
   const sync = () => {
@@ -1140,7 +1140,7 @@ window.eventModal = async (iid) => {
       + '<div id="ev-jev-body"><div style="color:var(--faint)">点「跑一次 JEV 判断」开始</div></div></details>'
     + '<div class="form-row" style="align-items:flex-start;margin-top:14px"><label>确认/备注</label>'
     + '<textarea id="ev-note" rows="2" style="flex:1" placeholder="例如：已通知机房 / 属上游抖动，已知悉">' + esc(inc.note || '') + '</textarea></div>'
-    + '<div style="text-align:right;margin-top:12px"><button class="btn ghost" onclick="closeModal()">关闭</button>'
+    + '<div class="m-foot"><button class="btn ghost" onclick="closeModal()">关闭</button>'
     + '<button class="btn" id="ev-ack">确认并保存备注</button></div>';
   $('#modal-mask').classList.remove('hidden');
   // JEV：先取已有轨迹（可回放）；没有则显示提示。跑一次时若服务端拒绝（证据不可信），

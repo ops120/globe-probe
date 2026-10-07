@@ -34,7 +34,7 @@ async function renderTasks() {
       <td class="num" style="color:var(--muted)">v${t.config_version}</td>
       <td>${t.enabled ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-warn">停用</span>'}</td>
       <td style="color:${stale ? 'var(--warn-fg)' : 'var(--muted)'}" title="${t.last_data_ts ? fmtTS(t.last_data_ts) : '近 24h 无数据'}">${fmtAgo(t.last_data_ts)}</td>
-      <td><button class="btn sm" onclick="event.stopPropagation();editTask('${t.id}')">编辑</button>
+      <td class="ops"><button class="btn sm" onclick="event.stopPropagation();editTask('${t.id}')">编辑</button>
       <button class="btn sm ghost" onclick="event.stopPropagation();copyTask('${t.id}')" title="以该任务的参数新建（名称加 -copy 后缀，提交后才真正创建）">复制</button>
       <button class="btn sm ${t.enabled ? 'ghost' : ''}" onclick="event.stopPropagation();toggleTask('${t.id}',${t.enabled ? 0 : 1})">${t.enabled ? '停用' : '启用'}</button>
       <button class="btn sm danger" onclick="event.stopPropagation();delTask('${t.id}')">删除</button></td></tr>`;
@@ -78,7 +78,7 @@ function taskModal(t, copy = false) {
   const p = (t && t.params) || {};
   const type = (t && t.type) || 'ping';
   $('#modal-body').innerHTML = `<span class="m-close" onclick="closeModal()">✕</span>
-    <div class="m-title">${edit ? '编辑任务' : (copy ? '复制新建任务' : '新建拨测任务')}</div>
+    <div class="m-title">${edit ? '编辑任务' : (copy ? '复制新建任务' : '新建任务')}</div>
     <div class="m-sub">${edit ? '保存后 config_version 递增，节点 15s 内拉取生效；类型与参数创建后不可改' : (copy ? '已预填源任务参数与节点分配，改完提交才会真正创建' : '提交后 config_version 递增，节点 15s 内拉取生效')}</div>
     <div class="form-row"><label>任务类型</label><select id="f-type" ${edit ? 'disabled' : ''}>
       ${Object.keys(TYPE_LABEL).map(k => `<option value="${k}" ${type === k ? 'selected' : ''}>${TYPE_LABEL[k]}</option>`).join('')}</select></div>
@@ -113,8 +113,8 @@ function taskModal(t, copy = false) {
       <label class="fcheck"><input type="checkbox" id="f-show-asn" ${p.show_asn ? 'checked' : ''}> <span>逐跳解析 AS 号（-z）</span></label></div>
     <div class="form-row"><label>间隔(秒)</label><input type="text" id="f-interval" value="${t?.interval_seconds || (type === 'dns' ? 30 : 10)}"></div>
     <div class="form-row"><label>DNS 线路</label><input type="text" id="f-dns" value="${esc((t?.dns || []).join(','))}" placeholder="逗号分隔，如 223.5.5.5,8.8.8.8（留空=节点默认；dns 任务为参与对比的线路列表）">
-      <span class="sub" style="flex-basis:100%;margin-left:130px"><b>节点默认</b> = 各节点自己的系统 DNS（企业内网 DNS / 运营商分配，每台节点可能不同）；指定线路则强制走该 DNS。支持写法：<span class="mono">223.5.5.5</span>（auto: UDP→TCP→DoH）、<span class="mono">doh:&lt;URL&gt;</span>、<span class="mono">dot:&lt;ip&gt;[:853]</span>、<span class="mono">&lt;ip&gt;@&lt;port&gt;</span>、<span class="mono">udp:</span>/<span class="mono">tcp:</span> 前缀强制传输。注意：同一域名经不同线路可能解析出相同或不同 IP（CDN 多 A 记录轮询，属正常）。</span>
-      <span class="sub" id="f-node-dns" style="flex-basis:100%;margin-left:130px;color:var(--faint)">各节点系统 DNS 加载中…</span></div>
+      <span class="sub" style="flex-basis:100%"><b>节点默认</b> = 各节点自己的系统 DNS（企业内网 DNS / 运营商分配，每台节点可能不同）；指定线路则强制走该 DNS。支持写法：<span class="mono">223.5.5.5</span>（auto: UDP→TCP→DoH）、<span class="mono">doh:&lt;URL&gt;</span>、<span class="mono">dot:&lt;ip&gt;[:853]</span>、<span class="mono">&lt;ip&gt;@&lt;port&gt;</span>、<span class="mono">udp:</span>/<span class="mono">tcp:</span> 前缀强制传输。注意：同一域名经不同线路可能解析出相同或不同 IP（CDN 多 A 记录轮询，属正常）。</span>
+      <span class="sub" id="f-node-dns" style="flex-basis:100%;color:var(--faint)">各节点系统 DNS 加载中…</span></div>
     <div class="form-row" style="align-items:flex-start"><label>分配节点</label>
       <div style="flex:1;border:1px solid var(--input-bd);border-radius:6px;padding:8px 10px">
         <label class="fcheck" style="margin-bottom:6px"><input type="checkbox" id="f-node-all"> <span>全部分配节点（不勾选分组/节点时生效）</span></label>
@@ -125,7 +125,7 @@ function taskModal(t, copy = false) {
         <div id="f-node-list" style="max-height:150px;overflow:auto"></div>
       </div>
     </div>
-    <div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>
+    <div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>
     <button class="btn" id="f-submit">${edit ? '保存修改' : '创建任务'}</button></div>`;
   $('#modal-mask').classList.remove('hidden');
   // 按类型显隐参数行

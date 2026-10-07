@@ -61,6 +61,12 @@ async function show(page) {
   }
   state.page = page;
   persistView();
+  // 导航写地址栏（UI审查报告 P1-4 补全）：点菜单后 URL 反映当前页，可复制/新标签打开。
+  // replaceState 不产生历史噪声（前进后退语义交给浏览器对既有 URL 的行为）；
+  // task 页是深链页（?task=），不写 hash 以免覆盖深链参数。
+  if (page !== 'task') {
+    try { history.replaceState(null, '', '#/' + page); } catch (e) { }
+  }
   $$('.sidebar nav a').forEach(a => a.classList.toggle('active', a.dataset.page === page));
   $$('.page').forEach(p => p.classList.add('hidden'));
   $('#page-' + page).classList.remove('hidden');
@@ -87,35 +93,54 @@ async function show(page) {
 })();
 $('#theme-toggle').addEventListener('click', () =>
   applyTheme(document.body.classList.contains('light') ? 'dark' : 'light'));
-/* 🔑 管理 token 设置：存 localStorage（gpm-admin-token），api() 会把它带进每个请求头。
- * 清空即删除。保存非空 token 后立即做一次**真实验证**：读口不鉴权、验不出 token 对错，
- * 所以对无害写口 PUT /api/settings/public-url 写回当前值（等于不改）——token 不对当场暴露，
- * 而不是等第一次业务写操作才失败。验证失败保留已输入的 token（可能只是网络问题，用户可再改）。 */
-$('#admin-token-btn').addEventListener('click', async () => {
+/* 🔑 管理 token 设置：自有模态（UI审查报告 P0-2：原生 prompt 无法主题化/会阻塞页面，
+ * 且与全站 #modal-mask 模态体系不一致）。存 localStorage（gpm-admin-token），api() 带
+ * 进每个请求头。保存非空 token 后立即**真实验证**：读口不鉴权验不出对错，对无害写口
+ * PUT /api/settings/public-url 写回当前值——token 不对当场暴露。失败保留已输入值。 */
+$('#admin-token-btn').addEventListener('click', () => {
   const cur = adminToken();
-  // 安全：不把已保存 token 回显成默认值（原样回显 = 打开弹窗即泄露全文）。
-  // 只在提示语里给「已保存 ****后4位」的掩码状态；输入框留空，输入新值覆盖。
-  const masked = cur ? `（已保存 ****${cur.slice(-4)}，输入新值覆盖）` : '（当前未设置）';
-  const v = prompt('管理 token（X-Admin-Token）' + masked + '\n服务端配置了 admin_token 时用于写操作鉴权；输入新 token 覆盖；留空并确定则清除。', '');
-  if (v === null) return;                       // 取消：不动
-  const tok = v.trim();
-  try {
-    if (tok) localStorage.setItem('gpm-admin-token', tok);
-    else localStorage.removeItem('gpm-admin-token');
-  } catch (e) { toast('无法访问 localStorage，token 未保存', 'err'); return; }
-  refreshAdminTokenBtn();                       // 增删后立即同步按钮视觉（任务 2）
-  if (!tok) { toast('管理 token 已清除', 'ok'); return; }
-  toast('管理 token 已保存，正在验证…');
-  try {
-    let pub = '';
-    try { pub = (await api('/api/settings/public-url')).public_url || ''; }
-    catch (e) { /* 读不到（旧服务端/瞬断）按空值写回；写口结果同样能说明 token 对错 */ }
-    await api('/api/settings/public-url', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ public_url: pub }) });
-    toast('管理 token 验证通过', 'ok');
-  } catch (e) {
-    // e.message（api 在 403 时抛的 Error）自带「点右上 🔑」指引文案，直接透出
-    toast('token 验证失败：可能是 token 不对；' + (e.message || e), 'err');
-  }
+  $('#modal-body').innerHTML = `<span class="m-close" onclick="closeModal()">✕</span>
+    <div class="m-title">管理 Token</div>
+    <div class="m-sub">服务端配置 admin_token 后写操作鉴权用；输入新值覆盖，清除后写操作将提示设置。</div>
+    <div class="form-row"><label>当前状态</label>
+      <span class="sub" id="tk-state">${cur ? '已保存 <b class="mono">****' + esc(cur.slice(-4)) + '</b>（只显示尾 4 位）' : '<span style="color:var(--warn-fg)">未设置</span>'}</span></div>
+    <div class="form-row"><label>新 Token</label>
+      <input type="password" id="tk-input" placeholder="输入新 token（留空点「清除」为删除）" autocomplete="off" style="flex:1">
+      <button class="btn ghost sm" id="tk-eye" title="显示/隐藏明文">👁</button></div>
+    <div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>
+      ${cur ? '<button class="btn ghost" id="tk-clear">清除</button>' : ''}
+      <button class="btn" id="tk-save">保存并验证</button></div>`;
+  $('#modal-mask').classList.remove('hidden');
+  const input = $('#tk-input');
+  input.focus();
+  $('#tk-eye').onclick = () => { input.type = input.type === 'password' ? 'text' : 'password'; };
+  $('#tk-save').onclick = async () => {
+    const tok = (input.value || '').trim();
+    if (!tok) { toast('未输入新 token（清除请点「清除」）', 'err'); return; }
+    try { localStorage.setItem('gpm-admin-token', tok); }
+    catch (e) { toast('无法访问 localStorage，token 未保存', 'err'); return; }
+    refreshAdminTokenBtn();
+    toast('管理 token 已保存，正在验证…');
+    try {
+      let pub = '';
+      try { pub = (await api('/api/settings/public-url')).public_url || ''; }
+      catch (e) { /* 读不到（旧服务端/瞬断）按空值写回；写口结果同样能说明 token 对错 */ }
+      await api('/api/settings/public-url', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ public_url: pub }) });
+      toast('管理 token 验证通过', 'ok');
+      closeModal();
+    } catch (e) {
+      // e.message（api 在 403 时抛的 Error）自带「点右上 🔑」指引文案，直接透出。
+      // 验证失败保留已输入 token（可能只是网络问题），弹窗不关，用户可改可取消。
+      toast('token 验证失败：可能是 token 不对；' + (e.message || e), 'err');
+    }
+  };
+  const clearBtn = $('#tk-clear');
+  if (clearBtn) clearBtn.onclick = () => {
+    try { localStorage.removeItem('gpm-admin-token'); } catch (e) { }
+    refreshAdminTokenBtn();
+    toast('管理 token 已清除', 'ok');
+    closeModal();
+  };
 });
 
 /* 🔑 按钮状态视觉：未设置 token → .tgl.dim（半透明）+ title 提示；已设置 → 正常 + title 说明。
@@ -229,15 +254,46 @@ function applyDeepLink() {
     history.replaceState(null, '', location.pathname);
     return openAlertsSub(sub).catch(e => { toast('深链打开失败: ' + (e.message || e)); return false; });
   }
+  // hash 路由（导航写地址栏的另一半）：#/alerts / #/tasks …白名单 = PAGENAMES 键
+  if (location.hash && /^#\/[a-z]+$/.test(location.hash)) {
+    return applyDeepLinkHash(location.hash);
+  }
   return Promise.resolve(false);
 }
+
+/* hash 路由解析：#/alerts → show('alerts')。命中返回 true；非法 hash 返回 false
+ * （调用方回退到 sessionStorage 恢复）。show() 内部会 replaceState 写回同名 hash。 */
+async function applyDeepLinkHash(h) {
+  const m = /^#\/([a-z]+)$/.exec(h || '');
+  if (m && PAGENAMES[m[1]]) {
+    try { await show(m[1]); return true; }
+    catch (e) { toast('打开页面失败: ' + (e.message || e)); return false; }
+  }
+  return false;
+}
+window.applyDeepLinkHash = applyDeepLinkHash;
 
 /* 初始化 */
 (async () => {
   refreshAdminTokenBtn();        // 🔑 按钮初始视觉：未设置 token → dim（gpm-api.js 的 adminToken 已可用）
   await pollHealth();
-  // 深链（?task=xx&ts=xx）优先级最高；否则恢复上次刷新前的页面（sessionStorage）
-  if (!(await applyDeepLink())) {
+  // 深链（?task=xx&ts=xx）优先级最高；其次显式 hash 路由（#/alerts，用户主动输入的 URL
+  // 应压过 sessionStorage 的「回到上次页面」，否则新标签打开 hash 等于失效）；最后才恢复上次页面。
+  // 注意：show() 会 replaceState 写当前页 hash——恢复路径先清 hash，避免 applyDeepLink 读到它。
+  if (location.hash && /^#\/[a-z]+$/.test(location.hash)) {
+    const _h = location.hash;
+    history.replaceState(null, '', location.pathname);   // 先清，防 show() 写回旧值
+    if (await applyDeepLinkHash(_h)) { /* hash 命中，跳过 sessionStorage */ }
+    else { history.replaceState(null, '', _h); await restoreSavedView(); }
+  } else if (!(await applyDeepLink())) {
+    await restoreSavedView();
+  }
+  setInterval(() => { if (state.page === 'overview') renderOverview().catch(() => { }); }, 30000);
+})();
+
+/* sessionStorage 恢复「上次刷新前的页面」（原初始化内联段抽出） */
+async function restoreSavedView() {
+  {
     let saved = {};
     try {
       saved = {
@@ -266,5 +322,4 @@ function applyDeepLink() {
       await show('overview');
     }
   }
-  setInterval(() => { if (state.page === 'overview') renderOverview().catch(() => { }); }, 30000);
-})();
+}

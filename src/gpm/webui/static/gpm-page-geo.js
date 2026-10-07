@@ -161,7 +161,7 @@ window.gnModal = async () => {
     + '<div class="form-row"><label>纬度</label><input type="text" id="gn-lat" placeholder="留空=按地名解析"></div>'
     + '<div class="form-row"><label>经度</label><input type="text" id="gn-lng" placeholder="留空=按地名解析"></div>'
     + '<div class="m-note gray">位置只写地名即可（内置区表解析坐标，如 上海/cn-east/东京），也可直接给经纬度；匹配按最长前缀优先。</div>'
-    + '<div style="text-align:right;margin-top:16px"><button class="btn ghost" onclick="closeModal()">取消</button>'
+    + '<div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>'
     + '<button class="btn" id="gn-save">保存</button></div>';
   $('#modal-mask').classList.remove('hidden');
   $('#gn-save').onclick = async () => {

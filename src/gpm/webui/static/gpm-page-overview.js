@@ -40,30 +40,57 @@ async function renderOverview() {
       <td><span class="badge ${TYPE_BADGE[t.type]}">${t.type.toUpperCase()}</span></td>
       <td>${on ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-off">停用</span>'}</td>
       <td style="color:var(--muted)">${esc(t.target || (t.urls || [])[0] || '')}</td>
-      <td>${t.interval_seconds}s</td><td class="num">${t.streams}</td><td>${st}</td><td class="num">${av}</td></tr>`);
+      <td>${t.interval_seconds}s</td><td class="num" title="结果流 = 节点×DNS线路×URL 的独立探测序列（同任务多线路/多URL会拆成多条流）">${t.streams}</td><td>${st}</td><td class="num">${av}</td></tr>`);
   }
   const nmap = Object.fromEntries(nodes.map(n => [n.id, n.name]));
-  $('#evt-list').innerHTML = incs.length ? incs.map(e => {
+  // 事件流折叠（UI审查报告 P2：同一「节点 win-local-node·节点侧·已恢复」重复 5+ 次）。
+  // 口径与告警页「折叠相同目标」一致：同 标题+状态 合并计数，展开看每次；上限 8 组。
+  const evtKey = e => ((e.kind || 'probe') === 'node'
+    ? `节点 ${nmap[e.node_id] || e.node_id} · ${e.ended_at ? '已恢复' : '离线'}`
+    : `${taskName(e.task_id)} · ${e.dns || '默认线路'}${e.url ? ' · ' + (e.url.split('/')[2] || e.url) : ''} · ${e.ended_at ? '已恢复' : '探测失败'}`);
+  const evtGroups = [];
+  const gmap = {};
+  incs.forEach(e => {
+    const k = evtKey(e);
+    if (!gmap[k]) { gmap[k] = { key: k, items: [] }; evtGroups.push(gmap[k]); }
+    gmap[k].items.push(e);
+  });
+  const shown = evtGroups.slice(0, 8);
+  $('#evt-list').innerHTML = incs.length ? shown.map(g => {
+    const e = g.items[0];                    // 组内最新一条做主展示
     const open = !e.ended_at;
-    if ((e.kind || 'probe') === 'node') {
-      // 节点侧事件（离线/恢复）：灰色条，不计入目标故障
-      const nm = nmap[e.node_id] || e.node_id;
-      const dur = e.duration_ms ? fmtDur(Math.round(e.duration_ms / 1000)) : '';
-      return `<div class="evt"><div class="bar ${open ? 'fail' : 'nodata'}"></div>
-        <div class="when">${open ? '进行中' : '已恢复'}</div>
-        <div><div class="t1">节点 <b>${esc(nm)}</b> <span class="badge b-off">节点侧</span> ${open ? '离线（心跳超时）' : '已恢复'}</div>
-        <div class="t2">${fmtTS(e.started_at)} 起${dur ? ' · 持续 ' + dur : ''} · 归因：节点侧（不计入目标故障）</div></div></div>`;
+    const cnt = g.items.length > 1 ? ` <span class="badge b-warn">${g.items.length} 次</span>` : '';
+    const row = (ev) => {
+      const o = !ev.ended_at;
+      if ((ev.kind || 'probe') === 'node') {
+        const nm = nmap[ev.node_id] || ev.node_id;
+        const dur = ev.duration_ms ? fmtDur(Math.round(ev.duration_ms / 1000)) : '';
+        return `<div class="evt"><div class="bar ${o ? 'fail' : 'nodata'}"></div>
+          <div class="when">${o ? '进行中' : '已恢复'}</div>
+          <div><div class="t1">节点 <b>${esc(nm)}</b> <span class="badge b-off">节点侧</span> ${o ? '离线（心跳超时）' : '已恢复'}</div>
+          <div class="t2">${fmtTS(ev.started_at)} 起${dur ? ' · 持续 ' + dur : ''} · 归因：节点侧（不计入目标故障）</div></div></div>`;
+      }
+      return `<div class="evt"><div class="bar ${o ? 'fail' : 'warn'}"></div>
+        <div class="when">${o ? '进行中' : '已恢复'}</div>
+        <div><div class="t1">${esc(taskName(ev.task_id))} · ${esc(ev.dns || '默认线路')}${ev.url ? ' · ' + esc(ev.url.split('/')[2] || ev.url) : ''} ${o ? '探测失败' : '已恢复'}</div>
+        <div class="t2">${fmtTS(ev.started_at)} 起 · ${esc((ev.reason || {}).error_class || '')} · 归因：目标/链路侧</div></div></div>`;
+    };
+    if (g.items.length > 1) {
+      const gid = 'ov-eg-' + evtGroups.indexOf(g);
+      return `<div onclick="const d=document.getElementById('${gid}');d.classList.toggle('hidden')" style="cursor:pointer" title="点击展开该目标的每次事件">
+          ${row(e).replace('<div class="evt">', '<div class="evt">').replace('</div></div></div>', cnt + '</div></div></div>')}
+          <div id="${gid}" class="hidden" style="padding-left:14px;border-left:2px solid var(--bd);margin:4px 0 4px 10px">
+            ${g.items.slice(1).map(row).join('')}</div></div>`;
     }
-    return `<div class="evt"><div class="bar ${open ? 'fail' : 'warn'}"></div>
-      <div class="when">${open ? '进行中' : '已恢复'}</div>
-      <div><div class="t1">${esc(taskName(e.task_id))} · ${esc(e.dns || '默认线路')}${e.url ? ' · ' + esc(e.url.split('/')[2] || e.url) : ''} ${open ? '探测失败' : '已恢复'}</div>
-      <div class="t2">${fmtTS(e.started_at)} 起 · ${esc((e.reason || {}).error_class || '')} · 归因：目标/链路侧</div></div></div>`;
-  }).join('') : '<div style="color:var(--faint);padding:14px 0">暂无事件 —— 连续失败达到阈值后在此展示</div>';
+    return row(e);
+  }).join('') + (evtGroups.length > 8
+      ? `<div style="padding:8px 0;color:var(--faint)">还有 ${evtGroups.length - 8} 组事件 —— <a href="javascript:void(0)" onclick="show('alerts');document.querySelector('[data-sub=\\'events\\']').click()" style="color:var(--accent)">查看全部 → 值班告警</a></div>`
+      : '') : '<div style="color:var(--faint);padding:14px 0">暂无事件 —— 连续失败达到阈值后在此展示</div>';
   $('#ov-nodes').innerHTML = nodes.map(n => {
     const on = n.status === 'online';
     return `<div class="node-chip"><i class="dot ${on ? 'g' : 'r'}"></i><b>${esc(n.name)}</b>
       <span>${esc(Object.values(n.tags || {}).join('·') || n.system?.os || '')}</span>
-      ${on ? `<span>${n.cpu != null ? 'CPU ' + n.cpu.toFixed(0) + '%' : 'CPU —'}</span>` : '<span style="color:var(--fail-fg)">离线</span>'}</div>`;
+      ${on ? `<span>${n.cpu != null ? 'CPU ' + n.cpu.toFixed(0) + '%' : '<span title="节点未上报资源（agent 需安装 psutil：pip install psutil 后重启 agent）">CPU —</span>'}</span>` : '<span style="color:var(--fail-fg)">离线</span>'}</div>`;
   }).join('') || '<div style="color:var(--faint)">暂无节点</div>';
 }
 function taskName(tid) { const t = state.tasks.find(x => x.id === tid); return t ? t.name : tid; }
