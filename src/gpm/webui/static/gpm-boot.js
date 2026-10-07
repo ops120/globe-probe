@@ -206,7 +206,9 @@ $('#btn-export').addEventListener('click', () => {
   const to = Math.floor(Date.now() / 1000);
   window.open(`/api/export?task_id=${state.task}&t_from=${to - state.range}&t_to=${to}&fmt=csv`);
 });
-window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+// 兜底（主路径是 gpm-charts.js 的容器级 ResizeObserver——v56 缺陷2 修复）：
+// 切主题等不改变容器尺寸的场景仍靠 window 事件；跨断点跳变的稳定值由 RO 保证。
+window.addEventListener('resize', () => Object.values(charts).forEach(c => { try { c.resize(); } catch (e) { } }));
 setInterval(pollHealth, 10000);
 
 /* ---------- 深链：/index.html?task=<task_id>&ts=<ts> 与 ?sub=<alerts 子页> ----------

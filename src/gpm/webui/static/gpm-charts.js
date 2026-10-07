@@ -12,6 +12,11 @@ function chart(id, option, onClick) {
     charts[id].dispose(); delete charts[id];
   }
   if (!charts[id]) { charts[id] = echarts.init(el); }
+  // 容器级 ResizeObserver（v56 报告 缺陷2）：window resize 时 forEach 顺序首个
+  // 图表可能读到重排过渡宽度且后续无事件 → 永久滞留（1100→1280 实测 instW 132
+  // 不自愈）。RO 只在容器真正变化时回调、拿到稳定值；实例 dispose→init 重建后
+  // observe 目标失效，故每次 init 后都重新 observe（幂等，RO 重复 observe 同元素无害）。
+  observeChartEl(el);
   // 每次都重绑：否则切任务后仍用「首次渲染时捕获的 t/from/to」处理点击
   // （实测：切到 mtr 任务后点色块走的是首个任务 Ping 时的闭包，联动/单次详情都指向旧任务）
   charts[id].off('click');
@@ -66,6 +71,16 @@ function clearCrosshair(ids) {
   });
 }
 
+/* 图表容器尺寸观察（单例 RO；charts 由 gpm-utils 维护，惰性取用避免加载序依赖） */
+const _chartRO = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(entries => {
+  for (const en of entries) {
+    const c = (typeof charts !== 'undefined' ? charts : {})[en.target.id];
+    if (c && en.target.clientWidth) { try { c.resize(); } catch (e) { } }
+  }
+}) : null;
+function observeChartEl(el) { if (_chartRO && el && el.id) { try { _chartRO.observe(el); } catch (e) { } } }
+
 window.connectCharts = connectCharts;
+window.observeChartEl = observeChartEl;
 window.syncCrosshair = syncCrosshair;
 window.clearCrosshair = clearCrosshair;

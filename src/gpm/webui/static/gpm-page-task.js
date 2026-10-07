@@ -4,6 +4,18 @@
  */
 'use strict';
 /* ---------- 任务详情 ---------- */
+/* 图例统一构造（v56 全量测试报告 缺陷1）：scroll 永不折行 + 与绘图区左右对齐。
+ * 根因：默认 plain+水平居中，窄面板（双列断点后 479px）下 3 项 384px 图例左端
+ * 落 52px < grid.x 56 侵入 Y 轴沟槽压住轴名；4+ 项折行而 grid.top:30 只容一行，
+ * 第二行画进绘图区（6 项实测 −33.5px）。right 需 grid.right+20 给翻页箭头留位。 */
+function LEGEND(data, gridLeft = 56, gridRight = 14) {
+  // left = gridLeft + 24：Y 轴名（ms/次/%，位于 grid.x 处 y≈19）与图例带（top:4）
+  // 同层——首项若从 gridLeft 起会在 x/y 双向与轴名重叠（v56 复查实测）。右移 24px
+  // 让首项起点落在轴名右侧；right = gridRight + 20 给 scroll 翻页箭头留位。
+  return { data, type: 'scroll', left: gridLeft + 24, right: gridRight + 20, top: 4, itemGap: 10,
+           textStyle: { color: C('--chart-label'), fontSize: 11 }, itemWidth: 14 };
+}
+window.LEGEND = LEGEND;
 function curTask() { return state.tasks.find(t => t.id === state.task); }
 // 任务分析分 3 个子页（概览/指标/链路）：切换只动 .hidden，不重画图表（chart 在可见时才 needResize）。
 // 解决 10 个面板单页滚屏（第四轮 IA 复核 P0）。
@@ -255,8 +267,8 @@ async function renderRttLoss(t, from, to, noLoss) {
     return html;
   };
   chart('chart-rtt', {
-    grid: { left: 56, right: 14, top: 30, bottom: 52 },
-    legend: { data: legend, textStyle: { color: C('--chart-label'), fontSize: 11 }, itemWidth: 14 },
+    grid: { left: 56, right: 14, top: 34, bottom: 52 },
+    legend: LEGEND(legend),
     tooltip: Object.assign({}, TIP, {
       trigger: 'axis',
       formatter: rttTooltipFormatter,
@@ -268,8 +280,8 @@ async function renderRttLoss(t, from, to, noLoss) {
   }, p => openDetail(t, Math.round(p.value[0] / 1000), p.seriesName));
 
   if (!noLoss) chart('chart-loss', {
-    grid: { left: 50, right: 14, top: 30, bottom: 30 },
-    legend: { data: legend, textStyle: { color: C('--chart-label'), fontSize: 11 }, itemWidth: 14 },
+    grid: { left: 50, right: 14, top: 34, bottom: 30 },
+    legend: LEGEND(legend),
     tooltip: Object.assign({}, TIP, { trigger: 'axis', valueFormatter: v => v + ' %' }),
     xAxis: Object.assign({}, AXC, { type: 'time', axisLabel: Object.assign({}, AXC.axisLabel, { formatter: v => state.range >= 604800 ? fmtMDHM(v / 1000) : fmtHM(v / 1000), hideOverlap: true }) }),
     yAxis: Object.assign({}, SPLIT, { type: 'value', max: 100, name: '%', nameTextStyle: { color: C('--faint') }, axisLabel: AXC.axisLabel }),
@@ -301,7 +313,7 @@ async function renderCodes(t, from, to) {
   const cols = { '2xx': C('--ok'), '3xx': C('--accent-3'), '4xx': C('--warn'), '5xx': C('--fail'), 'other': C('--nodata') };
   chart('chart-code', {
     grid: { left: 40, right: 14, top: 30, bottom: 30 },
-    legend: { data: cls, textStyle: { color: C('--chart-label'), fontSize: 11 }, itemWidth: 14 },
+    legend: LEGEND(cls),
     tooltip: Object.assign({}, TIP, { trigger: 'axis' }),
     xAxis: Object.assign({}, AXC, { type: 'category', data: r.points.map(p => state.range >= 604800 ? fmtMDHM(p.ts) : fmtHM(p.ts)), axisLabel: Object.assign({}, AXC.axisLabel, { interval: Math.max(0, Math.floor(r.points.length / 8) - 1) }) }),
     yAxis: Object.assign({}, SPLIT, { type: 'value', name: '次', nameTextStyle: { color: C('--faint') }, axisLabel: AXC.axisLabel, minInterval: 1 }),  // 计数轴整数刻度（UI审查 P2：0.2/0.4 小数无意义）
@@ -326,8 +338,8 @@ async function renderCurlStage(t, from, to) {
     series.push({ name, type: 'line', showSymbol: false, data: pts, lineStyle: { width: 1.3 }, connectNulls: false });
   }
   chart('chart-stage', {
-    grid: { left: 56, right: 14, top: 30, bottom: 30 },
-    legend: { data: legend, textStyle: { color: C('--chart-label'), fontSize: 11 }, itemWidth: 14 },
+    grid: { left: 56, right: 14, top: 34, bottom: 30 },
+    legend: LEGEND(legend),
     tooltip: Object.assign({}, TIP, {
       trigger: 'axis',
       formatter: ps => {

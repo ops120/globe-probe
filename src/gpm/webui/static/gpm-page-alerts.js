@@ -116,7 +116,7 @@ function renderSlaIncidents(d) {
       + '<td style="color:var(--muted)">' + fmtTS(g.last_ts) + '</td>'
       + '<td class="num">' + fmtDur(g.downtime_seconds) + '</td>'
       + '<td>' + (g.ongoing ? '<span class="badge b-warn">进行中</span>' : '<span class="badge b-ok">已恢复</span>')
-      + ' <span style="color:var(--faint)">' + (g.count > 1 ? '▾' : '') + '</span></td></tr>'
+      + ' <span style="color:var(--muted)">' + (g.count > 1 ? '▾' : '') + '</span></td></tr>'
       + '<tr class="ev-oc hidden" data-g="' + gi + '"><td colspan="6" style="padding:0;background:var(--bg-soft)">'
       + '<table class="tbl" style="margin:0"><thead><tr><th>事件</th><th>URL / 流</th><th>开始</th><th>持续</th><th>原因</th><th>合并</th></tr></thead>'
       + '<tbody>' + occ + '</tbody></table></td></tr>';
@@ -303,7 +303,7 @@ async function renderAlertHistory() {
       + '<td>' + (g.ok ? '<span class="badge b-ok">' + g.ok + '/' + g.channels + '</span>'
         : '<span class="badge b-warn">0/' + g.channels + '</span>') + '</td>'
       + '<td style="color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis" title="'
-      + esc(g.detail || '') + '">' + esc(g.detail || '—') + ' ' + (g.count > 1 ? '<span style="color:var(--faint)">▾</span>' : '') + '</td></tr>'
+      + esc(g.detail || '') + '">' + esc(g.detail || '—') + ' ' + (g.count > 1 ? '<span style="color:var(--muted)">▾</span>' : '') + '</td></tr>'
       + '<tr class="al-oc hidden" data-g="' + gi + '"><td colspan="6" style="padding:0;background:var(--bg-soft)">'
       + '<table class="tbl" style="margin:0"><thead><tr><th>时间</th><th>状态</th><th>标题</th><th>送达</th><th>失败原因</th></tr></thead>'
       + '<tbody>' + occ + '</tbody></table></td></tr>';

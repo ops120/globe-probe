@@ -783,7 +783,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
             <span style="flex:1"></span>
             <button class="btn" id="btn-newtask">＋ 新建任务</button>
           </div>
-          <div class="tbl-scroll" tabindex="0" aria-label="任务列表（可滚动）"><table class="tbl" id="task-mgr-tbl"></table></div>
+          <div class="tbl-scroll" role="region" tabindex="0" aria-label="任务列表（可滚动）"><table class="tbl" id="task-mgr-tbl"></table></div>
         </div>
         <div class="hint">间隔下限：ping / curl / tcp 为 10 秒，dns 为 30 秒，mtr 为 60 秒；curl 目标支持多个 URL；可指定多个 DNS 线路（多线路独立统计）。tcp 目标写 host:port，dns 目标写域名</div>
       </section>
@@ -793,22 +793,22 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=55"></script>
+<script src="/static/echarts.min.js?v=56"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=55"></script>
-<script src="/static/gpm-api.js?v=55"></script>
-<script src="/static/gpm-theme.js?v=55"></script>
-<script src="/static/gpm-charts.js?v=55"></script>
-<script src="/static/gpm-page-overview.js?v=55"></script>
-<script src="/static/gpm-page-task.js?v=55"></script>
-<script src="/static/gpm-page-compare.js?v=55"></script>
-<script src="/static/gpm-page-geo.js?v=55"></script>
-<script src="/static/gpm-page-external.js?v=55"></script>
-<script src="/static/gpm-page-corr.js?v=55"></script>
-<script src="/static/gpm-page-oncall.js?v=55"></script>
-<script src="/static/gpm-page-alerts.js?v=55"></script>
-<script src="/static/gpm-page-nodes.js?v=55"></script>
-<script src="/static/gpm-page-tasks.js?v=55"></script>
-<script src="/static/gpm-boot.js?v=55"></script>
+<script src="/static/gpm-utils.js?v=56"></script>
+<script src="/static/gpm-api.js?v=56"></script>
+<script src="/static/gpm-theme.js?v=56"></script>
+<script src="/static/gpm-charts.js?v=56"></script>
+<script src="/static/gpm-page-overview.js?v=56"></script>
+<script src="/static/gpm-page-task.js?v=56"></script>
+<script src="/static/gpm-page-compare.js?v=56"></script>
+<script src="/static/gpm-page-geo.js?v=56"></script>
+<script src="/static/gpm-page-external.js?v=56"></script>
+<script src="/static/gpm-page-corr.js?v=56"></script>
+<script src="/static/gpm-page-oncall.js?v=56"></script>
+<script src="/static/gpm-page-alerts.js?v=56"></script>
+<script src="/static/gpm-page-nodes.js?v=56"></script>
+<script src="/static/gpm-page-tasks.js?v=56"></script>
+<script src="/static/gpm-boot.js?v=56"></script>
 </body>
 </html>

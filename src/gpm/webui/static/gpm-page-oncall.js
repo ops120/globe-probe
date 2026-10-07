@@ -282,7 +282,7 @@ function oncallCard(g) {
     + (g.runbook ? '<div class="oc-runbook" style="position:relative"><span class="oc-rb-lbl">下一步命令</span>'
         + '<button class="btn sm ghost" style="position:absolute;top:0;right:0" onclick="oncallCopy(this,&quot;'
         + esc(g.runbook).replace(/"/g, '&quot;') + '&quot;)">复制</button>'
-        + '<code tabindex="0" aria-label="下一步命令（横向滚动查看）" style="display:block;white-space:pre;overflow-x:auto;padding-right:64px">' + esc(g.runbook) + '</code></div>' : '')
+        + '<code role="region" tabindex="0" aria-label="下一步命令（横向滚动查看）" style="display:block;white-space:pre;overflow-x:auto;padding-right:64px">' + esc(g.runbook) + '</code></div>' : '')
     // 第三期 14：同期变更（±30 分钟内动过这个任务/节点）——「刚改完就炸」最省时间的线索
     // 第六期 28：已关联的第三方告警作为**旁证**折叠在本地卡里（不再单独占一张卡）
     // 已关联的第三方告警作为**旁证**折叠进本地卡；第三方独立卡本身就是那条告警，
