@@ -74,7 +74,7 @@ async function renderCorr() {
     + '</td></tr>').join('');
   body.innerHTML = cards
     + '<div class="panel"><div class="panel-head">未发现相关关系的零散故障 <span class="sub">只列事实，不硬凑关系</span></div>'
-    + '<table class="tbl" style="margin:0"><thead><tr><th>来源</th><th>故障</th><th>状态</th><th>开始</th><th></th></tr></thead>'
+    + '<table class="tbl" style="margin:0"><thead><tr><th>来源</th><th>故障</th><th>状态</th><th>开始</th><th><span class="sr-only">操作</span></th></tr></thead>'
     + '<tbody>' + (singleRows || '<tr><td colspan="5" style="color:var(--faint)">没有零散故障（全部进了上面的簇）</td></tr>')
     + '</tbody></table></div>'
     + '<div class="sub" style="margin:8px 4px">' + esc(r.note || '') + '</div>';

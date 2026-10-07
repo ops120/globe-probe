@@ -224,7 +224,7 @@ body.light .code-inline{color:var(--fg)}
 .fopt{padding:6px 10px;border-radius:5px;cursor:pointer;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .fopt:hover{background:var(--btn);color:var(--accent-2)}
 .fopt.active{color:var(--accent-2)}
-.fcheck{display:flex;align-items:center;gap:8px}
+.fcheck{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .fcheck input[type=checkbox]{accent-color:var(--accent)}
 .legend-chips{display:inline-flex;gap:10px;align-items:center}
 .legend-chips i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
@@ -325,7 +325,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
         <button class="tgl" id="admin-token-btn" title="设置管理 token（写操作鉴权）">🔑 Token</button>
         <button class="tgl" id="theme-toggle" title="切换白天/夜间主题">☀ 白天</button></div>
     </header>
-    <main class="content" tabindex="0" role="region" aria-label="主要内容区">
+    <main class="content" tabindex="0" aria-label="主要内容区">
 
       <section class="page" id="page-overview">
         <div class="cards">
@@ -786,22 +786,22 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=53"></script>
+<script src="/static/echarts.min.js?v=54"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=53"></script>
-<script src="/static/gpm-api.js?v=53"></script>
-<script src="/static/gpm-theme.js?v=53"></script>
-<script src="/static/gpm-charts.js?v=53"></script>
-<script src="/static/gpm-page-overview.js?v=53"></script>
-<script src="/static/gpm-page-task.js?v=53"></script>
-<script src="/static/gpm-page-compare.js?v=53"></script>
-<script src="/static/gpm-page-geo.js?v=53"></script>
-<script src="/static/gpm-page-external.js?v=53"></script>
-<script src="/static/gpm-page-corr.js?v=53"></script>
-<script src="/static/gpm-page-oncall.js?v=53"></script>
-<script src="/static/gpm-page-alerts.js?v=53"></script>
-<script src="/static/gpm-page-nodes.js?v=53"></script>
-<script src="/static/gpm-page-tasks.js?v=53"></script>
-<script src="/static/gpm-boot.js?v=53"></script>
+<script src="/static/gpm-utils.js?v=54"></script>
+<script src="/static/gpm-api.js?v=54"></script>
+<script src="/static/gpm-theme.js?v=54"></script>
+<script src="/static/gpm-charts.js?v=54"></script>
+<script src="/static/gpm-page-overview.js?v=54"></script>
+<script src="/static/gpm-page-task.js?v=54"></script>
+<script src="/static/gpm-page-compare.js?v=54"></script>
+<script src="/static/gpm-page-geo.js?v=54"></script>
+<script src="/static/gpm-page-external.js?v=54"></script>
+<script src="/static/gpm-page-corr.js?v=54"></script>
+<script src="/static/gpm-page-oncall.js?v=54"></script>
+<script src="/static/gpm-page-alerts.js?v=54"></script>
+<script src="/static/gpm-page-nodes.js?v=54"></script>
+<script src="/static/gpm-page-tasks.js?v=54"></script>
+<script src="/static/gpm-boot.js?v=54"></script>
 </body>
 </html>

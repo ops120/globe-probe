@@ -108,7 +108,7 @@ function taskModal(t, copy = false) {
     <div class="form-row" data-for="tcp"><label>超时(秒)</label><input type="text" id="f-tcp-timeout" value="${p.timeout ?? 5}" placeholder="单次建连超时，默认 5"></div>
     <div class="form-row" data-for="dns"><label>期望 IP</label><input type="text" id="f-expected-ips" value="${esc((p.expected_ips || []).join(', '))}" placeholder="精确 IP 或网段，逗号分隔（如 1.2.3.4, 10.0.0.0/8）"></div>
     <div class="form-row" data-for="dns"><label>期望正则</label><input type="text" id="f-expected-regex" value="${esc(p.expected_regex || '')}" placeholder="对解析答案做 search（可选）"></div>
-    <div class="form-row" data-for="dns"><label></label><span class="sub">多线路对比在下方「DNS 线路」里配置；最小间隔 30s；期望 IP/正则全不命中时任务判失败</span></div>
+    <div class="form-row" data-for="dns"><label></label><span class="sub" style="margin-left:100px">多线路对比在下方「DNS 线路」里配置；最小间隔 30s；期望 IP/正则全不命中时任务判失败</span></div>
     <div class="form-row" data-for="mtr"><label>探测模式</label><select id="f-probe-mode">
       ${[['icmp', 'ICMP（默认）'], ['tcp', 'TCP（-T，需 root）'], ['udp', 'UDP（-u，需 root）']].map(([v, l]) => `<option value="${v}" ${(p.probe_mode || 'icmp') === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
     <div class="form-row" data-for="mtr"><label>AS 号</label>
