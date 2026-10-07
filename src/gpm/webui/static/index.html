@@ -556,6 +556,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           <button data-sub="corr">关联分析</button>
             <button data-sub="notify">通知配置</button>
           <button data-sub="audit">操作审计</button>
+          <button data-sub="ai">AI 分析</button>
         </div>
 
         <div class="subpage" data-subpage="oncall">
@@ -720,6 +721,31 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           </div>
         </div>
 
+        <!-- AI 分析（第 8 子页）：自然语言故障问答。时间解析/事实/关联结论全在
+             服务端代码（aiqa.py 三层纪律），LLM 只改写；降级时结构化结果照给。 -->
+        <div class="subpage hidden" data-subpage="ai">
+          <div class="panel">
+            <div class="panel-head">AI 分析 <span class="sub">问一句「14:00~16:00 有哪些故障，是否有关联」</span></div>
+            <div class="form-row"><label>提问</label>
+              <input type="text" id="ai-q" placeholder="如：昨天 14点到16点 有哪些故障？是否有关联？ / 最近 6 小时 / 10月8日 14:00~16:00"
+                     style="flex:1" aria-label="AI 分析提问">
+              <button class="btn" id="ai-ask">分析</button></div>
+            <div class="form-row"><label>时间</label>
+              <div class="seg" id="ai-quick">
+                <button data-h="1">近1小时</button>
+                <button data-h="6" class="active">近6小时</button>
+                <button data-h="24">近24小时</button>
+                <button data-h="0">仅用问题里的时间</button>
+              </div></div>
+            <div id="ai-status" class="sub" style="padding:4px 0"></div>
+            <div id="ai-answer" style="line-height:1.8;padding:8px 4px;white-space:pre-wrap"></div>
+            <details id="ai-facts-wrap" class="hidden" style="margin-top:8px">
+              <summary style="cursor:pointer;color:var(--muted);font-size:12px">依据（结构化事实，可核对 AI 每一句话）</summary>
+              <div id="ai-facts" style="padding-top:8px"></div>
+            </details>
+          </div>
+        </div>
+
         <!-- 关联分析（第八期）：同时段故障聚合 + 相关关系。口径在服务端（correlation.py），
              前端只呈现：假设带证据计数、措辞「疑似」、CMDB 缺口如实提示。 -->
         <div class="subpage hidden" data-subpage="corr">
@@ -793,22 +819,23 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=56"></script>
+<script src="/static/echarts.min.js?v=57"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=56"></script>
-<script src="/static/gpm-api.js?v=56"></script>
-<script src="/static/gpm-theme.js?v=56"></script>
-<script src="/static/gpm-charts.js?v=56"></script>
-<script src="/static/gpm-page-overview.js?v=56"></script>
-<script src="/static/gpm-page-task.js?v=56"></script>
-<script src="/static/gpm-page-compare.js?v=56"></script>
-<script src="/static/gpm-page-geo.js?v=56"></script>
-<script src="/static/gpm-page-external.js?v=56"></script>
-<script src="/static/gpm-page-corr.js?v=56"></script>
-<script src="/static/gpm-page-oncall.js?v=56"></script>
-<script src="/static/gpm-page-alerts.js?v=56"></script>
-<script src="/static/gpm-page-nodes.js?v=56"></script>
-<script src="/static/gpm-page-tasks.js?v=56"></script>
-<script src="/static/gpm-boot.js?v=56"></script>
+<script src="/static/gpm-utils.js?v=57"></script>
+<script src="/static/gpm-api.js?v=57"></script>
+<script src="/static/gpm-theme.js?v=57"></script>
+<script src="/static/gpm-charts.js?v=57"></script>
+<script src="/static/gpm-page-overview.js?v=57"></script>
+<script src="/static/gpm-page-task.js?v=57"></script>
+<script src="/static/gpm-page-compare.js?v=57"></script>
+<script src="/static/gpm-page-geo.js?v=57"></script>
+<script src="/static/gpm-page-external.js?v=57"></script>
+<script src="/static/gpm-page-aiqa.js?v=57"></script>
+<script src="/static/gpm-page-corr.js?v=57"></script>
+<script src="/static/gpm-page-oncall.js?v=57"></script>
+<script src="/static/gpm-page-alerts.js?v=57"></script>
+<script src="/static/gpm-page-nodes.js?v=57"></script>
+<script src="/static/gpm-page-tasks.js?v=57"></script>
+<script src="/static/gpm-boot.js?v=57"></script>
 </body>
 </html>

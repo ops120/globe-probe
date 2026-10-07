@@ -56,7 +56,18 @@ DEFAULTS = {
         "min_support": 0.5,                # 单假设被判为「可能」的下限
         "weak_support": 0.5,               # 最高支持度低于此 → 依据薄弱
         "disagree_margin": 0.15,            # 最高与次高差距小于此 → 存在分歧
-        "min_confidence": 0.3,              # 置信度下限
+        "min_confidence": 0.3,              # 置信度低于此 → 依据薄弱
+    },
+    # —— AI 分析（第 8 子页）：自然语言问答的时间解析在代码，事实来自
+    # correlation.analyze（确定性），LLM 只做改写（OpenAI chat 兼容网关）。
+    # 缺省关闭；url+key 配齐才启用。环境变量 GPM_AI_URL/GPM_AI_KEY/GPM_AI_MODEL 覆盖。 ——
+    "ai": {
+        "enabled": False,
+        "url": "",                          # 如 https://api.minimax.cn/v1（chat/completions 会自动拼接）
+        "api_key": "",
+        "model": "",
+        "timeout": 30,
+        "max_facts": 60,                    # 送入 LLM 的事实条数上限（防上下文爆炸）
     },
     # —— 事件详情/聚合页（第二期/第四期）——
     "view": {
@@ -171,6 +182,15 @@ class Config:
             self.raw["server"]["admin_token"] = os.environ["GPM_ADMIN_TOKEN"]
         if os.environ.get("GPM_REGISTER_TOKEN"):
             self.raw["agent"]["register_token"] = os.environ["GPM_REGISTER_TOKEN"]
+        # AI 网关（敏感值不落盘；任一 env 提供即视为启用意图，url+model 齐则生效）
+        _ai_env = {k: v for k, v in {
+            "url": os.environ.get("GPM_AI_URL"),
+            "api_key": os.environ.get("GPM_AI_KEY"),
+            "model": os.environ.get("GPM_AI_MODEL"),
+        }.items() if v}
+        if _ai_env:
+            self.raw["ai"].update(_ai_env)
+            self.raw["ai"]["enabled"] = True
 
     @property
     def server(self) -> dict:
@@ -204,6 +224,10 @@ class Config:
     @property
     def view(self) -> dict:
         return self.raw["view"]
+
+    @property
+    def ai(self) -> dict:
+        return self.raw["ai"]
 
     @property
     def alert(self) -> dict:

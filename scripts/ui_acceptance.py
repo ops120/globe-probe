@@ -470,9 +470,12 @@ def main() -> int:
         page.click('nav a[data-page="alerts"]')
         wait_page(page, "alerts")
         page.wait_for_timeout(1500)
-        # 子导航条：七个子 tab（第八期新增「关联分析」），默认落在「值班总览」
-        ck.ok(page.locator("#al-subtabs button[data-sub]").count() == 7,
-              "告警页子导航条有 7 个子 tab（值班总览/报表/事件与告警/第三方告警/关联分析/通知配置/操作审计）")
+        # 子导航条：八个子 tab（第 9 期新增「AI 分析」），默认落在「值班总览」
+        ck.ok(page.locator("#al-subtabs button[data-sub]").count() == 8,
+              "告警页子导航条有 8 个子 tab（值班总览/报表/事件与告警/第三方告警/关联分析/通知配置/操作审计/AI 分析）")
+        # AI 分析子页（第 8 子页）：问答入口在位 + 未配网关时如实降级（不装 AI）
+        ck.ok(page.locator("#ai-q").count() == 1 and page.locator("#ai-ask").count() == 1,
+              "AI 分析子页有问答输入与「分析」按钮（#ai-q/#ai-ask）")
         ck.ok("active" in (page.locator('#al-subtabs button[data-sub="oncall"]')
                            .get_attribute("class") or ""), "默认落在「值班总览」子页")
         # —— 值班总览（两分支：旧后端无 /api/oncall → 优雅降级；新后端 → 卡片或空态）——

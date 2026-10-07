@@ -338,6 +338,7 @@ const SUB_RENDER = {
       guard('巡检推送', renderDigest), guard('重投队列', renderOutbox)]);
   },
   audit:     () => guard('操作审计', renderAudit),
+  ai:        () => guard('AI 分析', renderAiqa),
 };
 
 /* 子页是否已渲染过：首次可见才调用其 render；切回同一页不重复请求。 */

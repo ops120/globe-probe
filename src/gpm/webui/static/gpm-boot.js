@@ -249,7 +249,7 @@ async function openTaskAt(taskId, ts) {
 }
 /* 告警子页深链（?sub=xx）：先 show('alerts') 再模拟点击对应 [data-sub] 按钮——
  * active 态切换、懒渲染/每次现算（oncall/corr）的策略全部复用既有绑定，最稳。 */
-const ALERTS_SUBS = ['oncall', 'report', 'events', 'external', 'corr', 'notify', 'audit'];
+const ALERTS_SUBS = ['oncall', 'report', 'events', 'external', 'corr', 'notify', 'audit', 'ai'];
 async function openAlertsSub(sub) {
   await show('alerts');
   const btn = document.querySelector('[data-sub="' + sub + '"]');

@@ -2217,6 +2217,67 @@ def setup_router(app_state) -> APIRouter:
         t_from_v = int(t_from or (ts - max(1, min(int(hours), 24 * 7)) * 3600))
         return _corr.analyze(s, t_from_v, t_to_v)
 
+    # ---------- AI 分析（第 8 子页）：自然语言故障问答 ----------
+    @router.post("/ai/analyze")
+    def ai_analyze(body: dict):
+        """「XX 到 YY 时间有哪些故障，是否有关联」→ 时间解析(代码) + 事实(代码) + LLM 改写。
+
+        三层纪律见 aiqa.py 模块注释：时间解析不出就明说；事实全来自
+        correlation.analyze（含本地事件+节点侧+外部告警）；LLM 只改写，
+        回答经锚定校验，未锚定整体降级。只读接口（LLM 出站打到配置的网关）。
+        """
+        from . import aiqa
+        q = str(body.get("question") or "").strip()
+        t_from = int(body.get("t_from") or 0)
+        t_to = int(body.get("t_to") or 0)
+        if not q and not (t_from and t_to):
+            return {"ok": False, "reason": "empty",
+                    "hint": "输入问题（如「14:00~16:00 有哪些故障，是否有关联」）或直接用时间选择器"}
+        # 时间：显式参数优先（前端选择器），否则从问句解析；都没有 → 明说，不猜
+        parsed_note = ""
+        if not (t_from and t_to):
+            rng = aiqa.parse_time_range(q)
+            if rng:
+                t_from, t_to = rng
+                parsed_note = "从问句解析"
+            elif q:
+                return {"ok": False, "reason": "time_unparsed", "parsed_note": "",
+                        "hint": "没能从问题里解析出时间段——试试「14:00~16:00」/「昨天 14点到16点」"
+                                "「最近 6 小时」，或用上方时间选择器",
+                        "facts": None}
+        # 事实（确定性；窗口上限沿用 corr 的 7 天红线）
+        from . import correlation as _corr
+        t_to_v = int(t_to or now())
+        t_from_v = int(t_from or (t_to_v - 6 * 3600))
+        if t_to_v - t_from_v > 24 * 7 * 3600:
+            t_from_v = t_to_v - 24 * 7 * 3600
+        corr = _corr.analyze(s, t_from_v, t_to_v)
+        max_facts = int(cfg.ai.get("max_facts") or 60)
+        facts = aiqa.build_facts(corr, max_facts)
+        # LLM 改写（未配置/失败 → 如实降级，事实照给）
+        cfg_ai = cfg.ai
+        if not aiqa.ai_enabled(cfg_ai):
+            return {"ok": True, "degraded": "disabled",
+                    "hint": "AI 摘要未启用（config.ai 的 url/model 未配置或 enabled=false）——"
+                            "以下为结构化结果，数据本身完整",
+                    "parsed_note": parsed_note, "t_from": t_from_v, "t_to": t_to_v,
+                    "facts": facts, "answer": ""}
+        try:
+            answer = aiqa.call_llm(q, facts, cfg_ai)
+        except Exception as e:  # noqa: BLE001 - 网关任何故障都降级，不装 AI
+            return {"ok": True, "degraded": "error",
+                    "hint": f"AI 摘要不可用（{e}）——以下为结构化结果",
+                    "parsed_note": parsed_note, "t_from": t_from_v, "t_to": t_to_v,
+                    "facts": facts, "answer": ""}
+        unknown = aiqa.anchor_check(answer, facts)
+        if unknown:
+            return {"ok": True, "degraded": "unanchored",
+                    "hint": f"AI 回答含事实里不存在的表述（{unknown[:3]}…），已降级为结构化结果",
+                    "parsed_note": parsed_note, "t_from": t_from_v, "t_to": t_to_v,
+                    "facts": facts, "answer": answer, "unanchored": unknown}
+        return {"ok": True, "degraded": None, "parsed_note": parsed_note,
+                "t_from": t_from_v, "t_to": t_to_v, "facts": facts, "answer": answer}
+
     # ---------- 通知深链前缀（第三期 11/12）----------
     @router.get("/settings/public-url")
     def public_url_get():
