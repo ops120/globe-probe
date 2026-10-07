@@ -101,6 +101,13 @@ table.tbl{width:100%;border-collapse:collapse}
  * 与背景一起稀释（.55 实测 2.34:1），数学上不可能达标。已删除；操作列保持常态对比。 */
 .tbl td.ops{white-space:nowrap}
 .tbl td{padding:9px 10px;border-bottom:1px solid var(--bd-soft);white-space:nowrap;font-variant-numeric:tabular-nums;max-width:340px;overflow:hidden;text-overflow:ellipsis}
+/* 留白与行高两难（v54 报告§四）：表格 flex:1 → 行高虚胖（76px，已否决）；
+   不拉伸 → 页底空洞 39%。折中方案：panel 吃满高度，表格放进滚动容器——
+   行高保持内容驱动（41px），行多时表格内部滚动，行少时空白收在表格容器内
+   （视觉上是「表格区域」而非「页面半屏空白」，密度感显著不同）。 */
+.panel>.tbl-scroll{flex:1;overflow:auto;min-height:200px}
+.panel>.tbl-scroll>.tbl{margin:0}
+
 /* P1 长内容截断（UI全面验证报告）：65 字符任务名曾把表格撑到 1933px（容器 784px）。 */
 .tbl tr:last-child td{border-bottom:none}
 .tbl tr:hover td{background:var(--row-hover)}
@@ -776,7 +783,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
             <span style="flex:1"></span>
             <button class="btn" id="btn-newtask">＋ 新建任务</button>
           </div>
-          <table class="tbl" id="task-mgr-tbl"></table>
+          <div class="tbl-scroll" tabindex="0" aria-label="任务列表（可滚动）"><table class="tbl" id="task-mgr-tbl"></table></div>
         </div>
         <div class="hint">间隔下限：ping / curl / tcp 为 10 秒，dns 为 30 秒，mtr 为 60 秒；curl 目标支持多个 URL；可指定多个 DNS 线路（多线路独立统计）。tcp 目标写 host:port，dns 目标写域名</div>
       </section>
@@ -786,22 +793,22 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=54"></script>
+<script src="/static/echarts.min.js?v=55"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=54"></script>
-<script src="/static/gpm-api.js?v=54"></script>
-<script src="/static/gpm-theme.js?v=54"></script>
-<script src="/static/gpm-charts.js?v=54"></script>
-<script src="/static/gpm-page-overview.js?v=54"></script>
-<script src="/static/gpm-page-task.js?v=54"></script>
-<script src="/static/gpm-page-compare.js?v=54"></script>
-<script src="/static/gpm-page-geo.js?v=54"></script>
-<script src="/static/gpm-page-external.js?v=54"></script>
-<script src="/static/gpm-page-corr.js?v=54"></script>
-<script src="/static/gpm-page-oncall.js?v=54"></script>
-<script src="/static/gpm-page-alerts.js?v=54"></script>
-<script src="/static/gpm-page-nodes.js?v=54"></script>
-<script src="/static/gpm-page-tasks.js?v=54"></script>
-<script src="/static/gpm-boot.js?v=54"></script>
+<script src="/static/gpm-utils.js?v=55"></script>
+<script src="/static/gpm-api.js?v=55"></script>
+<script src="/static/gpm-theme.js?v=55"></script>
+<script src="/static/gpm-charts.js?v=55"></script>
+<script src="/static/gpm-page-overview.js?v=55"></script>
+<script src="/static/gpm-page-task.js?v=55"></script>
+<script src="/static/gpm-page-compare.js?v=55"></script>
+<script src="/static/gpm-page-geo.js?v=55"></script>
+<script src="/static/gpm-page-external.js?v=55"></script>
+<script src="/static/gpm-page-corr.js?v=55"></script>
+<script src="/static/gpm-page-oncall.js?v=55"></script>
+<script src="/static/gpm-page-alerts.js?v=55"></script>
+<script src="/static/gpm-page-nodes.js?v=55"></script>
+<script src="/static/gpm-page-tasks.js?v=55"></script>
+<script src="/static/gpm-boot.js?v=55"></script>
 </body>
 </html>

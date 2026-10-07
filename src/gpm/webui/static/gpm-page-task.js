@@ -118,7 +118,9 @@ function filterSelect(mountId, label, options, current, onPick, hint) {
   const wrap = document.createElement('div');
   wrap.className = 'fsel';
   // 注意必须写 type="text"：CSS 用的是 input[type=text]，缺省时浏览器会用原生白底样式（很难看）
-  wrap.innerHTML = `<input type="text" readonly value="${esc(cur ? cur.label : '全部')}" title="${esc(label)}：点击选择/搜索" aria-label="${esc(label)}筛选，点击选择" role="button" tabindex="0">
+  // v54 复核：role="button" 用在 <input> 上是非法 ARIA 组合（aria-allowed-role minor×3，
+  // 报告对照实验证明去掉后全站 axe 归零）。aria-label 已提供可访问名称，tabindex 保键盘可达。
+  wrap.innerHTML = `<input type="text" readonly value="${esc(cur ? cur.label : '全部')}" title="${esc(label)}：点击选择/搜索" aria-label="${esc(label)}筛选，点击选择" tabindex="0">
     <div class="fdrop hidden"><input type="text" placeholder="搜索${esc(label)}…" aria-label="搜索${esc(label)}"><div class="fopts"></div></div>`;
   el.appendChild(wrap);
   const btn = wrap.querySelector('input'), drop = wrap.querySelector('.fdrop'),
