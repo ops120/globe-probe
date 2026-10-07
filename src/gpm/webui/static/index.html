@@ -33,7 +33,7 @@ body.light{
   --accent:#2f6fd0; --accent-2:#2757a8; --accent-3:#0b83b0; --accent-4:#6347bd; --nav-active:#2757a8;
   --accent-bg:#e4edfb; --accent-bd:#bcd2f2; --btn:#e4edfb; --btn-hover:#d3e2fa;
   --ok:#1f8a53; --ok-fg:#156a3f; --fail:#d13b40; --fail-fg:#a52420;
-  --warn:#b26a00; --warn-fg:#7a5100; --mono:#1f7a45; --b-mtr-fg:#5a3fb0; --nodata:#6a7480;
+  --warn:#b26a00; --warn-fg:#6b4a00; --mono:#1f7a45; --b-mtr-fg:#5a3fb0; --nodata:#6a7480;
   --row-hover:#f6f8fb; --toast-bg:#2c323b; --note-fg:#245a9e;
   --toast-fg:#ffffff; --toast-bd:rgba(255,255,255,.2);
   --toast-ok-bg:#1f6b48; --toast-err-bg:#8c3134; --toast-info-bg:#2c323b;
@@ -66,7 +66,7 @@ h1.crumb{margin:0;font-size:14px;font-weight:600;display:inline}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
 .dot.g{background:var(--ok);box-shadow:0 0 6px rgba(48,163,107,.8)}
 .dot.r{background:var(--fail)}
-main.content{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column}
+main.content{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;max-width:1440px;margin:0 auto;width:100%}
 /* 页面级撑满（UI复验 v8 遗留①）：消除底部大片留白。要点：
  * .page 纵向 flex；其内 .panel 弹性伸展，表格容器 100% 高（表行随内容，余白留在表格底部属正常表格语义，
  * 而不是页面下半屏空白）。带 .subpage 的页只对可见子页生效。hint 类尾行保持原高。 */
@@ -74,7 +74,8 @@ main.content{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-directio
 .page>.panel{flex:1 1 auto;display:flex;flex-direction:column}
 .page>.subpage:not(.hidden){flex:1;display:flex;flex-direction:column}
 .page>.subpage:not(.hidden)>.panel{flex:1 1 auto;display:flex;flex-direction:column}
-.page>.panel>.tbl,.page>.subpage:not(.hidden)>.panel .tbl{flex:1}
+/* UI全面验证报告 P1：.tbl flex:1 会把剩余高度均分行内（7 行 76px/1 行 508px 空洞）。
+   表格高度回归内容驱动（约 30-36px 行高）；面板底部留白交给页面背景。 */
 /* 尾部提示行不拉伸（保持原高） */
 .page>.hint,.page>.cards,.page>.subpage:not(.hidden)>.hint{flex:0 0 auto}
 .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
@@ -96,9 +97,11 @@ main.content{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-directio
 table.tbl{width:100%;border-collapse:collapse}
 .tbl th{text-align:left;color:var(--muted);font-size:12px;padding:8px 10px;border-bottom:1px solid var(--bd);font-weight:500;white-space:nowrap}
 /* 操作列默认淡出、行 hover 显现（触屏/键盘可达性不受影响——opacity 变化不移除焦点） */
-.tbl td.ops{opacity:.55;transition:opacity .12s;white-space:nowrap}
-.tbl tr:hover td.ops,.tbl tr:focus-within td.ops{opacity:1}
-.tbl td{padding:9px 10px;border-bottom:1px solid var(--bd-soft);white-space:nowrap;font-variant-numeric:tabular-nums}
+/* UI全面验证报告 P0：操作列曾用 opacity 淡出（.25/.55 两版）——元素级透明会把前景
+ * 与背景一起稀释（.55 实测 2.34:1），数学上不可能达标。已删除；操作列保持常态对比。 */
+.tbl td.ops{white-space:nowrap}
+.tbl td{padding:9px 10px;border-bottom:1px solid var(--bd-soft);white-space:nowrap;font-variant-numeric:tabular-nums;max-width:340px;overflow:hidden;text-overflow:ellipsis}
+/* P1 长内容截断（UI全面验证报告）：65 字符任务名曾把表格撑到 1933px（容器 784px）。 */
 .tbl tr:last-child td{border-bottom:none}
 .tbl tr:hover td{background:var(--row-hover)}
 .badge{display:inline-block;padding:1px 9px;border-radius:10px;font-size:12px;line-height:18px}
@@ -109,7 +112,8 @@ table.tbl{width:100%;border-collapse:collapse}
 .b-dns{background:rgba(245,165,36,.16);color:var(--warn-fg)}
 .b-ok{background:rgba(48,163,107,.20);color:var(--ok-fg)}
 .b-fail{background:rgba(229,72,77,.22);color:var(--fail-fg)}
-.b-off{background:rgba(138,145,156,.22);color:var(--muted)}
+.b-off{background:rgba(138,145,156,.22);color:#4d5560}
+body:not(.light) .b-off{color:#a0a7b2}
 .b-warn{background:rgba(245,165,36,.20);color:var(--warn-fg)}
 .seg{display:inline-flex;background:var(--input-bg);border:1px solid var(--input-bd);border-radius:6px;overflow:hidden}
 .seg button{background:none;border:none;color:var(--muted);font-size:12px;padding:5px 12px;cursor:pointer;font-family:inherit}
@@ -117,6 +121,8 @@ table.tbl{width:100%;border-collapse:collapse}
 .btn{background:var(--btn);color:var(--accent-2);border:none;border-radius:6px;padding:6px 14px;font-size:12px;cursor:pointer;font-family:inherit}
 .btn:hover{background:var(--btn-hover)}
 .btn.ghost{background:var(--bg-4);color:var(--nav)}
+.btn.ghost:hover{background:var(--bd)}
+.btn.danger:hover{background:rgba(229,72,77,.24)}
 .btn.danger{background:rgba(229,72,77,.12);color:var(--fail-fg)}
 .btn.sm{padding:3px 10px;font-size:12px;border-radius:5px}
 /* 告警与报表二级子导航（值班总览/报表/事件与告警/通知配置/操作审计）：双主题全走 CSS 变量 */
@@ -235,7 +241,9 @@ body.light .code-inline{color:var(--fg)}
 .prog{width:70px;height:5px;background:var(--bg-4);border-radius:3px;display:inline-block;vertical-align:middle;margin-right:6px;overflow:hidden}
 .prog i{display:block;height:100%;border-radius:3px}
 .modal-mask{position:fixed;inset:0;background:var(--mask);display:flex;align-items:center;justify-content:center;z-index:50}
-.modal{background:var(--panel);border:1px solid var(--bd-2);border-radius:10px;width:640px;max-width:94vw;max-height:86vh;overflow:auto;padding:18px 22px;box-shadow:0 12px 40px var(--shadow)}
+.modal{background:var(--panel);border:1px solid var(--bd-2);border-radius:10px;width:min(880px,94vw);max-height:86vh;overflow:auto;padding:18px 22px;box-shadow:0 12px 40px var(--shadow)}
+/* P1-5（UI全面验证报告）：640 单列装不下 5 类任务参数（curl 1144px 需滚 492px）。
+   加宽到 880 + JS 侧两列栅格 + 说明/节点分配折叠（gpm-page-tasks.js）。 */
 /* 模态底部操作行吸底（UI审查报告 P0-1）：1366×768 打开新建任务弹窗时内容总高 813px
  * 超出视口，「取消/创建」被推出视口须先滚模态才能提交。sticky 在 .modal 的
  * overflow:auto 滚动容器内生效，任意分辨率按钮恒贴可视底部。负 margin 抵消
@@ -244,8 +252,16 @@ body.light .code-inline{color:var(--fg)}
         background:var(--panel);border-top:1px solid var(--bd);text-align:right}
 .m-title{font-size:15px;font-weight:600;color:var(--fg-strong);margin-bottom:4px}
 .m-sub{font-size:12px;color:var(--muted);margin-bottom:14px;word-break:break-all}
-.m-close{float:right;color:var(--faint);cursor:pointer;font-size:16px;line-height:1;padding:2px 6px}
+/* P2 禁用态（UI全面验证报告）：编辑任务弹窗的类型下拉 disabled 后与可用无异 */
+select:disabled,input:disabled,textarea:disabled,.btn:disabled{opacity:.55;cursor:not-allowed}
+
+.m-close{position:sticky;top:0;float:right;color:var(--faint);cursor:pointer;font-size:16px;line-height:1;padding:2px 6px;background:var(--panel);z-index:2}
+/* P1-3（UI全面验证报告）：✕ 原 float 非吸顶，长弹窗滚到底后滚出视口(top −419) */
 .m-close:hover{color:var(--fg)}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* P1 焦点指示（UI全面验证报告）：全站输入类曾 outline:none 且无替代，键盘零提示 */
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg)}
 .pk-row{display:flex;justify-content:space-between;gap:14px;padding:7px 10px;border-bottom:1px solid var(--bd-soft);font-size:12px}
 .pk-row:last-child{border-bottom:none}
 .pk-row .mono{font-family:Consolas,monospace;color:var(--mono);text-align:right;word-break:break-all}
@@ -254,6 +270,11 @@ body.light .code-inline{color:var(--fg)}
 .wf-track{flex:1;height:14px;background:var(--input-bg);border-radius:3px;overflow:hidden}
 .wf-bar{height:100%;border-radius:3px}
 .wf-val{width:64px;text-align:right;font-size:12px;color:var(--muted);flex-shrink:0;font-variant-numeric:tabular-nums}
+.m-cols{display:grid;grid-template-columns:1fr 1fr;column-gap:18px}
+.m-cols .form-row{grid-column:span 1}
+.m-cols .form-row[data-full]{grid-column:1 / -1}
+.m-cols .form-row span.sub{grid-column:2}
+@media(max-width:900px){.m-cols{grid-template-columns:1fr}}
 .m-note{background:var(--accent-bg);border:1px solid var(--accent-bd);color:var(--note-fg);border-radius:6px;padding:9px 12px;font-size:12px;margin-top:12px;line-height:1.7}
 .m-note.gray{background:var(--bg-3);border-color:var(--input-bd);color:var(--muted)}
 /* wrap（UI审查报告 P0-1b）：跨行说明 span 用 flex-basis:100% 换行，但没有 wrap 时
@@ -279,17 +300,17 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
     <!-- 一级菜单分三组（监控/分析/配置），data-page 不动 = 路由零改动；         只是把视觉分组显式化，避免 7 项混用「对象域/视图/场景」三种分类轴（第四轮 IA 复核 P1）。-->
     <nav>
       <div class="nav-group"><div class="nav-group-title">监控</div>
-        <a data-page="overview" class="active">▓ 概览</a>
-        <a data-page="alerts">🔔 值班告警</a>
-        <a data-page="geo">🌍 全球地图</a>
+        <a data-page="overview" href="#/overview" class="active">▓ 概览</a>
+        <a data-page="alerts" href="#/alerts">🔔 值班告警</a>
+        <a data-page="geo" href="#/geo">🌍 全球地图</a>
       </div>
       <div class="nav-group"><div class="nav-group-title">分析</div>
-        <a data-page="task">📈 任务分析</a>
-        <a data-page="compare">⇄ 历史对比</a>
+        <a data-page="task" href="#/task">📈 任务分析</a>
+        <a data-page="compare" href="#/compare">⇄ 历史对比</a>
       </div>
       <div class="nav-group"><div class="nav-group-title">配置</div>
-        <a data-page="tasks">≡ 任务管理</a>
-        <a data-page="nodes">◈ 节点管理</a>
+        <a data-page="tasks" href="#/tasks">≡ 任务管理</a>
+        <a data-page="nodes" href="#/nodes">◈ 节点管理</a>
       </div>
     </nav>
     <div class="sidebar-footer" id="sb-foot">gpm v0.1.0<br>
@@ -304,7 +325,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
         <button class="tgl" id="admin-token-btn" title="设置管理 token（写操作鉴权）">🔑 Token</button>
         <button class="tgl" id="theme-toggle" title="切换白天/夜间主题">☀ 白天</button></div>
     </header>
-    <main class="content">
+    <main class="content" tabindex="0" role="region" aria-label="主要内容区">
 
       <section class="page" id="page-overview">
         <div class="cards">
@@ -361,7 +382,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
         <div class="subpage" data-tsubpage="overview">
         <div class="panel">
           <div class="panel-head" style="margin-bottom:0">
-<select id="task-select"></select>
+<select id="task-select" aria-label="选择任务"></select>
             <span class="sub" id="task-meta"></span>
             <span style="flex:1"></span>
             <div class="seg" id="task-range">
@@ -466,7 +487,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
       <section class="page hidden" id="page-compare">
         <div class="panel">
           <div class="panel-head">
-            <select id="cmp-task"></select>
+            <select id="cmp-task" aria-label="选择对比任务"></select>
             <span style="flex:1"></span>
             <div class="seg" id="cmp-metric">
               <button data-k="rtt" class="active">延迟</button>
@@ -618,7 +639,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
           <div class="panel">
             <div class="panel-head">第三方告警 <span class="sub">未关联到本地事件的会单独进值班总览</span>
               <span style="flex:1"></span>
-              <select id="ext-filter" style="max-width:160px"></select>
+              <select id="ext-filter" aria-label="按来源筛选" style="max-width:160px"><option value="">全部来源</option></select>
               <button class="btn sm ghost" id="ext-refresh">刷新</button>
               <button class="btn sm ghost" id="ext-export">导出 CSV</button></div>
             <table class="tbl" id="ext-tbl"></table>
@@ -657,7 +678,7 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
             <div class="panel-head">巡检报告推送 <span class="sub" id="dg-sub"></span>
               <span style="flex:1"></span>
               <label class="fcheck" style="margin-right:10px"><input type="checkbox" id="dg-enable"> <span>启用定时推送</span></label>
-              <select id="dg-hours" style="max-width:120px">
+              <select id="dg-hours" aria-label="巡检推送间隔" style="max-width:120px">
                 <option value="1">每 1 小时</option><option value="6">每 6 小时</option>
                 <option value="12">每 12 小时</option><option value="24">每天</option>
                 <option value="168">每周</option>
@@ -765,22 +786,22 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=52"></script>
+<script src="/static/echarts.min.js?v=53"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=52"></script>
-<script src="/static/gpm-api.js?v=52"></script>
-<script src="/static/gpm-theme.js?v=52"></script>
-<script src="/static/gpm-charts.js?v=52"></script>
-<script src="/static/gpm-page-overview.js?v=52"></script>
-<script src="/static/gpm-page-task.js?v=52"></script>
-<script src="/static/gpm-page-compare.js?v=52"></script>
-<script src="/static/gpm-page-geo.js?v=52"></script>
-<script src="/static/gpm-page-external.js?v=52"></script>
-<script src="/static/gpm-page-corr.js?v=52"></script>
-<script src="/static/gpm-page-oncall.js?v=52"></script>
-<script src="/static/gpm-page-alerts.js?v=52"></script>
-<script src="/static/gpm-page-nodes.js?v=52"></script>
-<script src="/static/gpm-page-tasks.js?v=52"></script>
-<script src="/static/gpm-boot.js?v=52"></script>
+<script src="/static/gpm-utils.js?v=53"></script>
+<script src="/static/gpm-api.js?v=53"></script>
+<script src="/static/gpm-theme.js?v=53"></script>
+<script src="/static/gpm-charts.js?v=53"></script>
+<script src="/static/gpm-page-overview.js?v=53"></script>
+<script src="/static/gpm-page-task.js?v=53"></script>
+<script src="/static/gpm-page-compare.js?v=53"></script>
+<script src="/static/gpm-page-geo.js?v=53"></script>
+<script src="/static/gpm-page-external.js?v=53"></script>
+<script src="/static/gpm-page-corr.js?v=53"></script>
+<script src="/static/gpm-page-oncall.js?v=53"></script>
+<script src="/static/gpm-page-alerts.js?v=53"></script>
+<script src="/static/gpm-page-nodes.js?v=53"></script>
+<script src="/static/gpm-page-tasks.js?v=53"></script>
+<script src="/static/gpm-boot.js?v=53"></script>
 </body>
 </html>

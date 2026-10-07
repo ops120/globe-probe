@@ -16,19 +16,19 @@
 
 /* ---------- 二级子导航 ---------- */
 state.alertsSub = 'oncall';          // 默认落在「值班总览」（与 index.html 初始 class 一致）
+/* UI全面验证报告 P2：渲染副作用原挂在按钮 onclick 里，直调 showAlertsSub 会得到
+ * 「已切页但内容空白」的假象（goBackToPrev 这类程序调用正是受害者，只因先前渲染过
+ * 才没暴露）。渲染语义收进函数内，onclick 只负责调用。 */
 function showAlertsSub(key) {
   state.alertsSub = key;
   $$('#al-subtabs button').forEach(b => b.classList.toggle('active', b.dataset.sub === key));
   $$('#page-alerts .subpage').forEach(p => p.classList.toggle('hidden', p.dataset.subpage !== key));
+  if (key === 'oncall') { renderOncall(!state.oncallUnsupported); return; }
+  if (key === 'corr') { rerender('关联分析', renderCorr); return; }
+  if (window.renderAlertsSub) window.renderAlertsSub(key);   // 其它子页首次可见才渲染（lazy）
 }
 $$('#al-subtabs button').forEach(b => b.onclick = () => {
   showAlertsSub(b.dataset.sub);
-  // 值班视图是「现在进行时」，每次点开都刷新；服务端不支持时不再重复请求（只重画降级说明）
-  if (b.dataset.sub === 'oncall') { renderOncall(!state.oncallUnsupported); return; }
-  // 关联分析同样每次点开都现算（窗口是相对 now 的，缓存反而误导）
-  if (b.dataset.sub === 'corr') { rerender('关联分析', renderCorr); return; }
-  // 其它子页：首次可见才渲染（lazy，见 gpm-page-alerts.js 的 renderAlertsSub）
-  if (window.renderAlertsSub) window.renderAlertsSub(b.dataset.sub);
 });
 $('#oncall-refresh').addEventListener('click', () => renderOncall(true));
 

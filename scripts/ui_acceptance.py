@@ -184,8 +184,14 @@ def main() -> int:
         channel = os.environ.get("GPM_UI_CHANNEL", "chrome") or None
         browser = p.chromium.launch(channel=channel, headless=not args.headed)
         # 固定深色偏好，保证截图与断言稳定（应用默认夜间）
-        page = browser.new_page(viewport={"width": 1600, "height": 1000}, locale="zh-CN",
-                                color_scheme="dark")
+        # 禁 HTTP 缓存（静态资源 ?v= 版本号之外，index.html 自身也可能被缓存——
+        # 门禁断言跑在旧 CSS 上会假失败，实测 b-off 修复被旧缓存吃掉一轮）
+        ctx = browser.new_context(viewport={"width": 1600, "height": 1000}, locale="zh-CN",
+                                  color_scheme="dark",
+                                  bypass_csp=True, java_script_enabled=True)
+        ctx.route("**/*", lambda route: route.continue_(headers={
+            **route.request.headers, "Cache-Control": "no-cache"}))
+        page = ctx.new_page()
         page.on("console", lambda m: console_errors.append(f"{m.type}: {m.text}")
                 if m.type == "error" else None)
         # 带上堆栈：页面级 SyntaxError（"Invalid or unexpected token"）光看消息无法定位，
@@ -1531,6 +1537,70 @@ def main() -> int:
                   f"操作审计最近条目含「启用任务」「停用任务」中文动作（{acts[:6]}）")
             ck.ok(any(dis["name"] in a["detail"] for a in aud[:10]),
                   f"审计详情含被启停的任务名（{dis['name']}）")
+
+        # ---- 可访问性与键盘门禁（UI全面验证报告的方法论产出）----
+        # P0 对比度连续两轮漏检的根因：门禁只跑概览页——概览页没有操作列按钮，天然是绿的。
+        # 扩到 5 个页面 + 三项 axe 覆盖不到的键盘/焦点/弹窗检查。
+        print("→ 可访问性与键盘门禁（5 页 × 对比度抽查 + 键盘/焦点/弹窗）")
+        for pg in ("overview", "tasks", "nodes", "alerts", "compare"):
+            page.click(f'nav a[data-page="{pg}"]')
+            page.wait_for_timeout(900)
+            bad = page.evaluate("""() => {
+                const px = c => { const m = (c||'').match(/[\\d.]+/g); return m ? m.map(Number) : null; };
+                const lum = c => { const m = px(c); if (!m || m.length < 3) return null;
+                    const f = v => { v/=255; return v<=.03928 ? v/12.92 : Math.pow((v+.055)/1.055,2.4); };
+                    return .2126*f(m[0])+.7152*f(m[1])+.0722*f(m[2]); };
+                const ratio = (fg, bg) => { const a=lum(fg), b=lum(bg); if (a==null||b==null) return null;
+                    return (Math.max(a,b)+.05)/(Math.min(a,b)+.05); };
+                const blend = (fg, al, bg) => { const f=px(fg), b=px(bg);
+                    return 'rgb('+f.slice(0,3).map((v,i)=>Math.round(v*al+b[i]*(1-al))).join(',')+')'; };
+                const bodyBg = getComputedStyle(document.body).backgroundColor;
+                // 抽查该页全部可见按钮/徽标的前景背景对比（rgba 合成近似）
+                const out = [];
+                document.querySelectorAll('.page:not(.hidden) .btn, .page:not(.hidden) .badge').forEach(el => {
+                    const cs = getComputedStyle(el);
+                    if (cs.opacity !== '1') { out.push({t:'opacity', txt:(el.textContent||'').trim().slice(0,8)}); return; }
+                    let bg = cs.backgroundColor;
+                    if (bg === 'rgba(0, 0, 0, 0)') bg = bodyBg;
+                    const m = (bg||'').match(/rgba\\((\\d+), (\\d+), (\\d+), ([\\d.]+)\\)/);
+                    if (m && parseFloat(m[4]) < 1) bg = blend(bg, parseFloat(m[4]), bodyBg);
+                    const r = ratio(cs.color, bg);
+                    if (r != null && r < 4.5 && cs.visibility !== 'hidden')
+                        out.push({t:'contrast', txt:(el.textContent||'').trim().slice(0,8), r:+r.toFixed(2)});
+                });
+                return out.slice(0, 5);
+            }""")
+            ck.ok(not bad, f"{pg} 页按钮/徽标对比度抽查 ≥4.5（违例 {bad if bad else '无'}）")
+        # 键盘：tab 序覆盖 7 个导航项
+        page.click('nav a[data-page="overview"]')
+        page.wait_for_timeout(600)
+        navs = []
+        for _ in range(16):
+            page.keyboard.press("Tab")
+            dp = page.evaluate("(document.activeElement||{}).getAttribute && document.activeElement.getAttribute('data-page')")
+            if dp:
+                navs.append(dp)
+        ck.ok(len(set(navs)) >= 7, f"键盘 tab 序覆盖全部 7 个导航项（实测 {sorted(set(navs))}）")
+        # 焦点：输入框 focus 后有可见指示
+        page.click('nav a[data-page="tasks"]')
+        page.wait_for_timeout(800)
+        page.click("#btn-newtask")
+        wait_modal(page)
+        page.focus("#f-name")
+        ring = page.evaluate("""() => { const cs = getComputedStyle(document.getElementById('f-name'));
+            return cs.boxShadow !== 'none' || (cs.outlineStyle !== 'none' && cs.outlineWidth !== '0px'); }""")
+        ck.ok(ring, "表单控件 focus 后有可见焦点指示（box-shadow/outline）")
+        # 弹窗：Esc 可关闭
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+        ck.ok(page.evaluate("document.getElementById('modal-mask').classList.contains('hidden')"),
+              "Esc 关闭弹窗")
+        # 弹窗滚动：新建任务（ping 类型）在 1280×760 视口免滚动（两列栅格 + 折叠后）
+        page.click("#btn-newtask")
+        wait_modal(page)
+        need = page.evaluate("() => { const m = document.querySelector('.modal'); return m.scrollHeight - m.clientHeight; }")
+        ck.ok(need <= 40, f"新建任务弹窗（ping）基本免滚动（超出 {need}px ≤40 容忍线）")
+        page.evaluate("(0,eval)('closeModal()')")
 
         # ---- 收尾：任务配置漂移检测 + 还原（验收必须非破坏性）----
         drift = page.evaluate("""async (snapshot) => {

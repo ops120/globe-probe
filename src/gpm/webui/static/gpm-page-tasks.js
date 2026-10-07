@@ -84,6 +84,8 @@ function taskModal(t, copy = false) {
       ${Object.keys(TYPE_LABEL).map(k => `<option value="${k}" ${type === k ? 'selected' : ''}>${TYPE_LABEL[k]}</option>`).join('')}</select></div>
     <div class="form-row"><label>任务名</label><input type="text" id="f-name" value="${esc(t?.name || '')}" placeholder="如 ping-core-gateway"></div>
     <div class="form-row"><label>目标</label><input type="text" id="f-target" value="${esc(t?.target || '')}" placeholder="${esc(TARGET_HINT[type])}"></div>
+    <div class="m-cols">
+    <!-- 两列栅格（UI全面验证报告 P1-5）：类型专属参数成对排布，弹窗 880 宽下免滚动 -->
     <div class="form-row" data-for="curl"><label>URL 列表</label><textarea id="f-urls" rows="2" placeholder="curl 任务：每行一个 URL（可多个）">${esc((t?.urls || []).join('\n'))}</textarea></div>
     <div class="form-row" data-for="curl"><label>Method</label><select id="f-method">
       ${['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'].map(m => `<option ${(p.method || 'GET') === m ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
@@ -112,19 +114,27 @@ function taskModal(t, copy = false) {
     <div class="form-row" data-for="mtr"><label>AS 号</label>
       <label class="fcheck"><input type="checkbox" id="f-show-asn" ${p.show_asn ? 'checked' : ''}> <span>逐跳解析 AS 号（-z）</span></label></div>
     <div class="form-row"><label>间隔(秒)</label><input type="text" id="f-interval" value="${t?.interval_seconds || (type === 'dns' ? 30 : 10)}"></div>
-    <div class="form-row"><label>DNS 线路</label><input type="text" id="f-dns" value="${esc((t?.dns || []).join(','))}" placeholder="逗号分隔，如 223.5.5.5,8.8.8.8（留空=节点默认；dns 任务为参与对比的线路列表）">
-      <span class="sub" style="flex-basis:100%"><b>节点默认</b> = 各节点自己的系统 DNS（企业内网 DNS / 运营商分配，每台节点可能不同）；指定线路则强制走该 DNS。支持写法：<span class="mono">223.5.5.5</span>（auto: UDP→TCP→DoH）、<span class="mono">doh:&lt;URL&gt;</span>、<span class="mono">dot:&lt;ip&gt;[:853]</span>、<span class="mono">&lt;ip&gt;@&lt;port&gt;</span>、<span class="mono">udp:</span>/<span class="mono">tcp:</span> 前缀强制传输。注意：同一域名经不同线路可能解析出相同或不同 IP（CDN 多 A 记录轮询，属正常）。</span>
-      <span class="sub" id="f-node-dns" style="flex-basis:100%;color:var(--faint)">各节点系统 DNS 加载中…</span></div>
-    <div class="form-row" style="align-items:flex-start"><label>分配节点</label>
-      <div style="flex:1;border:1px solid var(--input-bd);border-radius:6px;padding:8px 10px">
-        <label class="fcheck" style="margin-bottom:6px"><input type="checkbox" id="f-node-all"> <span>全部分配节点（不勾选分组/节点时生效）</span></label>
-        <div style="font-size:11px;color:var(--muted);margin:6px 0 4px">按分组分配（组内节点自动执行）</div>
-        <div id="f-grp-list" style="margin-bottom:8px"></div>
-        <div style="font-size:11px;color:var(--muted);margin:8px 0 4px">单个节点</div>
-        <input type="text" id="f-node-search" placeholder="搜索节点…" style="width:100%;margin-bottom:6px">
-        <div id="f-node-list" style="max-height:150px;overflow:auto"></div>
+    <div class="form-row"><label>DNS 线路</label><input type="text" id="f-dns" value="${esc((t?.dns || []).join(','))}" placeholder="逗号分隔，如 223.5.5.5,8.8.8.8（留空=节点默认）"></div>
+    </div><!-- /m-cols -->
+    <details style="margin:-4px 0 10px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">DNS 线路写法与各节点系统 DNS</summary>
+      <div class="sub" style="margin:8px 0 0"><b>节点默认</b> = 各节点自己的系统 DNS（企业内网 DNS / 运营商分配，每台节点可能不同）；指定线路则强制走该 DNS。支持写法：<span class="mono">223.5.5.5</span>（auto: UDP→TCP→DoH）、<span class="mono">doh:&lt;URL&gt;</span>、<span class="mono">dot:&lt;ip&gt;[:853]</span>、<span class="mono">&lt;ip&gt;@&lt;port&gt;</span>、<span class="mono">udp:</span>/<span class="mono">tcp:</span> 前缀强制传输。注意：同一域名经不同线路可能解析出相同或不同 IP（CDN 多 A 记录轮询，属正常）。</div>
+      <div class="sub" id="f-node-dns" style="color:var(--faint)">各节点系统 DNS 加载中…</div>
+    </details>
+    <details style="margin-bottom:10px"><summary style="cursor:pointer;color:var(--muted);font-size:12px">分配节点（默认：全部节点）</summary>
+      <div style="border:1px solid var(--input-bd);border-radius:6px;padding:8px 10px;margin-top:8px">
+        <!-- UI全面验证报告 P2：三模式原是「1 个 checkbox + 两段裸文字」，用户无从判断三选一还是叠加。
+             改 radio 分段语义：全部分配=互斥总开关；分组/节点勾选自动切到自定义模式。 -->
+        <label class="fcheck" style="margin-bottom:6px"><input type="radio" name="f-node-mode" id="f-node-all" value="all"> <span><b>全部节点</b>（默认——下面不勾任何分组/节点时生效）</span></label>
+        <label class="fcheck" style="margin:6px 0 4px"><input type="radio" name="f-node-mode" id="f-node-custom" value="custom"> <span><b>自定义</b>（按分组与单个节点勾选，可混用）</span></label>
+        <div style="margin:8px 0 0 10px;padding:6px 0 0 10px;border-left:2px solid var(--bd)">
+          <div style="font-size:12px;color:var(--muted);margin:0 0 4px">按分组（组内节点自动执行）</div>
+          <div id="f-grp-list" style="margin-bottom:8px"></div>
+          <div style="font-size:12px;color:var(--muted);margin:8px 0 4px">单个节点</div>
+          <input type="text" id="f-node-search" placeholder="搜索节点…" aria-label="搜索节点" style="width:100%;margin-bottom:6px">
+          <div id="f-node-list" style="max-height:150px;overflow:auto"></div>
+        </div>
       </div>
-    </div>
+    </details>
     <div class="m-foot"><button class="btn ghost" onclick="closeModal()">取消</button>
     <button class="btn" id="f-submit">${edit ? '保存修改' : '创建任务'}</button></div>`;
   $('#modal-mask').classList.remove('hidden');
@@ -144,10 +154,11 @@ function taskModal(t, copy = false) {
   const assignedSet = new Set(sel.filter(x => !x.startsWith('g:')));
   const assignedGroups = new Set(sel.filter(x => x.startsWith('g:')));
   const noneAssigned = !sel.length;
+  // radio 语义：勾分组/节点 → 自动切「自定义」；「全部节点」被选 → 清空勾选
   const syncAll = () => {
     const any = $('#f-grp-list').querySelectorAll('.f-grp-cb:checked').length +
       $('#f-node-list').querySelectorAll('.f-node-cb:checked').length;
-    if (any) $('#f-node-all').checked = false;
+    if (any) { const c = $('#f-node-custom'); if (c) c.checked = true; }
   };
   Promise.all([api('/api/nodes'), api('/api/groups')]).then(([nodes, groups]) => {
     const box = $('#f-node-list'), gbox = $('#f-grp-list');
@@ -174,6 +185,7 @@ function taskModal(t, copy = false) {
     };
     render('');
     $('#f-node-all').checked = noneAssigned;
+    if (!noneAssigned) { const c = $('#f-node-custom'); if (c) c.checked = true; }
     $('#f-node-search').oninput = e => render(e.target.value);
     $('#f-node-all').onchange = e => {
       if (e.target.checked) document.querySelectorAll('.f-node-cb,.f-grp-cb').forEach(c => c.checked = false);

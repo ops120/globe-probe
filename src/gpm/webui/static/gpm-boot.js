@@ -91,6 +91,15 @@ async function show(page) {
   const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
   applyTheme(saved || (prefersLight ? 'light' : 'dark'), false);
 })();
+/* Esc 关弹窗（UI全面验证报告 P1-3：实测 Esc 后 {open:true} 不关闭）。
+ * closeModal 定义在 gpm-page-task.js（window.closeModal 已挂全局），此处惰性调用。 */
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const mask = document.getElementById('modal-mask');
+    if (mask && !mask.classList.contains('hidden') && window.closeModal) window.closeModal();
+  }
+});
+
 $('#theme-toggle').addEventListener('click', () =>
   applyTheme(document.body.classList.contains('light') ? 'dark' : 'light'));
 /* 🔑 管理 token 设置：自有模态（UI审查报告 P0-2：原生 prompt 无法主题化/会阻塞页面，
@@ -159,7 +168,10 @@ function fillTaskSelects() {
   if (ts1 && state.task) ts1.innerHTML = opts, ts1.value = state.task;
   if (ts2 && state.task) ts2.innerHTML = opts, ts2.value = state.task;
 }
-$$('.sidebar nav a').forEach(a => a.addEventListener('click', () => show(a.dataset.page)));
+$$('.sidebar nav a').forEach(a => a.addEventListener('click', e => {
+  e.preventDefault();               // 键盘可达（href=#/page）后阻止默认 hash 跳转，统一走 show()
+  show(a.dataset.page);
+}));
 /* 两个页面的任务下拉共用 state.task：任一页切换都要**同步另一个下拉并重画**。
  * 原实现里 #cmp-task 的 change 只调 renderCompare()、从不更新 state.task ——
  * 于是对比页选任务不生效，图表永远画的是任务详情页最后选中的那个任务（下拉形同装饰）。
@@ -277,15 +289,19 @@ window.applyDeepLinkHash = applyDeepLinkHash;
 (async () => {
   refreshAdminTokenBtn();        // 🔑 按钮初始视觉：未设置 token → dim（gpm-api.js 的 adminToken 已可用）
   await pollHealth();
-  // 深链（?task=xx&ts=xx）优先级最高；其次显式 hash 路由（#/alerts，用户主动输入的 URL
+  // 深链（?task=xx&ts=xx / ?sub=xx）优先级最高；其次显式 hash 路由（#/alerts，用户主动输入的 URL
   // 应压过 sessionStorage 的「回到上次页面」，否则新标签打开 hash 等于失效）；最后才恢复上次页面。
-  // 注意：show() 会 replaceState 写当前页 hash——恢复路径先清 hash，避免 applyDeepLink 读到它。
-  if (location.hash && /^#\/[a-z]+$/.test(location.hash)) {
+  // 修复（UI全面验证报告 P1）：原 hash 分支 replaceState 到 pathname 把 query 一并清掉，
+  // /?sub=notify#/alerts 静默回落值班总览——现在先试 query 深链（保留 hash 不动），
+  // 没命中再走 hash；hash 也没命中才恢复 sessionStorage（此时清 hash 防误读）。
+  const qDeep = new URLSearchParams(location.search);
+  if (qDeep.get('task') || qDeep.get('sub')) {
+    await applyDeepLink();                            // query 深链命中即用（内部自清 query）
+  } else if (location.hash && /^#\/[a-z]+$/.test(location.hash)) {
     const _h = location.hash;
-    history.replaceState(null, '', location.pathname);   // 先清，防 show() 写回旧值
-    if (await applyDeepLinkHash(_h)) { /* hash 命中，跳过 sessionStorage */ }
-    else { history.replaceState(null, '', _h); await restoreSavedView(); }
-  } else if (!(await applyDeepLink())) {
+    if (await applyDeepLinkHash(_h)) { /* hash 命中 */ }
+    else { await restoreSavedView(); }
+  } else {
     await restoreSavedView();
   }
   setInterval(() => { if (state.page === 'overview') renderOverview().catch(() => { }); }, 30000);

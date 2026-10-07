@@ -45,7 +45,7 @@ function corrClusterCard(c, i) {
     + (gaps ? '<div style="margin-top:6px"><span class="sub">CMDB 信息缺口（补齐可提升自动定位）：</span>' + gaps + '</div>' : '')
     + '</div>'
     + '<table class="tbl" style="margin:0"><thead><tr><th>来源</th><th>故障</th><th>状态</th>'
-    + '<th>开始</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    + '<th>开始</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
 }
 
 async function renderCorr() {

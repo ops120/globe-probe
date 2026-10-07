@@ -122,7 +122,7 @@ async function renderExternal() {
   });
   const todayKey = extDayKey({ received_at: Math.floor(Date.now() / 1000) });
   $('#ext-tbl').innerHTML = '<thead><tr><th>来源</th><th>标题</th><th>严重度</th><th>状态</th>'
-    + '<th>开始</th><th>最近收到</th><th>关联</th><th></th></tr></thead><tbody>'
+    + '<th>开始</th><th>最近收到</th><th>关联</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>'
     + (items.length ? groups.map(g => {
       const open = g.day === todayKey && g.rows.length <= EXT_DAY_MAX;   // 默认展开：仅今天且不超 2 屏
       const rel = extDayRel(g.day);
@@ -168,7 +168,7 @@ async function renderExternalPull() {
       + '<td><input type="text" class="ext-pu" placeholder="' + (x.supported ? '如 https://grafana.example.com' : '未实现')
         + '" value="' + esc(x.url || '') + '"' + (x.supported ? '' : ' disabled') + '></td>'
       + '<td><input type="text" class="ext-pt" placeholder="只写不读"' + (x.supported ? '' : ' disabled') + '></td>'
-      + '<td><input type="checkbox" class="ext-pe"' + (x.enabled ? ' checked' : '')
+      + '<td><input type="checkbox" class="ext-pe" aria-label="启用推送：来源 " + x.source' + (x.enabled ? ' checked' : '')
         + (x.supported ? '' : ' disabled') + '></td>'
       + '<td style="color:var(--muted)">' + (x.last_ok ? fmtAgo(x.last_ok) : '—') + '</td>'
       + '<td style="color:var(--fail-fg);max-width:200px;overflow:hidden;text-overflow:ellipsis" title="'
