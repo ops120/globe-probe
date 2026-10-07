@@ -12,10 +12,10 @@
   --bd:#26292e; --bd-2:#33373d; --bd-soft:#1f2226; --input-bg:#101215; --input-bd:#2a2e34;
   --fg:#c9cdd4; --fg-2:#d5d9de; --fg-strong:#e8eaed; --fg-strong2:#dfe3e8;
   --muted:#8a919c; --faint:#98a2b3; --nav:#aab1bb;
-  --accent:#4e8ce6; --accent-2:#7cabf0; --accent-3:#39c0ed; --accent-4:#a78bfa; --nav-active:#5b9cf0;
+  --accent:#4e8ce6; --accent-2:#8fb9f3; --accent-3:#39c0ed; --accent-4:#a78bfa; --nav-active:#7db4f3;
   --accent-bg:#1c2430; --accent-bd:#2c3a52; --btn:#243042; --btn-hover:#2b3a52;
-  --ok:#30a46c; --ok-fg:#4cc38a; --fail:#e5484d; --fail-fg:#f2666b;
-  --warn:#f5a524; --warn-fg:#f5b74e; --mono:#9ecb8f; --b-mtr-fg:#b9a3fb; --nodata:#555a64;
+  --ok:#30a46c; --ok-fg:#6fdd9f; --fail:#e5484d; --fail-fg:#ff8a8e;
+  --warn:#f5a524; --warn-fg:#ffc95e; --mono:#9ecb8f; --b-mtr-fg:#c7b4ff; --nodata:#6b7280;
   --row-hover:#1a1d22; --toast-bg:#23272c; --note-fg:#8fb4e8;
   /* 提示条：两个主题都用深底，所以前景/边框必须独立于主题的 fg 变量，否则白天主题会「深底深字」 */
   --toast-fg:#f2f5f9; --toast-bd:rgba(255,255,255,.16);
@@ -30,10 +30,10 @@ body.light{
   --bd:#dde2ea; --bd-2:#c6cdd8; --bd-soft:#eef1f5; --input-bg:#ffffff; --input-bd:#cfd6e0;
   --fg:#2c323b; --fg-2:#3a424d; --fg-strong:#12161c; --fg-strong2:#1d232b;
   --muted:#5f6874; --faint:#5f6874; --nav:#3f4753;
-  --accent:#2f6fd0; --accent-2:#2f6fd0; --accent-3:#0b83b0; --accent-4:#7c5cd6; --nav-active:#2f6fd0;
+  --accent:#2f6fd0; --accent-2:#2757a8; --accent-3:#0b83b0; --accent-4:#6347bd; --nav-active:#2757a8;
   --accent-bg:#e4edfb; --accent-bd:#bcd2f2; --btn:#e4edfb; --btn-hover:#d3e2fa;
-  --ok:#1f8a53; --ok-fg:#1f8a53; --fail:#d13b40; --fail-fg:#c9302f;
-  --warn:#b26a00; --warn-fg:#a86a00; --mono:#1f7a45; --b-mtr-fg:#6f4fd0; --nodata:#9aa3ae;
+  --ok:#1f8a53; --ok-fg:#156a3f; --fail:#d13b40; --fail-fg:#a52420;
+  --warn:#b26a00; --warn-fg:#7a5100; --mono:#1f7a45; --b-mtr-fg:#5a3fb0; --nodata:#6a7480;
   --row-hover:#f6f8fb; --toast-bg:#2c323b; --note-fg:#245a9e;
   --toast-fg:#ffffff; --toast-bd:rgba(255,255,255,.2);
   --toast-ok-bg:#1f6b48; --toast-err-bg:#8c3134; --toast-info-bg:#2c323b;
@@ -66,7 +66,17 @@ h1.crumb{margin:0;font-size:14px;font-weight:600;display:inline}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
 .dot.g{background:var(--ok);box-shadow:0 0 6px rgba(48,163,107,.8)}
 .dot.r{background:var(--fail)}
-main.content{flex:1;overflow-y:auto;padding:16px 20px}
+main.content{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column}
+/* 页面级撑满（UI复验 v8 遗留①）：消除底部大片留白。要点：
+ * .page 纵向 flex；其内 .panel 弹性伸展，表格容器 100% 高（表行随内容，余白留在表格底部属正常表格语义，
+ * 而不是页面下半屏空白）。带 .subpage 的页只对可见子页生效。hint 类尾行保持原高。 */
+.page:not(.hidden){flex:1;display:flex;flex-direction:column}
+.page>.panel{flex:1 1 auto;display:flex;flex-direction:column}
+.page>.subpage:not(.hidden){flex:1;display:flex;flex-direction:column}
+.page>.subpage:not(.hidden)>.panel{flex:1 1 auto;display:flex;flex-direction:column}
+.page>.panel>.tbl,.page>.subpage:not(.hidden)>.panel .tbl{flex:1}
+/* 尾部提示行不拉伸（保持原高） */
+.page>.hint,.page>.cards,.page>.subpage:not(.hidden)>.hint{flex:0 0 auto}
 .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
 .card{background:var(--panel);border:1px solid var(--bd);border-radius:8px;padding:13px 16px}
 .card .k{color:var(--muted);font-size:12px}
@@ -86,7 +96,7 @@ main.content{flex:1;overflow-y:auto;padding:16px 20px}
 table.tbl{width:100%;border-collapse:collapse}
 .tbl th{text-align:left;color:var(--muted);font-size:12px;padding:8px 10px;border-bottom:1px solid var(--bd);font-weight:500;white-space:nowrap}
 /* 操作列默认淡出、行 hover 显现（触屏/键盘可达性不受影响——opacity 变化不移除焦点） */
-.tbl td.ops{opacity:.25;transition:opacity .12s;white-space:nowrap}
+.tbl td.ops{opacity:.55;transition:opacity .12s;white-space:nowrap}
 .tbl tr:hover td.ops,.tbl tr:focus-within td.ops{opacity:1}
 .tbl td{padding:9px 10px;border-bottom:1px solid var(--bd-soft);white-space:nowrap;font-variant-numeric:tabular-nums}
 .tbl tr:last-child td{border-bottom:none}
@@ -97,10 +107,10 @@ table.tbl{width:100%;border-collapse:collapse}
 .b-mtr{background:rgba(167,139,250,.14);color:var(--b-mtr-fg)}
 .b-tcp{background:rgba(57,192,237,.14);color:var(--accent-3)}
 .b-dns{background:rgba(245,165,36,.16);color:var(--warn-fg)}
-.b-ok{background:rgba(48,163,107,.14);color:var(--ok-fg)}
-.b-fail{background:rgba(229,72,77,.16);color:var(--fail-fg)}
-.b-off{background:rgba(138,145,156,.15);color:var(--muted)}
-.b-warn{background:rgba(245,165,36,.14);color:var(--warn-fg)}
+.b-ok{background:rgba(48,163,107,.20);color:var(--ok-fg)}
+.b-fail{background:rgba(229,72,77,.22);color:var(--fail-fg)}
+.b-off{background:rgba(138,145,156,.22);color:var(--muted)}
+.b-warn{background:rgba(245,165,36,.20);color:var(--warn-fg)}
 .seg{display:inline-flex;background:var(--input-bg);border:1px solid var(--input-bd);border-radius:6px;overflow:hidden}
 .seg button{background:none;border:none;color:var(--muted);font-size:12px;padding:5px 12px;cursor:pointer;font-family:inherit}
 .seg button.active{background:var(--btn);color:var(--accent-2)}
@@ -193,7 +203,7 @@ body.light .code-block pre{color:var(--fg)}
 .tgl{background:var(--btn);color:var(--accent-2);border:1px solid var(--accent-bd);border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit}
 .tgl:hover{background:var(--btn-hover)}
 /* 🔑 按钮未设置管理 token 时的半透明降级态（refreshAdminTokenBtn 切换） */
-.tgl.dim{opacity:.55}
+.tgl.dim{opacity:1;color:var(--faint);border-style:dashed}
 .mtr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px}
 .mtr-card{border:1px solid var(--bd);border-radius:8px;padding:8px 10px;background:var(--panel)}
 .mtr-card h4{font-size:12px;color:var(--fg-strong2);margin-bottom:6px;font-weight:500;display:flex;justify-content:space-between;gap:8px}
@@ -755,22 +765,22 @@ textarea{background:var(--input-bg);border:1px solid var(--input-bd);color:var(-
 </div>
 <div class="modal-mask hidden" id="modal-mask"><div class="modal" id="modal-body"></div></div>
 <div id="toast" class="hidden"></div>
-<script src="/static/echarts.min.js?v=51"></script>
+<script src="/static/echarts.min.js?v=52"></script>
 <!-- app.js 拆分为语义化模块（纯移动，零构建）：按依赖顺序加载，后者可引用前者顶层声明 -->
-<script src="/static/gpm-utils.js?v=51"></script>
-<script src="/static/gpm-api.js?v=51"></script>
-<script src="/static/gpm-theme.js?v=51"></script>
-<script src="/static/gpm-charts.js?v=51"></script>
-<script src="/static/gpm-page-overview.js?v=51"></script>
-<script src="/static/gpm-page-task.js?v=51"></script>
-<script src="/static/gpm-page-compare.js?v=51"></script>
-<script src="/static/gpm-page-geo.js?v=51"></script>
-<script src="/static/gpm-page-external.js?v=51"></script>
-<script src="/static/gpm-page-corr.js?v=51"></script>
-<script src="/static/gpm-page-oncall.js?v=51"></script>
-<script src="/static/gpm-page-alerts.js?v=51"></script>
-<script src="/static/gpm-page-nodes.js?v=51"></script>
-<script src="/static/gpm-page-tasks.js?v=51"></script>
-<script src="/static/gpm-boot.js?v=51"></script>
+<script src="/static/gpm-utils.js?v=52"></script>
+<script src="/static/gpm-api.js?v=52"></script>
+<script src="/static/gpm-theme.js?v=52"></script>
+<script src="/static/gpm-charts.js?v=52"></script>
+<script src="/static/gpm-page-overview.js?v=52"></script>
+<script src="/static/gpm-page-task.js?v=52"></script>
+<script src="/static/gpm-page-compare.js?v=52"></script>
+<script src="/static/gpm-page-geo.js?v=52"></script>
+<script src="/static/gpm-page-external.js?v=52"></script>
+<script src="/static/gpm-page-corr.js?v=52"></script>
+<script src="/static/gpm-page-oncall.js?v=52"></script>
+<script src="/static/gpm-page-alerts.js?v=52"></script>
+<script src="/static/gpm-page-nodes.js?v=52"></script>
+<script src="/static/gpm-page-tasks.js?v=52"></script>
+<script src="/static/gpm-boot.js?v=52"></script>
 </body>
 </html>
