@@ -93,7 +93,10 @@ $('#theme-toggle').addEventListener('click', () =>
  * 而不是等第一次业务写操作才失败。验证失败保留已输入的 token（可能只是网络问题，用户可再改）。 */
 $('#admin-token-btn').addEventListener('click', async () => {
   const cur = adminToken();
-  const v = prompt('管理 token（X-Admin-Token）\n服务端配置了 admin_token 时用于写操作鉴权；留空并确定则清除已保存的 token。', cur);
+  // 安全：不把已保存 token 回显成默认值（原样回显 = 打开弹窗即泄露全文）。
+  // 只在提示语里给「已保存 ****后4位」的掩码状态；输入框留空，输入新值覆盖。
+  const masked = cur ? `（已保存 ****${cur.slice(-4)}，输入新值覆盖）` : '（当前未设置）';
+  const v = prompt('管理 token（X-Admin-Token）' + masked + '\n服务端配置了 admin_token 时用于写操作鉴权；输入新 token 覆盖；留空并确定则清除。', '');
   if (v === null) return;                       // 取消：不动
   const tok = v.trim();
   try {

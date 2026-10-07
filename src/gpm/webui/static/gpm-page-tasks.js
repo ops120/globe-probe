@@ -35,6 +35,7 @@ async function renderTasks() {
       <td>${t.enabled ? '<span class="badge b-ok">启用</span>' : '<span class="badge b-warn">停用</span>'}</td>
       <td style="color:${stale ? 'var(--warn-fg)' : 'var(--muted)'}" title="${t.last_data_ts ? fmtTS(t.last_data_ts) : '近 24h 无数据'}">${fmtAgo(t.last_data_ts)}</td>
       <td><button class="btn sm" onclick="event.stopPropagation();editTask('${t.id}')">编辑</button>
+      <button class="btn sm ghost" onclick="event.stopPropagation();copyTask('${t.id}')" title="以该任务的参数新建（名称加 -copy 后缀，提交后才真正创建）">复制</button>
       <button class="btn sm ${t.enabled ? 'ghost' : ''}" onclick="event.stopPropagation();toggleTask('${t.id}',${t.enabled ? 0 : 1})">${t.enabled ? '停用' : '启用'}</button>
       <button class="btn sm danger" onclick="event.stopPropagation();delTask('${t.id}')">删除</button></td></tr>`;
     }).join('') + '</tbody>';
@@ -42,6 +43,15 @@ async function renderTasks() {
 // 点任务行 → 跳转任务分析（openTaskAt 兜底任务不存在/清筛选；返回按钮回任务管理由 _prevPage 自动记录）
 window.goTask = id => { openTaskAt(id); };
 window.editTask = id => { const t = state.tasks.find(x => x.id === id); if (t) taskModal(t); };
+/* 复制任务：以既有参数预填「新建」弹窗（名称加 -copy，节点分配照搬），
+ * 用户改完提交才真正创建——比「建好再改」少一步，也避免误创建。 */
+window.copyTask = id => {
+  const t = state.tasks.find(x => x.id === id);
+  if (!t) return;
+  const clone = JSON.parse(JSON.stringify(t));
+  clone.name = (t.name || 'task').slice(0, 60) + '-copy';
+  taskModal(clone, true);   // 第二参 = 复制模式：按新建走（类型可选、无 id）
+};
 window.toggleTask = async (id, en) => {
   try { await api(`/api/tasks/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: en }) }); toast('已更新，节点将在 15s 内生效'); renderTasks(); }
   catch (e) { toast('失败: ' + e.message); }
@@ -63,13 +73,13 @@ const TARGET_HINT = {
   curl: 'curl 任务以 URL 列表为准（可留空）',
 };
 const TYPE_LABEL = { ping: 'ping', curl: 'curl', mtr: 'mtr', tcp: 'TCP 端口', dns: 'DNS 解析' };
-function taskModal(t) {
-  const edit = !!t;
+function taskModal(t, copy = false) {
+  const edit = !!t && !copy;   // copy=true：预填既有参数但按「新建」提交
   const p = (t && t.params) || {};
   const type = (t && t.type) || 'ping';
   $('#modal-body').innerHTML = `<span class="m-close" onclick="closeModal()">✕</span>
-    <div class="m-title">${edit ? '编辑任务' : '新建拨测任务'}</div>
-    <div class="m-sub">${edit ? '保存后 config_version 递增，节点 15s 内拉取生效；类型与参数创建后不可改' : '提交后 config_version 递增，节点 15s 内拉取生效'}</div>
+    <div class="m-title">${edit ? '编辑任务' : (copy ? '复制新建任务' : '新建拨测任务')}</div>
+    <div class="m-sub">${edit ? '保存后 config_version 递增，节点 15s 内拉取生效；类型与参数创建后不可改' : (copy ? '已预填源任务参数与节点分配，改完提交才会真正创建' : '提交后 config_version 递增，节点 15s 内拉取生效')}</div>
     <div class="form-row"><label>任务类型</label><select id="f-type" ${edit ? 'disabled' : ''}>
       ${Object.keys(TYPE_LABEL).map(k => `<option value="${k}" ${type === k ? 'selected' : ''}>${TYPE_LABEL[k]}</option>`).join('')}</select></div>
     <div class="form-row"><label>任务名</label><input type="text" id="f-name" value="${esc(t?.name || '')}" placeholder="如 ping-core-gateway"></div>
@@ -103,7 +113,8 @@ function taskModal(t) {
       <label class="fcheck"><input type="checkbox" id="f-show-asn" ${p.show_asn ? 'checked' : ''}> <span>逐跳解析 AS 号（-z）</span></label></div>
     <div class="form-row"><label>间隔(秒)</label><input type="text" id="f-interval" value="${t?.interval_seconds || (type === 'dns' ? 30 : 10)}"></div>
     <div class="form-row"><label>DNS 线路</label><input type="text" id="f-dns" value="${esc((t?.dns || []).join(','))}" placeholder="逗号分隔，如 223.5.5.5,8.8.8.8（留空=节点默认；dns 任务为参与对比的线路列表）">
-      <span class="sub" style="flex-basis:100%;margin-left:130px"><b>节点默认</b> = 各节点自己的系统 DNS（企业内网 DNS / 运营商分配，每台节点可能不同）；指定线路则强制走该 DNS。支持写法：<span class="mono">223.5.5.5</span>（auto: UDP→TCP→DoH）、<span class="mono">doh:&lt;URL&gt;</span>、<span class="mono">dot:&lt;ip&gt;[:853]</span>、<span class="mono">&lt;ip&gt;@&lt;port&gt;</span>、<span class="mono">udp:</span>/<span class="mono">tcp:</span> 前缀强制传输。注意：同一域名经不同线路可能解析出相同或不同 IP（CDN 多 A 记录轮询，属正常）。</span></div>
+      <span class="sub" style="flex-basis:100%;margin-left:130px"><b>节点默认</b> = 各节点自己的系统 DNS（企业内网 DNS / 运营商分配，每台节点可能不同）；指定线路则强制走该 DNS。支持写法：<span class="mono">223.5.5.5</span>（auto: UDP→TCP→DoH）、<span class="mono">doh:&lt;URL&gt;</span>、<span class="mono">dot:&lt;ip&gt;[:853]</span>、<span class="mono">&lt;ip&gt;@&lt;port&gt;</span>、<span class="mono">udp:</span>/<span class="mono">tcp:</span> 前缀强制传输。注意：同一域名经不同线路可能解析出相同或不同 IP（CDN 多 A 记录轮询，属正常）。</span>
+      <span class="sub" id="f-node-dns" style="flex-basis:100%;margin-left:130px;color:var(--faint)">各节点系统 DNS 加载中…</span></div>
     <div class="form-row" style="align-items:flex-start"><label>分配节点</label>
       <div style="flex:1;border:1px solid var(--input-bd);border-radius:6px;padding:8px 10px">
         <label class="fcheck" style="margin-bottom:6px"><input type="checkbox" id="f-node-all"> <span>全部分配节点（不勾选分组/节点时生效）</span></label>
@@ -140,6 +151,17 @@ function taskModal(t) {
   };
   Promise.all([api('/api/nodes'), api('/api/groups')]).then(([nodes, groups]) => {
     const box = $('#f-node-list'), gbox = $('#f-grp-list');
+    // 各节点系统 DNS（agent 注册时上报 system.dns）：让「节点默认」看得见摸得着。
+    // 老节点未上报（键缺失）时如实说明，不猜。
+    const dnsEl = $('#f-node-dns');
+    if (dnsEl) {
+      const withDns = nodes.filter(n => (n.system || {}).dns && n.system.dns.length);
+      dnsEl.innerHTML = withDns.length
+        ? '各节点系统 DNS：' + withDns.map(n =>
+            `<span class="mono">${esc(n.name)}</span> → <span class="mono">${n.system.dns.map(esc).join(', ')}</span>`).join('；')
+          + (withDns.length < nodes.length ? `（其余 ${nodes.length - withDns.length} 台未上报，重装 agent 后可见）` : '')
+        : '各节点尚未上报系统 DNS（agent ≥ 本版本注册时上报；重新注册节点后显示）';
+    }
     gbox.innerHTML = groups.length ? groups.map(g => {
       const on = assignedGroups.has('g:' + g.id) || assignedGroups.has('g:' + g.name);
       return `<label class="fcheck" style="margin:4px 0"><input type="checkbox" class="f-grp-cb" value="g:${esc(g.id)}" ${on ? 'checked' : ''}>

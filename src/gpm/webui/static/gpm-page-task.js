@@ -201,43 +201,55 @@ async function renderRttLoss(t, from, to, noLoss) {
     const lr = await api(`/api/query/series?task_id=${t.id}&node_id=${st.node_id}&dns=${encodeURIComponent(st.dns)}&url=${encodeURIComponent(st.url || '')}&metric=loss&granularity=${gran}&t_from=${from}&t_to=${to}`);
     lSeries.push({ name, type: 'line', showSymbol: false, data: lr.points.map(p => [p.ts * 1000, p.v == null ? 0 : +(p.v * 100).toFixed(1)]), lineStyle: { width: 1.2 } });
   }
+  // 多序列 tooltip：raw 粒度下各流时间戳天然错峰（10s 间隔 + jitter），
+  // axis 触发只收集「恰好同 x」的序列 → 悬停时往往只显示一条线路。
+  // 改为按鼠标时刻聚合：每条序列取离该时刻最近的一个点（±2 个间隔内），
+  // 同一轮悬停能看到全部节点×线路的 RTT 与解析 IP。
+  const nearestOf = (pts, tMs) => {
+    if (!pts || !pts.length) return null;
+    let best = null, bestD = Infinity;
+    for (const d of pts) {
+      const x = Array.isArray(d) ? d[0] : (d.value ? d.value[0] : null);
+      if (x == null) continue;
+      const dd = Math.abs(x - tMs);
+      if (dd < bestD) { bestD = dd; best = d; }
+    }
+    return (bestD <= 120000) ? best : null;   // 超过 2 分钟视为该窗口无此流数据
+  };
+  const rttTooltipFormatter = ps => {
+    if (!ps || !ps.length) return '';
+    const tMs = ps[0].value[0];
+    let html = fmtHM(tMs / 1000);
+    // echarts axis 触发的 params 只带「恰好同 x」的序列；错峰时要靠闭包里的 sSeries
+    // 补全其它线路（按名字找到该序列离鼠标最近的点，±2 分钟内算同轮）
+    const shown = new Set(ps.map(p => p.seriesName));
+    const rows = ps.map(p => ({ name: p.seriesName, marker: p.marker, d: p.data || null }));
+    for (const s of sSeries) {
+      if (!shown.has(s.name)) rows.push({ name: s.name, marker: '', d: null });
+    }
+    for (const r of rows) {
+      const near = (r.d && r.d.ip !== undefined) ? r.d
+        : nearestOf((sSeries.find(s => s.name === r.name) || {}).data, tMs);
+      if (!near) continue;
+      const v = near.value ? near.value[1] : (Array.isArray(near) ? near[1] : null);
+      const ip = near.ip ? ` · IP ${esc(near.ip)}` : '';
+      const mk = r.marker || '· ';
+      html += `<br>${mk}${esc(r.name)}：${v == null ? '失败/无数据' : v + ' ms'}${ip}`;
+    }
+    return html;
+  };
   chart('chart-rtt', {
     grid: { left: 56, right: 14, top: 30, bottom: 52 },
     legend: { data: legend, textStyle: { color: C('--chart-label'), fontSize: 11 }, itemWidth: 14 },
     tooltip: Object.assign({}, TIP, {
       trigger: 'axis',
-      formatter: ps => {
-        let html = fmtHM(ps[0].value[0] / 1000);
-        for (const p of ps) {
-          const ip = p.data && p.data.ip ? ` · IP ${esc(p.data.ip)}` : '';
-          const v = p.value[1] == null ? '失败/无数据' : p.value[1] + ' ms';
-          html += `<br>${p.marker}${esc(p.seriesName)}：${v}${ip}`;
-        }
-        return html;
-      },
+      formatter: rttTooltipFormatter,
     }),
     xAxis: Object.assign({}, AXC, { type: 'time', axisLabel: Object.assign({}, AXC.axisLabel, { formatter: v => state.range >= 604800 ? fmtMDHM(v / 1000) : fmtHM(v / 1000), hideOverlap: true }) }),
     yAxis: Object.assign({}, SPLIT, { type: 'value', name: 'ms', nameTextStyle: { color: C('--faint') }, axisLabel: AXC.axisLabel, scale: true }),
     dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 8, borderColor: C('--input-bd'), backgroundColor: C('--chart-bg'), fillerColor: 'rgba(78,140,230,.15)', handleStyle: { color: C('--accent') }, textStyle: { color: C('--faint') } }],
     series: sSeries,
   }, p => openDetail(t, Math.round(p.value[0] / 1000), p.seriesName));
-    // ===== 图表联动（RTT <-> 丢包）：hover/缩放/拖拽/框选 全部同步 =====
-    // 实现：echarts.connect() 联动 tooltip/dataZoom；十字准星用 mousemove 跨图同步
-    if (!noLoss && charts["chart-rtt"] && charts["chart-loss"]) {
-      connectCharts(["chart-rtt", "chart-loss"], "rtt-loss-group");
-      // 十字准星：hover RTT 图 -> 同步丢包图；反之亦然
-      ["chart-rtt", "chart-loss"].forEach(srcId => {
-        const src = charts[srcId];
-        const tgtIds = ["chart-rtt", "chart-loss"].filter(x => x !== srcId);
-        src.getZr().on("mousemove", (params) => {
-          const x = (params && params.offsetX != null) ? params.offsetX : 0;
-          syncCrosshair(srcId, tgtIds, x);
-        });
-        src.getZr().on("globalout", () => { clearCrosshair(tgtIds); });
-        src.on("globalout", () => { clearCrosshair(tgtIds); });
-      });
-    }
-    // ===== 图表联动结束 =====
 
   if (!noLoss) chart('chart-loss', {
     grid: { left: 50, right: 14, top: 30, bottom: 30 },
@@ -247,6 +259,24 @@ async function renderRttLoss(t, from, to, noLoss) {
     yAxis: Object.assign({}, SPLIT, { type: 'value', max: 100, name: '%', nameTextStyle: { color: C('--faint') }, axisLabel: AXC.axisLabel }),
     series: lSeries,
   });
+  // ===== 图表联动（RTT <-> 丢包）：必须在两张图都创建之后 connect =====
+  // 原实现把 connect 放在 chart-loss 创建之前——charts['chart-loss'] 当时还不存在，
+  // connectCharts 里 list.length < 2 直接 return，联动从未生效（实测 rtt.group === null）。
+  if (!noLoss && charts['chart-rtt'] && charts['chart-loss']) {
+    connectCharts(['chart-rtt', 'chart-loss'], 'rtt-loss-group');
+    // 十字准线：hover 一图同步另一图竖直虚线（echarts.connect 只同步 tooltip/dataZoom，
+    // 十字线是自己画的 graphic，鼠标事件绑定在 zrender 上）
+    ['chart-rtt', 'chart-loss'].forEach(srcId => {
+      const src = charts[srcId];
+      const tgtIds = ['chart-rtt', 'chart-loss'].filter(x => x !== srcId);
+      src.getZr().on('mousemove', params => {
+        const x = (params && params.offsetX != null) ? params.offsetX : 0;
+        syncCrosshair(srcId, tgtIds, x);
+      });
+      src.getZr().on('globalout', () => { clearCrosshair(tgtIds); });
+      src.on('globalout', () => { clearCrosshair(tgtIds); });
+    });
+  }
 }
 async function renderCodes(t, from, to) {
   const bucket = state.range <= 86400 ? 60 : 300;

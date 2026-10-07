@@ -81,7 +81,66 @@ def _system_info() -> dict:
                         break
     except Exception:  # noqa: BLE001 - 系统信息拿不到不影响探测
         pass
+    # 系统 DNS（「节点默认」线路的真实后端）：注册时上报，任务表单直接展示，
+    # 用户不用再猜「节点默认到底用的哪台 DNS」。采集失败不写入（如实缺省）。
+    dns_servers = _system_dns_servers()
+    if dns_servers:
+        info["dns"] = dns_servers
     return info
+
+
+def _system_dns_servers() -> list[str]:
+    """本机系统 DNS 服务器列表（各节点「节点默认」线路的实际后端）。"""
+    import socket
+    out: list[str] = []
+    try:
+        if IS_WINDOWS:
+            # 解析注册表 DhcpNameServer/NameServer：按网卡枚举，合并去重保序
+            import winreg  # noqa: PLC0415 - 仅 Windows 存在
+            root = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces")
+            try:
+                i = 0
+                while True:
+                    try:
+                        sub = winreg.OpenKey(root, winreg.EnumKey(root, i))
+                    except OSError:
+                        break
+                    for name in ("NameServer", "DhcpNameServer"):
+                        try:
+                            val = str(winreg.QueryValueEx(sub, name)[0]).strip()
+                            if val:
+                                # DhcpNameServer 是逗号/空格分隔
+                                out.extend(x for x in val.replace(",", " ").split() if x)
+                        except OSError:
+                            continue
+                    winreg.CloseKey(sub)
+                    i += 1
+            finally:
+                winreg.CloseKey(root)
+        else:
+            with open("/etc/resolv.conf", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0] in ("nameserver",):
+                        out.append(parts[1])
+    except Exception:  # noqa: BLE001 - 拿不到不影响探测
+        return []
+    # 去重保序 + 只保留合法 IP；127/8 环回多为本地代理 DNS（如 Clash），
+    # 一起展示会让「节点默认」显得诡异，过滤掉并在 UI 标注有本地代理时更清晰
+    seen, uniq = set(), []
+    for s in out:
+        try:
+            socket.inet_aton(s)
+        except OSError:
+            continue
+        if s.startswith("127."):
+            continue
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq[:5]
 
 
 def _local_ip(server_url: str) -> str:
