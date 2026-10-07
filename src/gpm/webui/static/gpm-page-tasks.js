@@ -102,7 +102,8 @@ function taskModal(t) {
     <div class="form-row" data-for="mtr"><label>AS 号</label>
       <label class="fcheck"><input type="checkbox" id="f-show-asn" ${p.show_asn ? 'checked' : ''}> <span>逐跳解析 AS 号（-z）</span></label></div>
     <div class="form-row"><label>间隔(秒)</label><input type="text" id="f-interval" value="${t?.interval_seconds || (type === 'dns' ? 30 : 10)}"></div>
-    <div class="form-row"><label>DNS 线路</label><input type="text" id="f-dns" value="${esc((t?.dns || []).join(','))}" placeholder="逗号分隔，如 223.5.5.5,8.8.8.8（留空=节点默认；dns 任务为参与对比的线路列表）"></div>
+    <div class="form-row"><label>DNS 线路</label><input type="text" id="f-dns" value="${esc((t?.dns || []).join(','))}" placeholder="逗号分隔，如 223.5.5.5,8.8.8.8（留空=节点默认；dns 任务为参与对比的线路列表）">
+      <span class="sub" style="flex-basis:100%;margin-left:130px"><b>节点默认</b> = 各节点自己的系统 DNS（企业内网 DNS / 运营商分配，每台节点可能不同）；指定线路则强制走该 DNS。支持写法：<span class="mono">223.5.5.5</span>（auto: UDP→TCP→DoH）、<span class="mono">doh:&lt;URL&gt;</span>、<span class="mono">dot:&lt;ip&gt;[:853]</span>、<span class="mono">&lt;ip&gt;@&lt;port&gt;</span>、<span class="mono">udp:</span>/<span class="mono">tcp:</span> 前缀强制传输。注意：同一域名经不同线路可能解析出相同或不同 IP（CDN 多 A 记录轮询，属正常）。</span></div>
     <div class="form-row" style="align-items:flex-start"><label>分配节点</label>
       <div style="flex:1;border:1px solid var(--input-bd);border-radius:6px;padding:8px 10px">
         <label class="fcheck" style="margin-bottom:6px"><input type="checkbox" id="f-node-all"> <span>全部分配节点（不勾选分组/节点时生效）</span></label>

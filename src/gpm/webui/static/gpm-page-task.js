@@ -24,7 +24,12 @@ async function renderTask() {
   // 切任务/筛选/时间范围时清掉「点选的历史轮次」，明细回到最新一轮
   state.mtrTs = 0; state.mtrSel = null;
   const secs = state.range;
-  $('#task-meta').textContent = `目标 ${t.target || (t.urls || []).join(', ')} · 间隔 ${t.interval_seconds}s · DNS ${t.dns && t.dns.length ? t.dns.join(',') : '节点默认'} · config v${t.config_version}`;
+  // 「节点默认」要点破含义（各节点自己系统 DNS，非服务端配置）；title 悬停出完整说明
+  const dnsLabel = t.dns && t.dns.length ? t.dns.join(',') : '节点默认';
+  const dnsTitle = t.dns && t.dns.length
+    ? '按任务指定线路解析（支持 doh:/dot:/ip@port 写法）；同一域名经不同线路可能解析出相同或不同 IP（CDN 多 A 记录轮询）'
+    : '节点默认 = 该节点自己的系统 DNS（企业内网 DNS / 运营商分配），各节点可能不同';
+  $('#task-meta').innerHTML = `目标 ${esc(t.target || (t.urls || []).join(', '))} · 间隔 ${t.interval_seconds}s · DNS <span title="${esc(dnsTitle)}" style="text-decoration:underline dotted;cursor:help">${esc(dnsLabel)}</span> · config v${t.config_version}`;
   $('#gran-note').textContent = secs <= 3600 ? '10s 原始明细 · 滚轮缩放' : secs <= 86400 ? '1m 聚合' : '5m 聚合';
   // tcp 与 ping 共用 RTT 面板（tcp 的 metrics.rtt_ms 会同时写 rtt_avg 进聚合）；丢包面板仅 ping 有
   const isPingLike = t.type === 'ping' || t.type === 'tcp';
